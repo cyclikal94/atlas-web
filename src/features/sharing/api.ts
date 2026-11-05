@@ -110,7 +110,11 @@ export type AccessCommand =
     };
 
 export interface SharingApi {
-  readPolicy(id: string): Promise<SharingResult<PolicyState>>;
+  /** `fresh`: asked after something may have changed the policy, so a read already on its way (asked before) is never its answer. */
+  readPolicy(
+    id: string,
+    options?: { fresh?: boolean },
+  ): Promise<SharingResult<PolicyState>>;
   readTemplates(
     householdId: string | null,
   ): Promise<SharingResult<TemplateScope>>;
@@ -341,7 +345,8 @@ export async function untilSent<T>(
  * answer), and a later read of the same policy for the same account answers `forbidden` without a request. Only resource ids are held,
  * per account, at most 500. Ownership of a resource never moves to another account, so the answer does not go stale. A read of the same
  * policy that is still on its way when the editor is remounted is SHARED rather than made again, so the order in which the remount and the
- * first answer's continuation run cannot add a request.
+ * first answer's continuation run cannot add a request. A FRESH read (review 23, R23.1) waits for the one on its way to settle and then
+ * reads again: that one may have been answered before the change it is asked after.
  */
 const refusedPolicies = new Set<string>();
 const policyReads = new Map<string, Promise<SharingResult<PolicyState>>>();
@@ -372,10 +377,19 @@ export function createSharingApi(
       ? { ok: false, kind: "offline" }
       : null;
   return {
-    readPolicy: async (id) => {
+    readPolicy: async (id, options) => {
       const key = `${account}:${id}`;
       if (refusedPolicies.has(key)) return { ok: false, kind: "forbidden" };
-      const shared = policyReads.get(key);
+      let shared = policyReads.get(key);
+      if (shared !== undefined && options?.fresh) {
+        const earlier = shared;
+        await earlier;
+        // Then as anyone asking now: a read asked since (after this one was) is shared, a refusal remembered, or a new read made.
+        shared = policyReads.get(key);
+        if (shared === earlier) shared = undefined;
+        if (shared === undefined && refusedPolicies.has(key))
+          return { ok: false, kind: "forbidden" };
+      }
       if (shared !== undefined) return shared;
       const off = offline();
       if (off !== null) return off;

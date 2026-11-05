@@ -22,6 +22,7 @@ import {
   withoutSharedConfirmation,
 } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
+import { assertRuntimeClosures } from "./runtime-lifetime-oracle";
 
 /**
  * E-O1 and the real-engine runs of the outbox (plan 8.5): the PRODUCTION outbox plans, facade and dispatcher, in a real engine,
@@ -2596,12 +2597,12 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
 
   /**
    * R43 race (revision 24): the condition under which the OLD order (page A boots, its outbox starts, page B boots at once) closes A's
-   * registry, stated on the page's own record and asserted in EVERY sequence whatever the schedule gives. A's tree LOOKS for the database
-   * (an open with `create: false`) at the first identity notification of A once A's own outbox has created it; the open completes in a few
-   * milliseconds and binds the tree. B's boot attempt (an identity read, a foreign lease while it is in flight) makes A evaluate and then,
-   * when B's answer arrives, set its hold and leave `displaying`: the tree is disposed. The registry is closed (and A's first save refused
-   * `identity_changed`) IF AND ONLY IF the look had COMPLETED before A's view left `displaying`: a look still pending at the disposal is
-   * abandoned and closes nothing (R35). With B's first identity read held 80 ms the schedule gives each outcome (about a third of the
+   * registry, stated on operation-specific lifetime observations and asserted in EVERY sequence whatever the schedule gives. A's tree
+   * LOOKS for the database with `create: false`. A native success is only one connection; the second connection, singleton transaction,
+   * opener result and runtime installation are distinct boundaries. B's boot can dispose that runtime while its open is still pending.
+   * The registry closes (and A's first save is refused `identity_changed`) iff an actually disposed tree runtime holds an installed live
+   * service at disposal. A pending open is abandoned without closing the registry (R35). The former native-success prediction stays in
+   * evidence, explicitly separated from this corrected predicate. With B's first identity read held 80 ms the schedule gives each outcome (about a third of the
    * sequences close the registry in Firefox), so the implication is exercised on whatever the engine does; the assertion does not depend on
    * how often. This is the OLD order, kept here only as the control that pins the condition: nothing else in this spec boots a page after an outbox started.
    *
@@ -2611,7 +2612,7 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
    * and its assertions are unchanged.
    */
   for (const sequence of [1, 2, 3, 4])
-    test(`R43 race (sequence ${sequence}): in the old order, with page B's first identity read held 80 ms, page A's registry is closed, and its first save refused, if and only if A's tree look had completed before A's view left \`displaying\``, async ({
+    test(`R43 race (sequence ${sequence}): in the old order, with page B's first identity read held 80 ms, page A's registry is closed, and its first save refused, if and only if a disposed tree runtime held an installed live service`, async ({
       context,
     }, info) => {
       test.setTimeout(90_000);
@@ -2661,6 +2662,13 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
       const completedBeforeTheFlip =
         flip !== null && done !== null && done <= flip;
       const closed = facts.closes.filter(([ms]) => ms >= since);
+      const treeDisposals = facts.runtimeDisposals.filter(
+        (disposal) =>
+          disposal.at >= since && /browser-env/.test(disposal.stack),
+      );
+      const disposedInstalledService = treeDisposals.some(
+        (disposal) => disposal.live,
+      );
       const injection = identityReadsOf(b);
       recordEvidence(info, `r43-race-${sequence}`, {
         namedInjection:
@@ -2673,7 +2681,10 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
           lookRequested: look === null ? null : look[0] - since,
           lookCompleted: done === null ? null : done - since,
         },
+        // Preserve the former prediction as diagnostic evidence; it is not the corrected oracle.
         completedBeforeTheFlip,
+        disposedInstalledService,
+        treeDisposals,
         closedAfterTheOutboxStarted: closed,
         lifetimeOfA: facts,
       });
@@ -2685,11 +2696,12 @@ test.describe("E-O6 (revision 13, R25 and R28): the reserve covers the whole wri
         },
         "page B verified identity itself and its first identity read was held",
       ).toEqual({ removed: true, first: 80 });
-      // The condition, in every sequence of every engine.
-      expect(
-        closed.length > 0,
-        "A's registry was closed after its outbox started if and only if A's tree look had completed before its view left `displaying`",
-      ).toBe(completedBeforeTheFlip);
+      // Labelled R43 correction: the production arrangement and deterministic controls use the same oracle.
+      assertRuntimeClosures({
+        disposals: treeDisposals,
+        closed: closed.length,
+        legacyNativeSuccess: completedBeforeTheFlip,
+      });
       for (const close of closed) {
         expect(close[2]).toBe("closed_for_deletion");
         expect(close[3]).toMatch(/browser-env/);

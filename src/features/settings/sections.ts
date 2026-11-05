@@ -1,5 +1,6 @@
 import type { AnyRoute } from "@tanstack/react-router";
 import { buildCalendarsSection } from "../calendars/section";
+import { buildArchivedSection } from "../people/archived/section";
 import { buildAppearanceSection } from "./appearance-section";
 import { SESSIONS_SECTION_ROUTE, settingsPath } from "./section-routes";
 import { buildSessionsDevicesSection } from "./sessions-devices/section";
@@ -20,7 +21,7 @@ export interface SettingsSection {
   route: string;
   /** Lower numbers first. */
   order: number;
-  owner: "WEB-07" | "WEB-08" | "WEB-13";
+  owner: "WEB-07" | "WEB-08" | "WEB-11" | "WEB-13";
   /** Builds this section's child route under the `/settings` route. */
   build(settings: AnyRoute): AnyRoute;
 }
@@ -71,6 +72,16 @@ const SECTIONS: readonly SettingsSection[] = [
     order: 70,
     owner: "WEB-08",
     build: buildYourDataSection,
+  },
+  {
+    // WEB-11a (D-11a-11): the Q21 archive ledger, drawn under Data & privacy; other slices add their kinds to it, not sections.
+    id: "archived",
+    label: "Archived items",
+    description: "People and fields you've archived.",
+    route: "archived",
+    order: 72,
+    owner: "WEB-11",
+    build: buildArchivedSection,
   },
 ];
 

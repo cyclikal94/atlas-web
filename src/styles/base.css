@@ -256,8 +256,11 @@
 }
 
 /* Neutral gate: used by the static boot gate in index.html, by NeutralGate and by the resume gate, so a cold load and the
-   React screen look identical. Opaque background, never the translucent scrim. */
-.neutral-gate {
+   React screen look identical. Opaque background, never the translucent scrim.
+   Only an OPEN gate is laid out: the resume gate (gate-dialog.ts) keeps its closed <dialog> in the document, and an unconditional
+   `display` here overrode the browser's hiding of a closed dialog, so the closed gate still covered the page and took every click
+   (WEB-11a review 28, R28.1). Each gate is a native <dialog>, open whenever it is shown. */
+.neutral-gate[open] {
   position: fixed;
   inset: 0;
   z-index: 100;

@@ -160,6 +160,13 @@ describe("the 200 bodies, strictly", () => {
 // biome-ignore lint/suspicious/noExplicitAny: the double stands in for openapi-fetch's generic GET/POST signatures
 type Init = any;
 
+/** Until the double has seen `count` requests (the fresh read asks after the earlier one's continuation runs). */
+async function waitForRequests(requests: unknown[], count: number) {
+  for (let turn = 0; turn < 50 && requests.length < count; turn += 1)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(requests).toHaveLength(count);
+}
+
 describe("createSharingApi over the stamped client", () => {
   function sessionDouble(
     answer: (method: string, path: string, init: Init) => Init,
@@ -302,6 +309,65 @@ describe("createSharingApi over the stamped client", () => {
     await createSharingApi(session, SAM, 1).readPolicy(SAM);
     await api.readPolicy(HOME);
     expect(requests).toHaveLength(4);
+    forgetRefusedPolicies();
+  });
+
+  test("WEB-11a R23.1: a FRESH policy read is never answered by the read already on its way; an ordinary one still shares it", async () => {
+    forgetRefusedPolicies();
+    const answers: Array<(version: number) => void> = [];
+    const { session, requests } = sessionDouble(
+      () =>
+        new Promise((resolve) =>
+          answers.push((version) =>
+            resolve({
+              data: {
+                version,
+                policy: { grants: [], exclude_accounts: [] },
+              },
+              response: response(200),
+            }),
+          ),
+        ),
+    );
+    const api = createSharingApi(session, ME, 1);
+    const before = api.readPolicy(SAM);
+    const fresh = api.readPolicy(SAM, { fresh: true });
+    await Promise.resolve();
+    // One request so far: the fresh read waits for the one asked before it.
+    expect(requests).toHaveLength(1);
+    answers[0]?.(6);
+    expect(await before).toMatchObject({ ok: true, value: { version: 6 } });
+    await waitForRequests(requests, 2);
+    // An ordinary read asked now shares the fresh one: no request of its own.
+    const joined = api.readPolicy(SAM);
+    for (let turn = 0; turn < 5; turn += 1)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toHaveLength(2);
+    answers[1]?.(7);
+    expect(await fresh).toMatchObject({ ok: true, value: { version: 7 } });
+    expect(await joined).toMatchObject({ ok: true, value: { version: 7 } });
+    expect(requests).toHaveLength(2);
+    // With nothing on its way, a fresh read is one request.
+    const alone = api.readPolicy(SAM, { fresh: true });
+    await waitForRequests(requests, 3);
+    answers[2]?.(8);
+    expect(await alone).toMatchObject({ ok: true, value: { version: 8 } });
+    expect(requests).toHaveLength(3);
+    forgetRefusedPolicies();
+  });
+
+  test("WEB-11a R23.1 control: a fresh read after a 403 is still answered from the page's refusal, with no request", async () => {
+    forgetRefusedPolicies();
+    const { session, requests } = sessionDouble(() => ({
+      error: atlas("forbidden"),
+      response: response(403),
+    }));
+    const api = createSharingApi(session, ME, 1);
+    const first = api.readPolicy(SAM);
+    const fresh = api.readPolicy(SAM, { fresh: true });
+    expect((await first).ok).toBe(false);
+    expect(await fresh).toEqual({ ok: false, kind: "forbidden" });
+    expect(requests).toHaveLength(1);
     forgetRefusedPolicies();
   });
 

@@ -1,4 +1,4 @@
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig, devices, type Project } from "@playwright/test";
 import { configureEvidenceRun, runtimeWitness } from "./tests/e2e/evidence-run";
 import { PARALLEL_UI } from "./tests/e2e/scheduling";
 import { neededTargets } from "./tests/e2e/targets";
@@ -45,7 +45,11 @@ if (probes && probes !== "held-operation")
 if (![1, 2, 3, 4].includes(requestedWorkers))
   throw new Error("ATLAS_E2E_WORKERS must be 1..4");
 
-const projects = browsers.flatMap(({ name, device }) => [
+// WEB-09c (R23-PAIR): the development-pair journey (tests/pair) is a project of its own, and EXISTS only when its runner
+// (scripts/integration/run-development-pair.mjs) asks for it with ATLAS_PAIR=1, so every other run keeps exactly its project set. Its
+// runner starts the backend, the tap, the proxy and its own fixture preview, and passes the URL in.
+const pair = process.env.ATLAS_PAIR === "1";
+const projects: Project[] = browsers.flatMap(({ name, device }) => [
   {
     name: `production-${name}`,
     testMatch: lane === "parallel-ui" ? /$a/ : /production\..*\.spec\.ts/,
@@ -67,10 +71,37 @@ const projects = browsers.flatMap(({ name, device }) => [
     testMatch: lane === "parallel-ui" ? /$a/ : /integration\..*\.spec\.ts/,
     use: { ...device, baseURL: INTEGRATION },
   },
+  ...(pair
+    ? [
+        {
+          name: `pair-${name}`,
+          testDir: "./tests/pair",
+          testMatch: /pair\.development\.spec\.ts/,
+          use: { ...device, baseURL: INTEGRATION },
+        },
+      ]
+    : []),
 ]);
+// WEB-11a revision 27 (review 28, R28.1): a REAL persisted back/forward-cache restore. Playwright's default Chromium (the headless shell)
+// passes `--disable-back-forward-cache`, and the default Firefox and WebKit runtimes were not restored either (review 28), so the
+// `bfcache.*.spec.ts` files run only here: the installed FULL Chromium build with that flag removed, over the fixture build. Their first
+// case proves the restore happens (a plain page comes back with `pageshow.persisted` and the same heap). No other project runs them.
+projects.push({
+  name: "fixture-bfcache-chromium",
+  testMatch:
+    probes || lane === "parallel-ui"
+      ? /$a/
+      : /(?:^|[/\\])bfcache\.[^/\\]+\.spec\.ts$/,
+  use: {
+    ...devices["Desktop Chrome"],
+    channel: "chromium",
+    launchOptions: { ignoreDefaultArgs: ["--disable-back-forward-cache"] },
+    baseURL: FIXTURE,
+  },
+});
 const needed = neededTargets(
   process.argv,
-  projects.map((project) => project.name),
+  projects.map((project) => project.name ?? ""),
 );
 
 const browserEvidenceRun = configureEvidenceRun();

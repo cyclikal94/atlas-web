@@ -19,6 +19,7 @@ import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
+import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
 
 export class PatchError extends Error {}
 
@@ -276,8 +277,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        /const missing = candidateRows\(draft, sync\.page_seq\)\.filter\(\s*\(row\) => !have\.has\(row\.resource_id\),\s*\);/,
-        "const missing = candidateRows(draft, sync.page_seq);",
+        /const missing = candidateRows\(\s*draft,\s*sync\.page_seq,\s*sync\.request_seq,\s*\)\.filter\(\s*\(row\) => !have\.has\(row\.resource_id\),?\s*\);/,
+        "const missing = candidateRows(draft, sync.page_seq, sync.request_seq);",
       ),
   },
   {
@@ -423,27 +424,12 @@ export const UNIT = [
       "tests/data/outbox-answers.test.ts",
       "tests/data/outbox-dispatcher.test.ts",
     ],
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n {4}observed: await observedNow\(reader, input\.incarnationId, input\.request\),\n {2}\}\),/,
-        `read: async (reader, input) => {
-    const fresh = {
-      existing: await reader.get("drafts", input.localId),
-      touched: await readTouched(
-        reader,
-        input.request.targets.map((target) => target.resourceId),
-        new Set([input.localId]),
-      ),
-    };
-    const slot = globalThis as unknown as { __stale?: Map<string, never> };
-    slot.__stale ??= fresh.touched.versions as Map<string, never>;
-    return {
-      existing: fresh.existing,
-      touched: { ...fresh.touched, versions: slot.__stale as never },
-      observed: await observedNow(reader, input.incarnationId, input.request),
-    };
-  },`,
+        "      touched: await readTouched(\n        reader,\n        input.request.targets.map((target) => target.resourceId),\n        new Set([input.localId]),\n      ),\n",
+        "      touched: await (async () => {\n        const fresh = await readTouched(\n          reader,\n          input.request.targets.map((target) => target.resourceId),\n          new Set([input.localId]),\n        );\n        const slot = globalThis as unknown as { __stale?: Map<string, never> };\n        slot.__stale ??= fresh.versions as Map<string, never>;\n        return { ...fresh, versions: slot.__stale as never };\n      })(),\n",
       ),
   },
 
@@ -474,11 +460,12 @@ export const UNIT = [
     title: "an empty page does not commit (a renewed cursor is lost)",
     file: "src/data/plans/commit-page.ts",
     tests: PAGE_TESTS,
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
     patch: (t) =>
       sub(
         t,
-        "    const { scan } = input;\n    let revision",
-        '    const { scan } = input;\n    if (scan.totalChanges === 0)\n      return { result: { kind: "committed", pageSeq: sync.page_seq, changes: 0, revision: null, hasMore: scan.hasMore, stats: { mentioned: 0, resolvedNoPublication: 0, heldReleased: 0, unavailable: 0 } } };\n    let revision',
+        '    const activation = continuity.kind === "finish" && continuity.staged;\n    let revision',
+        '    const activation = continuity.kind === "finish" && continuity.staged;\n    if (scan.totalChanges === 0)\n      return { result: { kind: "committed", pageSeq: sync.page_seq, changes: 0, revision: null, activated: 0, hasMore: scan.hasMore, stats: { mentioned: 0, resolvedNoPublication: 0, heldReleased: 0, unavailable: 0 } } };\n    let revision',
       ),
   },
 
@@ -715,10 +702,11 @@ export const UNIT = [
       "tests/data/form-recovery.test.ts",
       "tests/data/form-recovery-overlap.test.ts",
     ],
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
       sub(
         t,
-        'return result.kind === "superseded" ? "failed" : "saved";',
+        'return result.kind === "superseded" || result.kind === "changed"\n                ? "failed"\n                : "saved";',
         'return "saved";',
       ),
   },
@@ -2231,7 +2219,8 @@ export const UNIT = [
     file: "src/data/plans/outbox.ts",
     tests: ["tests/data/resource-list.test.ts"],
     patch: (t) =>
-      sub(t, "      rows.length === limit &&\n", "      false &&\n"),
+      // Re-anchored in WEB-11a revision 16: the list read moved into `readListPage` (two spaces less indentation), same mutation.
+      sub(t, "    rows.length === limit &&\n", "    false &&\n"),
   },
   {
     id: "MU-169",
@@ -2242,7 +2231,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      ...(input.after === undefined || input.after === null\n        ? {}\n        : { after: input.after }),\n",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "    ...(input.after === undefined || input.after === null\n      ? {}\n      : { after: input.after }),\n",
         "",
       ),
   },
@@ -2255,8 +2245,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      input.parentId === undefined ? {} : { match: { kind: input.kind } };",
-        "      {};",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "    input.parentId === undefined ? {} : { match: { kind: input.kind } };",
+        "    {};",
       ),
   },
   {
@@ -2268,8 +2259,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      ...match,\n      limit,\n    });",
-        "      ...match,\n      limit: limit + 1,\n    });",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "    ...match,\n    limit,\n  });",
+        "    ...match,\n    limit: limit + 1,\n  });",
       ),
   },
   {
@@ -2281,8 +2273,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "        rows.map((row) => row.id),\n        DATA_CONFIG.queueWorkingSet,",
-        "        rows.map((row) => row.id),\n        Number.MAX_SAFE_INTEGER,",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "      rows.map((row) => row.id),\n      DATA_CONFIG.queueWorkingSet,",
+        "      rows.map((row) => row.id),\n      Number.MAX_SAFE_INTEGER,",
       ),
   },
   {
@@ -2342,8 +2335,10 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "            ...(options.after === undefined ? {} : { after: options.after }),\n",
-        "",
+        // Re-anchored in WEB-11a revision 16: the list hooks share `useListRead`, which passes the caller's options whole; dropping the
+        // cursor from what is read is the same mutation.
+        "            ...options,\n          })",
+        "            ...options,\n            after: undefined,\n          })",
       ),
   },
   {
@@ -3297,11 +3292,12 @@ export const UNIT = [
       "R20 (revision 9): a page that applies does not clear what only the page counted (the next outage inherits the clock of an earlier one)",
     file: "src/data/engine/sync-engine.ts",
     tests: ["tests/data/engine-bookkeeping.test.ts"],
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
     patch: (t) =>
       sub(
         t,
-        "      unverified = 0;\n      unsaved = null;\n      behind = value.hasMore;",
-        "      unverified = 0;\n      behind = value.hasMore;",
+        "      unverified = 0;\n      unsaved = null;\n      // A staged segment",
+        "      unverified = 0;\n      // A staged segment",
       ),
   },
   {
@@ -6211,8 +6207,13 @@ export const UNIT = [
     tests: ["tests/data/quota-cache-admission.test.ts"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /a hold that ended once: the page is admitted again/,
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
     patch: (t) =>
-      sub(t, "          leaseLive: () => reservation.live(),\n", ""),
+      sub(
+        t,
+        "                now: deps.clock.iso(),\n                decode: deps.decode,\n                elapsed: deps.elapsed,\n                leaseLive: () => reservation.live(),\n",
+        "                now: deps.clock.iso(),\n                decode: deps.decode,\n                elapsed: deps.elapsed,\n",
+      ),
   },
   {
     id: "MU-482",
@@ -8971,8 +8972,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    const request = snapshotRequest(given);\n    validateRequest(request);",
-        "    const request = given;\n    validateRequest(request);",
+        '    const request = snapshotRequest(given);\n    validateRequestFor(request, "enqueue");',
+        '    const request = given;\n    validateRequestFor(request, "enqueue");',
       ),
   },
   {
@@ -9302,8 +9303,9 @@ export const UNIT = [
           "          attempt = deps.ids.uuid();\n          try {",
           "          const chosen = deps.ids.uuid();\n          try {",
         ),
-        "              id: attempt,\n              limit,\n              startedAt: deps.clock.now(),\n            });\n          } catch {",
-        "              id: chosen,\n              limit,\n              startedAt: deps.clock.now(),\n            });\n            attempt = chosen;\n          } catch {",
+        // WEB-09c: re-anchored (the marker now records the request's max_changes); the mutation is unchanged.
+        "              id: attempt,\n              limit,\n              startedAt: deps.clock.now(),\n              maxChanges: budget,\n            });\n          } catch {",
+        "              id: chosen,\n              limit,\n              startedAt: deps.clock.now(),\n              maxChanges: budget,\n            });\n            attempt = chosen;\n          } catch {",
       ),
   },
   {
@@ -9580,7 +9582,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         "      // in a step, and reaches the loop's stop.\n      throw error;",
       ),
   },
@@ -9596,7 +9598,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return invalidPage(id, service, captured, "invalid");\n      throw error;',
       ),
   },
@@ -9612,7 +9614,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return failRead(id, service, captured, "failure");\n      throw error;',
       ),
   },
@@ -9628,7 +9630,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error)) return { when: "after", ms: 1_000 };\n      throw error;',
       ),
   },
@@ -9695,7 +9697,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, {\n          kind: "commit_failed",\n          cause: "error",\n        });\n      throw error;',
       ),
   },
@@ -15501,7 +15503,13 @@ export const UNIT = [
     file: "src/data/plans/recovery-writers.ts",
     tests: ["tests/data/snapshot-plans.test.ts"],
     expect: /S-9 the final page and the swap/,
-    patch: (t) => sub(t, 'writes: [w.clear("cache")],', "writes: [],"),
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        'writes: [w.clear("cache"), w.clear("delta_staging")],',
+        'writes: [w.clear("delta_staging")],',
+      ),
   },
   {
     id: "MU-1205",
@@ -16156,8 +16164,9 @@ export const UNIT = [
     file: "src/features/sync/ItemDetailDialog.tsx",
     tests: ["tests/features/sync/recovery-screens.test.tsx"],
     expect: /U-7/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
     patch: (t) =>
-      sub(t, '    read === "loaded" ||\n', "    (true as boolean) ||\n"),
+      sub(t, '    (read === "loaded" ||\n', "    ((true as boolean) ||\n"),
   },
   // ---- WEB-09b review cycle 2 (R3, R7) ----------------------------------------------------------------------------------------------
   {
@@ -21832,9 +21841,5685 @@ export const UNIT = [
   ...UNIT_R24,
   ...UNIT_R25,
   ...UNIT_R26,
+  // WEB-11a (plan §7.4): unit mutants MU-2101..MU-2132, each caught by the named assertion of its own test.
+  {
+    id: "MU-2437",
+    title: "WEB-11a Q1: a put_field update omits expected_policy_version",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /carries the base as expected_version AND the policy version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_version: guardedBase(bases, input.fieldId, input.guard),\n          expected_policy_version: input.policyVersion,\n",
+        "          expected_version: guardedBase(bases, input.fieldId, input.guard),\n",
+      ),
+  },
+  {
+    id: "MU-2438",
+    title: "WEB-11a TASK-10a: a put_field create sends expected_policy_version",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /no expected_version, no expected_policy_version/,
+    patch: (t) =>
+      sub(
+        t,
+        '    value: input.value as unknown as JsonObject,\n    ...(input.audience === "only_you"',
+        '    value: input.value as unknown as JsonObject,\n    expected_policy_version: 1,\n    ...(input.audience === "only_you"',
+      ),
+  },
+  {
+    id: "MU-2439",
+    title: "WEB-11a TASK-10a: a put_field update sends initial_policy",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /carries the base as expected_version AND the policy version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_policy_version: input.policyVersion,\n          label: input.label,\n          value: input.value as unknown as JsonObject,\n        },\n      },\n      displayPatch: {\n        [input.fieldId]",
+        "          expected_policy_version: input.policyVersion,\n          label: input.label,\n          value: input.value as unknown as JsonObject,\n          initial_policy: ONLY_YOU_POLICY() as unknown as JsonObject,\n        },\n      },\n      displayPatch: {\n        [input.fieldId]",
+      ),
+  },
+  {
+    id: "MU-2440",
+    title:
+      "WEB-11a WEB-12a capture: a 'Use my defaults' field create does not capture the field template",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect:
+      /the field template captured|blocked for review, no defaults_revision/,
+    patch: (t) =>
+      sub(
+        t,
+        'const capture = captured(input.record, ["field"]);',
+        "const capture = captured(input.record, []);",
+      ),
+  },
+  {
+    id: "MU-2105",
+    title:
+      "WEB-11a: a private ('Only you') field create still captures the field template (and could be held for review)",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /and NO defaults capture/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (input.audience === "only_you") return { command: { command } };',
+        'if (input.audience === "only_you") return { command: { command }, ...captured(input.record, ["field"]).result };',
+      ),
+  },
+  {
+    id: "MU-2441",
+    title:
+      "WEB-11a D-11a-7: a shared ('Home · can view') field create is queued instead of being sent online",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /Home · can view is sent online/,
+    patch: (t) =>
+      sub(
+        t,
+        'if (choiceNew === "home") {',
+        'if ((choiceNew as string) === "never") {',
+      ),
+  },
+  {
+    id: "MU-2442",
+    title:
+      "WEB-11a: the explicit private policy excludes an account (it is not exactly {grants: [], exclude_accounts: []})",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/commands.test.ts",
+      "tests/features/people/audience.test.ts",
+    ],
+    expect: /explicit empty policy|Only you grants nobody/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const ONLY_YOU_POLICY = (): Policy => ({\n  grants: [],\n  exclude_accounts: [],\n});",
+        'export const ONLY_YOU_POLICY = (): Policy => ({\n  grants: [],\n  exclude_accounts: ["00000000-0000-4000-8000-000000000000"],\n});',
+      ),
+  },
+  {
+    id: "MU-2443",
+    title:
+      "WEB-11a SHARE-10: the new-person batch puts create_field before create_person",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/commands.test.ts"],
+    expect: /person FIRST/,
+    patch: (t) =>
+      sub(
+        t,
+        '    commands.push({\n      kind: "create_field",',
+        '    commands.unshift({\n      kind: "create_field",',
+      ),
+  },
+  {
+    id: "MU-2444",
+    title:
+      "WEB-11a PRODUCT-DECISIONS item 2: the new person's note is sent while hidden",
+    file: "src/features/people/model/person-form.ts",
+    tests: ["tests/features/people/person-form.test.ts"],
+    expect: /a hidden note keeps its text and is not sent/,
+    patch: (t) =>
+      sub(
+        t,
+        'const sendNote = state.noteOpen && state.note.trim() !== "";',
+        'const sendNote = state.note.trim() !== "";',
+      ),
+  },
+  {
+    id: "MU-2445",
+    title:
+      "WEB-11a PRODUCT-DECISIONS item 2: a type switch discards the other slots",
+    file: "src/features/people/model/field-form.ts",
+    tests: ["tests/features/people/field-form.test.ts"],
+    expect: /switching the type away and back restores/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { ...state, kind: action.value, revision };",
+        "      return {\n        ...state,\n        kind: action.value,\n        slots: { ...emptySlots(), [action.value]: state.slots[action.value] },\n        revision,\n      };",
+      ),
+  },
+  {
+    id: "MU-2446",
+    title:
+      "WEB-11a PRODUCT-DECISIONS item 2: a save sends a hidden type's value (always the text slot)",
+    file: "src/features/people/model/field-form.ts",
+    tests: ["tests/features/people/field-form.test.ts"],
+    expect: /only the ACTIVE type's value/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const value = activeValue(state.kind, state.slots);",
+        '  const value = activeValue("text", state.slots);',
+      ),
+  },
+  {
+    id: "MU-2447",
+    title: "WEB-11a §4.8: a refused save of a new field clears the form",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /a refused save keeps everything typed/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 7 (the save's `saving` state moved into page memory; the defect is unchanged).
+        "      const outcome = await save((outbox) => outbox.enqueue(request));\n      if (!outcome.ok) return fail(outcome.message);\n      return succeeded(\n        reviewing",
+        '      const outcome = await save((outbox) => outbox.enqueue(request));\n      if (!outcome.ok) {\n        dispatch({ type: "replace", state: newFieldForm() });\n        return fail(outcome.message);\n      }\n      return succeeded(\n        reviewing',
+      ),
+  },
+  {
+    id: "MU-2448",
+    title: "WEB-11a TASK-10: TaskDecimal accepts a negative amount",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /TaskDecimal/,
+    patch: (t) => sub(t, "  /^(?:(?:0|[1-9]", "  /^-?(?:(?:0|[1-9]"),
+  },
+  {
+    id: "MU-2449",
+    title: "WEB-11a TASK-10: the date check rejects 29 February without a year",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /null-2-29 → true/,
+    patch: (t) =>
+      sub(t, "  const y = year ?? 2000;", "  const y = year ?? 2001;"),
+  },
+  {
+    id: "MU-2450",
+    title: "WEB-11a TASK-10: the link check accepts credentials",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /user(:secret)?@example\.org → false/,
+    patch: (t) =>
+      sub(
+        t,
+        '    url.username === "" &&\n    url.password === ""\n',
+        "    true\n",
+      ),
+  },
+  {
+    id: "MU-2451",
+    title:
+      "WEB-11a TASK-10: choices accept a selected value outside the options",
+    file: "src/features/people/model/values.ts",
+    tests: ["tests/features/people/values.test.ts"],
+    expect: /choices: 1 to 100 unique options/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (value.selected.some((s) => !value.options.includes(s)))\n        return "selected_unknown";\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2452",
+    title:
+      "WEB-11a: checklist item ids are regenerated when an existing field is edited",
+    file: "src/features/people/model/field-form.ts",
+    tests: ["tests/features/people/field-form.test.ts"],
+    expect: /keeps checklist ids/,
+    patch: (t) =>
+      sub(
+        t,
+        "        items: value.items.map((item) => ({\n          id: item.id,",
+        "        items: value.items.map((item) => ({\n          id: keyOf(),",
+      ),
+  },
+  {
+    id: "MU-2453",
+    title: "WEB-11a D-11a-5: an unlinked person is renamed with rename_profile",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /known unlinked: the content edit/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return canEdit\n        ? { kind: "edit", maxLength: 300 }',
+        '      return canEdit\n        ? { kind: "rename_profile", maxLength: 200 }',
+      ),
+  },
+  {
+    id: "MU-2454",
+    title: "WEB-11a D-11a-5: the linked self is renamed with the content edit",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /known self: rename_profile/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "self":\n      return { kind: "rename_profile", maxLength: 200 };',
+        '    case "self":\n      return { kind: "edit", maxLength: 300 };',
+      ),
+  },
+  {
+    id: "MU-2455",
+    title: "WEB-11a D-11a-2: an unknown linkage is treated as unlinked",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /UNKNOWN is never treated as unlinked/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (!linkage.known) return { kind: "disabled", reason: "unknown" };',
+        '  if (!linkage.known)\n    return canEdit ? { kind: "edit", maxLength: 300 } : { kind: "disabled", reason: "cannot_edit" };',
+      ),
+  },
+  {
+    id: "MU-2456",
+    title:
+      "WEB-11a D-11a-2: the rename of another account's profile follows can_edit (linkage inferred from it)",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /known other: disabled/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "other":\n      return { kind: "disabled", reason: "other_owns" };\n  }\n}\n\n/** How "Unlink account"',
+        '    case "other":\n      return canEdit ? { kind: "edit", maxLength: 300 } : { kind: "disabled", reason: "other_owns" };\n  }\n}\n\n/** How "Unlink account"',
+      ),
+  },
+  {
+    id: "MU-2457",
+    title: "WEB-11a D-11a-6: Unlink is enabled for another account's profile",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage.test.ts"],
+    expect: /enabled for the linked self; disabled for another account/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "other":\n      return { kind: "disabled", reason: "other_owns" };\n    case "unlinked":\n      return { kind: "absent" };',
+        '    case "other":\n      return { kind: "enabled" };\n    case "unlinked":\n      return { kind: "absent" };',
+      ),
+  },
+  {
+    id: "MU-2458",
+    title:
+      "WEB-11a PPL-3: the duplicates reducer declares completion on an empty page that has a next_after",
+    file: "src/features/people/model/duplicates.ts",
+    tests: ["tests/features/people/duplicates.test.ts"],
+    expect: /an empty page with next_after is 'none so far'/,
+    patch: (t) =>
+      sub(
+        t,
+        "    exhausted: page.next_after === null,",
+        "    exhausted: page.next_after === null || page.items.length === 0,",
+      ),
+  },
+  {
+    id: "MU-2459",
+    title:
+      "WEB-11a A20: the page memory (dismissed pairs, attempts, held changes) is kept across identities",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/memory.test.ts"],
+    expect: /another identity .* starts empty/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (current === null || current.identity !== identity) {",
+        "  if (current === null) {",
+      ),
+  },
+  {
+    id: "MU-2460",
+    title:
+      "WEB-11a D-11a-12: a held change sends its content before the policy change is confirmed",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /the policy goes first, then the content/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!samePolicy(copy.change.from.policy, copy.change.to)) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2461",
+    title:
+      "WEB-11a D-11a-12: a held change's content carries the pre-change policy version",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /the policy goes first, then the content/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "            from: { version: result.policyVersion, policy: held.to },\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2462",
+    title: "WEB-11a D-11a-8: applyPolicyChange skips the version guard",
+    file: "src/features/sharing/apply-policy-change.ts",
+    tests: ["tests/features/sharing/apply-policy-change.test.ts"],
+    expect: /the version guard/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (read.value.version !== input.from.version) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2463",
+    title:
+      "WEB-11a D-11a-8: applyPolicyChange reports ok without the confirming read",
+    file: "src/features/sharing/apply-policy-change.ts",
+    tests: ["tests/features/sharing/apply-policy-change.test.ts"],
+    expect: /never 'ok' without the confirming read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const confirm = await untilSent(",
+        "  if (sent.ok) return { result: { ok: true, policyVersion: read.value.version + 1 }, attempt: null };\n  const confirm = await untilSent(",
+      ),
+  },
+  {
+    id: "MU-2464",
+    title:
+      "WEB-11a §4.7: an uncertain online attempt is resent under a new key",
+    file: "src/features/people/model/attempt.ts",
+    tests: [
+      "tests/features/people/attempt.test.ts",
+      "tests/features/people/person-detail.test.tsx",
+    ],
+    expect: /SAME key/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "uncertain":\n      return sent;',
+        '    case "uncertain":\n      return null;',
+      ),
+  },
+  {
+    id: "MU-2465",
+    title:
+      "WEB-11a PPL-5: the archived-items ledger lists a field whose person this device does not hold",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): a field and its person are ONE read (`readChildPage`), which answers a row only under a parent it holds; the
+    // component-level guard (`if (person === null) return null`) is gone with the separate parent read. Same defect, at its new place.
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /a field whose person the cache does not hold is not answered/,
+    patch: (t) =>
+      sub(
+        t,
+        '        rows: page.rows.filter((row) => (row.base.parent_id ?? "") in parents),\n',
+        "        rows: page.rows,\n",
+      ),
+  },
+  {
+    id: "MU-2466",
+    title:
+      "WEB-11a §3.1 item 1: commandKindOf ignores a wrapped command's kind",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/command-kind.test.ts",
+      "tests/features/people/commands.test.ts",
+    ],
+    expect: /a wrapped command's kind is the kind|header kind is put_field/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const kind = (wrapped as Record<string, unknown>).kind;\n    if (typeof kind === "string") return kind;\n',
+        "    void wrapped;\n",
+      ),
+  },
+  {
+    id: "MU-2467",
+    title:
+      "WEB-11a §3.1 item 2: readOutstandingCreates lists an acknowledged draft whose effect is gone",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /an acknowledged draft is listed only while its own effect/,
+    patch: (t) =>
+      sub(t, "            if (effect === undefined) continue;\n", ""),
+  },
+  // WEB-11a revision 1 (the review of 13 October 2026): each correction's mutant, caught by the named assertion of its own test. Where a
+  // correction has two protective layers in one file, the mutant removes both (the original defect), so it is never equivalent.
+  {
+    id: "MU-2468",
+    title:
+      "WEB-11a R1 finding 1: the base guard never refuses (an update is silently re-based on a base the edit did not begin on)",
+    file: "src/features/people/model/commands.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /the outbox base moved, so nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (guard !== undefined && !isEstimate(base) && base !== guard.expectedBase) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2469",
+    title:
+      "WEB-11a R1 finding 1: the editor's save is not refused when the field's policy version moved since the edit began (both checks)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a policy published while the edit is open: Save writes NOTHING/,
+    patch: (t) =>
+      sub(
+        t,
+        "      !stillBound(bound, existing) ||\n      policyMovedFrom(\n        bound.policyVersion,\n        env.memory.policies.get(existing.id),\n        env.memory.summaryFloors.get(existing.id),\n      )\n",
+        "      false\n",
+      ),
+  },
+  {
+    id: "MU-2470",
+    title:
+      "WEB-11a R1 finding 1 (the reported defect): the save re-binds silently to the live row (its policy version and base)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /a policy published while the edit is open: Save writes NOTHING|content published while the edit is open: nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const bound = snapshot;",
+        "    const bound =\n      snapshot === null\n        ? snapshot\n        : snapshotOf(existing, drafts, field?.latest?.localId ?? null);",
+      ),
+  },
+  {
+    id: "MU-2471",
+    title:
+      "WEB-11a R1 finding 1: a rename is sent on the version the person shows now, not the one its form opened on",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a linked rename \(rename_profile, online-only\) sends nothing/,
+    patch: (t) =>
+      sub(
+        sub(t, "    if (!stillBound(snapshot, person)) return stale();\n", ""),
+        "      const version = snapshot.version;",
+        "      const version = shown.row.version;",
+      ),
+  },
+  {
+    id: "MU-2472",
+    title:
+      "WEB-11a R1 finding 1: a held change's content step is not re-checked after its policy step (neither the field nor the base)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /a field changed WHILE the policy step ran|whose field changed while its policy read was on its way/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const after = bound();\n  if (after !== null) return fail(after);\n",
+          "",
+        ),
+        "    sameKind: held.sameKind,\n    guard,\n",
+        "    sameKind: held.sameKind,\n",
+      ),
+  },
+  {
+    id: "MU-2473",
+    title:
+      "WEB-11a R1 finding 2: a held change's run ignores the person's Discard",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /discarded while its policy read was on its way|Discard while its policy read is on its way/,
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  const owns = () => !run.cancelled && present();",
+        "  const owns = () => present();",
+      ),
+  },
+  {
+    id: "MU-2474",
+    title:
+      "WEB-11a R1 finding 2: the content step's transaction does not check that the hold is still owned",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect:
+      /discarded at the last moment, inside the content step's transaction/,
+    patch: (t) => sub(t, "        if (!owns()) {", "        if (false) {"),
+  },
+  {
+    id: "MU-2475",
+    title:
+      "WEB-11a R1 finding 3 (the reported defect): 'Save mine' sends the current value instead of the conflicted save's content",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: [
+      "tests/features/people/review-findings.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /supersedes with THAT content on the current version|supersedes the CONFLICTED save's content/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const content = draftFieldContent(draft);",
+        "    const mine = draftFieldContent(draft);\n    const content =\n      mine === null || parsed === null || existing === null\n        ? mine\n        : { label: existing.label, value: parsed, policyVersion: mine.policyVersion };",
+      ),
+  },
+  {
+    id: "MU-2476",
+    title:
+      "WEB-11a R1 finding 3: 'Save mine' of a save made under another audience is offered without the current audience (both gates)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a conflicted save under an older audience/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (content.policyVersion !== livePolicyVersion && nowAudience === null)\n      return fail(copy.CONFLICT_NEEDS_AUDIENCE);\n",
+          "",
+        ),
+        /: conflictContent\.policyVersion !== livePolicyVersion &&\n\s+nowAudience === null\n\s+\? copy\.CONFLICT_NEEDS_AUDIENCE\n\s+: null/,
+        ": null",
+      ),
+  },
+  {
+    id: "MU-2477",
+    title:
+      "WEB-11a R1 finding 4: a person's screen is not keyed by its person (an open rename, its typed name and the fields' step survive navigation)",
+    file: "src/features/people/screens.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /a rename typed on one person is never shown or saved on another|the step of one person's fields is not carried to another person/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <PersonDetail\n      key={personId}\n",
+        "    <PersonDetail\n",
+      ),
+  },
+  {
+    id: "MU-2478",
+    title:
+      "WEB-11a R1 finding 4: the duplicates view is not keyed by its person (pages and the first-page flag survive navigation)",
+    file: "src/features/people/screens.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /the duplicates view of another person asks for THAT person's first page/,
+    patch: (t) =>
+      sub(
+        t,
+        // WEB-11b re-anchor (the view is now inside a fragment beside its "Compare & merge" Outlet: two more spaces); same patch.
+        "      <DuplicatesView\n        key={personId}\n",
+        "      <DuplicatesView\n",
+      ),
+  },
+  {
+    id: "MU-2479",
+    title:
+      "WEB-11a R1 finding 5: a step with a later page still loading is reported as settled",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/scan.test.ts"],
+    expect:
+      /a later page still loading \(or a stale report\) is NOT a settled step/,
+    patch: (t) =>
+      sub(
+        t,
+        "      settled: false,\n      next: null,\n      end: false,\n      depth: index + 1,",
+        "      settled: true,\n      next: null,\n      end: false,\n      depth: index + 1,",
+      ),
+  },
+  {
+    id: "MU-2480",
+    title:
+      "WEB-11a R1 finding 5: a chain whose later page is not ready is reported as a complete inventory",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/scan.test.ts"],
+    expect: /leaves READABLE rows but no complete inventory/,
+    patch: (t) =>
+      sub(
+        t,
+        '        status: index === 0 || status === "failed" ? status : "ready",\n        rows,\n        capped: false,\n        complete: false,',
+        '        status: index === 0 || status === "failed" ? status : "ready",\n        rows,\n        capped: false,\n        complete: index > 0,',
+      ),
+  },
+  {
+    id: "MU-2481",
+    title:
+      "WEB-11a R1 finding 5: the editor binds an edit before this device's whole chain of saves has been read",
+    // Re-anchored in WEB-11a revision 9 (review 9, finding 2): the editor's read decision moved to `field/prerequisites.ts`; the same intent.
+    file: "src/features/people/field/prerequisites.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /the editor waits for this device's WHOLE chain of saves/,
+    patch: (t) =>
+      sub(
+        t,
+        "      !outstanding.complete &&\n      !outstanding.capped)",
+        "      false)",
+      ),
+  },
+  {
+    id: "MU-2482",
+    title:
+      "WEB-11a R1 finding 6: 'Hold as draft' keeps the change nowhere durable (acknowledged without a write)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /'Hold as draft' writes the change, with the versions it began on, to the account's database/,
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "        kept = await holdChange(env, {",
+        '        kept = {\n          kind: "held",\n          copy: { change: { holdId: "never-written" } },\n          complete: true,\n        } as unknown as HoldOutcome;\n        void ({',
+      ),
+  },
+  {
+    id: "MU-2483",
+    title:
+      "WEB-11a R1 finding 6: the form copies of a family include terminal (discarded or finished) copies",
+    file: "src/data/plans/form-copies.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect: /never a terminal \(discarded or finished\) one/,
+    patch: (t) => sub(t, "        if (row.terminal) continue;\n", ""),
+  },
+  {
+    id: "MU-2484",
+    title:
+      "WEB-11a R1 finding 6: a held copy is decoded as a change of a field its context does not name",
+    file: "src/features/people/field/held-store.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect:
+      /a copy that is not a held change this page can read is never decoded as one/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (row.form_context !== heldContextOf(raw.personId, raw.fieldId))",
+        "  if (false)",
+      ),
+  },
+  {
+    id: "MU-2485",
+    title:
+      "WEB-11a R1 finding 6: a held change is run without the cross-page lock (two pages may run one hold)",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /run by one page at a time: while another page holds it, this page sends nothing/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "        result = await env.exclusive(lockOf(env, shown.change.fieldId), () =>",
+        "        result = await ((_name: string, go: () => Promise<HeldResult>) => go())(lockOf(env, shown.change.fieldId), () =>",
+      ),
+  },
+  {
+    id: "MU-2486",
+    title:
+      "WEB-11a R1 finding 7: a step that kept `limit` rows continues after its whole page (the rest of the page is skipped)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the step's cursor is the kept row's `idOf(row)` (the walk is generic over a child bundle); same mutation.
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/scan.test.ts"],
+    expect: /ends at the last row it kept: the next step begins right after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "          next: idOf(row),",
+        "          next: entry.report.next ?? idOf(row),",
+      ),
+  },
+  {
+    id: "MU-2156",
+    title:
+      "WEB-11a R1 finding 7: the people list offers no continuation past its step (a cap, not pagination)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /search continues with 'Keep searching'|'Next people' moves a step at a time/,
+    patch: (t) =>
+      sub(
+        t,
+        "            step.settled && step.next !== null\n              ? () => onStarts([...starts, step.next])\n              : null",
+        "            null",
+      ),
+  },
+  {
+    id: "MU-2487",
+    title:
+      "WEB-11a R1 finding 7: a person's fields offer no continuation past their step",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the step's view moved into `FieldStep` (re-indented); same mutation.
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /a person's fields beyond one step are reached with 'Next fields'/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {step.settled && step.next !== null ? (\n            <Button\n              data-people-action="next-fields"',
+        '          {false ? (\n            <Button\n              data-people-action="next-fields"',
+      ),
+  },
 
+  // WEB-11a finding 8 (API 0.29's viewer-safe summaries; the hold lifted on 15 October 2026): strict parsing, wording, the read rules,
+  // the freshness signals and the views.
+  {
+    id: "MU-2488",
+    title: "WEB-11a F8: a partial audience may carry the owner's counts",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "  } else if (direct_grant_count !== null || excluded_count !== null)\n    return null;",
+        "  } else if (false) return null;",
+      ),
+  },
+  {
+    id: "MU-2489",
+    title:
+      "WEB-11a F8: a complete person audience is accepted for a reader who is not its owner",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if ((audience.disclosure === "complete") !== owner.you) return null;',
+        "",
+      ),
+  },
+  {
+    id: "MU-2490",
+    title: "WEB-11a F8: a partial rail may list a household's members",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (excluded !== null || households.some((h) => h.members !== null))\n      return null;",
+        "    if (excluded !== null) return null;",
+      ),
+  },
+  {
+    id: "MU-2491",
+    title:
+      "WEB-11a F8: a summary page out of id order (or not after its cursor) is accepted",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a page is in ascending id order after its cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (previous !== null && !(item.id > previous)) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2492",
+    title: "WEB-11a F8: a summary page of the other archived state is accepted",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a page is in ascending id order after its cursor/,
+    patch: (t) =>
+      sub(t, "    if (item.archived !== query.archived) return null;\n", ""),
+  },
+  {
+    id: "MU-2493",
+    title: "WEB-11a F8: a page's next cursor need not be its last id",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a page is in ascending id order after its cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (next !== null && (!isUuid(next) || next !== items.at(-1)?.id))",
+        "  if (next !== null && !isUuid(next))",
+      ),
+  },
+  {
+    id: "MU-2494",
+    title:
+      "WEB-11a F8: a reader's partial audience with no named household says 'Only you'",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a reader's partial audience names only what reaches them/,
+    patch: (t) =>
+      sub(t, '    return "Shared with you";', '    return "Only you";'),
+  },
+  {
+    id: "MU-2495",
+    title: "WEB-11a F8: a household's size is said as the audience",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /never household size/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (households.length === 1 && direct === 0 && only !== undefined)\n",
+        '  if (households.length === 1 && direct === 0 && only?.member_count)\n    return (only.name ?? "") + " · " + only.member_count + " people";\n  if (households.length === 1 && direct === 0 && only !== undefined)\n',
+      ),
+  },
+  {
+    id: "MU-2496",
+    title:
+      "WEB-11a F8: effective counts are accepted for a reader who does not own the field",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a partial audience never carries counts or a hidden exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!isInt(account_count, 0) || !isInt(limited_count, 0) || !owner_is_you)",
+        "    if (!isInt(account_count, 0) || !isInt(limited_count, 0))",
+      ),
+  },
+  {
+    id: "MU-2497",
+    title: "WEB-11a F8: an unknown attribution is said as 'Added by you'",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /attribution is separate from ownership; unknown claims nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (summary.added_by_you === "yes") return { kind: "added_by_you" };',
+        '  if (summary.added_by_you !== "no") return { kind: "added_by_you" };',
+      ),
+  },
+  {
+    id: "MU-2498",
+    title: "WEB-11a F8: the reader's own person is said to be shared with them",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /attribution is separate from ownership; unknown claims nothing/,
+    patch: (t) => sub(t, "  if (!summary.owner.you)\n", "  if (true)\n"),
+  },
+  {
+    id: "MU-2499",
+    title:
+      "WEB-11a F8: a summary older than the cached projection's version is shown beside it",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /a summary older than the cached projection is not shown beside it/,
+    patch: (t) =>
+      sub(t, "  if (summary.version < cached.version) return false;\n", ""),
+  },
+  {
+    id: "MU-2500",
+    title: "WEB-11a F8: a traversal mixing pages of two snapshots is applied",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /pages from different snapshots restart the traversal/,
+    patch: (t) =>
+      sub(
+        t,
+        '    } else if (answer.preferences_version !== preferences)\n      return { kind: "restart" };',
+        "    }",
+      ),
+  },
+  {
+    id: "MU-2756",
+    title:
+      "WEB-11a F8: a superseded walk reads on (neither the check before a page nor the one after its answer stops it)",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /a superseded walk stops before its next page/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    const result = await readPage(after);\n    if (!current()) return { kind: "superseded" };',
+          "    const result = await readPage(after);",
+        ),
+        '  for (let page = 0; page < options.pages; page += 1) {\n    if (!current()) return { kind: "superseded" };',
+        "  for (let page = 0; page < options.pages; page += 1) {",
+      ),
+  },
+  {
+    id: "MU-2757",
+    title:
+      "WEB-11a F8: an answer older than the applied preferences_version is applied",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /an older preferences_version is never applied/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (outcome.preferencesVersion < memory.summaryPreferences) return "stale";\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2758",
+    title:
+      "WEB-11a F8: a newer preferences_version leaves every other summary standing",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /a newer one makes every other summary out of date/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (before !== 0 && outcome.preferencesVersion > before) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2759",
+    title:
+      "WEB-11a F8: a row may be replaced by one with a lower policy version",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect:
+      /a row is never replaced by one with a lower version or policy version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (row.version < floor.version || row.policy_version < floor.policyVersion)",
+        "      row.version < floor.version",
+      ),
+  },
+  {
+    id: "MU-2760",
+    title:
+      "WEB-11a F8: an answer is applied to the memory of an identity no longer displayed",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /another identity's late answer writes into a memory nobody reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "    isCurrentMemory(memory) &&\n    memory.summaryGeneration === entry.generation &&",
+        "    memory.summaryGeneration === entry.generation &&",
+      ),
+  },
+  {
+    id: "MU-2761",
+    title: "WEB-11a F8: a summary read is made again while one is on its way",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /never twice for one query and generation/,
+    patch: (t) => sub(t, "  if (known !== undefined) {", "  if (false) {"),
+  },
+  {
+    id: "MU-2762",
+    title: "WEB-11a F8: an invalidation keeps the reads it superseded",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect:
+      /never twice for one query and generation; an answer after an invalidation is dropped/,
+    patch: (t) => sub(t, "    this.summaries.clear();\n", ""),
+  },
+  {
+    id: "MU-2763",
+    title:
+      "WEB-11a F8: an online command's receipt does not invalidate the summaries",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /every online command that may have reached the server/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (sentSomething(result)) memory.invalidateSummaries();\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2764",
+    title:
+      "WEB-11a F8: a command that never left (offline) invalidates the summaries",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/summaries.test.ts"],
+    expect: /every online command that may have reached the server/,
+    patch: (t) => sub(t, '  (result.kind !== "offline" &&', "  (true &&"),
+  },
+  {
+    id: "MU-2765",
+    title:
+      "WEB-11a F8: a synced change (the applied revision) does not re-read the summaries",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect:
+      /a synced change, a queue change and a households or primary household change/,
+    patch: (t) =>
+      sub(
+        t,
+        '    revision.status === "ready" ? String(revision.value) : revision.status,',
+        '    "revision",',
+      ),
+  },
+  {
+    id: "MU-2766",
+    title:
+      "WEB-11a F8: a households or primary household change does not re-read the summaries",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect:
+      /a synced change, a queue change and a households or primary household change/,
+    patch: (t) =>
+      sub(
+        t,
+        '    record === null\n      ? "-"',
+        '    record === record\n      ? "-"',
+      ),
+  },
+  {
+    id: "MU-2767",
+    title:
+      "WEB-11a F8: the summaries shown are refreshed every ten minutes, not every minute",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /every 60 seconds and whenever the page is visible again/,
+    patch: (t) =>
+      sub(t, "    }, SUMMARY_REFRESH_MS);", "    }, SUMMARY_REFRESH_MS * 10);"),
+  },
+  {
+    id: "MU-2768",
+    title: "WEB-11a F8: the minute's refresh reads while the page is hidden",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /nothing while hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const timer = setInterval(() => {\n      if (visible()) memory.invalidateSummaries();",
+        "    const timer = setInterval(() => {\n      memory.invalidateSummaries();",
+      ),
+  },
+  {
+    id: "MU-2769",
+    title: "WEB-11a F8: reconnecting does not re-read the summaries",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /online again reads them again/,
+    patch: (t) =>
+      sub(t, "      !before.online &&\n      env.online", "      false"),
+  },
+  {
+    id: "MU-2770",
+    title: "WEB-11a F8: a summary read earlier is shown offline",
+    file: "src/features/people/summaries.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /never an old one/,
+    patch: (t) =>
+      sub(t, "  if (key === null || !env.online) {", "  if (key === null) {"),
+  },
+  {
+    id: "MU-2771",
+    title:
+      "WEB-11a F8: a server scope reads every person and so lists them all",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /each is a scope the server applies before paging/,
+    patch: (t) =>
+      sub(
+        t,
+        "          env.api.readSummaries(scope, {",
+        '          env.api.readSummaries("all", {',
+      ),
+  },
+  {
+    id: "MU-2772",
+    title: "WEB-11a F8: In Home without a primary household is not explained",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /In Home without a primary household is an explained empty state/,
+    patch: (t) =>
+      sub(t, '  if (scope === "in_home" && home === null)', "  if (false)"),
+  },
+  {
+    id: "MU-2773",
+    title:
+      "WEB-11a F8: a field summary older than the cached field is shown as its tag",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /an older field summary than the cache, or offline, is never shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return summary !== null && summaryCurrentFor(summary, row.row)",
+        "    return summary !== null",
+      ),
+  },
+  {
+    id: "MU-2774",
+    title:
+      "WEB-11a F8: a person summary older than the cached person is shown beside it",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect:
+      /a summary older than what this device shows is not shown beside the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return summary !== null && summaryCurrentFor(summary, row.row)",
+        "    return summary !== null",
+      ),
+  },
+  {
+    id: "MU-2775",
+    title:
+      "WEB-11a F8: a partial rail does not say the owner may have shared it more widely",
+    file: "src/features/people/detail/SharedWith.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /anyone else's rail is partial/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {rail.disclosure === "partial" ? (',
+        "          {false ? (",
+      ),
+  },
+  {
+    id: "MU-2776",
+    title: "WEB-11a F8: the owner's rail does not name the excluded accounts",
+    file: "src/features/people/detail/SharedWith.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /the owner's rail is complete/,
+    patch: (t) =>
+      sub(
+        t,
+        "          rail.excluded_accounts.length > 0 ? (",
+        "          rail.excluded_accounts.length > 99 ? (",
+      ),
+  },
+  {
+    id: "MU-2777",
+    title: "WEB-11a F8: a field's tag never says who can actually see it",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /who can actually see it when it may be counted/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : (effectiveText(summary.effective, person.row.label) ??",
+        "      : (null ??",
+      ),
+  },
+  {
+    id: "MU-2778",
+    title:
+      "WEB-11a F8: the list never says that partial audiences may be shared more widely",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /each row says who added them/,
+    patch: (t) =>
+      sub(
+        t,
+        '          partial={shown.some(\n            (row) => summaryOf(row)?.audience.disclosure === "partial",\n          )}',
+        "          partial={false}",
+      ),
+  },
+  {
+    id: "MU-2779",
+    title:
+      "WEB-11a F8: the owner is named by username even when the reader can see their person",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary-views.test.tsx"],
+    expect: /each row says who added them/,
+    patch: (t) =>
+      sub(t, "  owner.person?.label ?? owner.username;", "  owner.username;"),
+  },
+  {
+    id: "MU-2780",
+    title:
+      "WEB-11a F8: the applied revision is never read (a synced change is no signal)",
+    file: "src/data/plans/applied-revision.ts",
+    tests: ["tests/data/applied-revision.test.ts"],
+    expect: /a committed page with a batch moves it/,
+    patch: (t) =>
+      sub(
+        t,
+        "  decide: ({ sync }) => sync?.applied_revision ?? null,",
+        "  decide: () => null,",
+      ),
+  },
+  // ---- WEB-11a review 2 of 22 October 2026: one causal mutant per corrected mechanism (design assessment C1–C5) ----------------
+  {
+    id: "MU-2781",
+    title: "WEB-11a R2 F5: summary labels are measured in UTF-16 units again",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/summary.test.ts"],
+    expect: /characters as the server counts them/,
+    patch: (t) =>
+      sub(
+        t,
+        "  charCount(value) <= LIMITS.label;",
+        "  value.length <= LIMITS.label;",
+      ),
+  },
+  {
+    id: "MU-2782",
+    title:
+      "WEB-11a R2 F4: the held-copy read gives no continuation at its scan bound",
+    file: "src/data/plans/form-copies.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect: /terminal rows are crossed, never a dead end/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return page(copies, cursor);\n  },",
+        "    return page(copies, null);\n  },",
+      ),
+  },
+  {
+    id: "MU-2783",
+    title: "WEB-11a R2 F4: terminal rows do not move the held-copy cursor",
+    file: "src/data/plans/form-copies.ts",
+    tests: ["tests/data/form-copies.test.ts"],
+    expect: /terminal rows are crossed, never a dead end/,
+    patch: (t) =>
+      sub(
+        t,
+        "        cursor = [row.form_context, row.tab_instance_id];\n        if (row.terminal) continue;",
+        "        if (row.terminal) continue;\n        cursor = [row.form_context, row.tab_instance_id];",
+      ),
+  },
+  {
+    id: "MU-2784",
+    title: "WEB-11a R2 F4: the held list offers no way past its first page",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /more holds than one page/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {next !== null ? (\n            <Button variant="quiet" onClick={() => setAfter(next)}>',
+        '          {false ? (\n            <Button variant="quiet" onClick={() => setAfter(next)}>',
+      ),
+  },
+  {
+    id: "MU-2785",
+    title:
+      "WEB-11a R2 F2: a hold is taken for ended whatever the store answered",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /end FAILS/,
+    // Re-anchored in WEB-11a revision 3 (review 3 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "export const isSettled = (answer: HeldSettle): boolean =>\n",
+        "export const isSettled = (answer: HeldSettle): boolean =>\n  true ||\n",
+      ),
+  },
+  {
+    id: "MU-2786",
+    title: "WEB-11a R2 F2: a terminal write that fails is reported as ended",
+    file: "src/data/ports/conditional-form.ts",
+    tests: ["tests/data/conditional-form.test.ts"],
+    expect: /a terminal write that fails inside the store is `failed`/,
+    patch: (t) =>
+      sub(
+        t,
+        '          (unwritten(result) as ConditionalEnd | null) ?? { kind: "failed" }\n        );\n      } catch {\n        return { kind: "failed" };',
+        '          (unwritten(result) as ConditionalEnd | null) ?? { kind: "failed" }\n        );\n      } catch {\n        return { kind: "ended" };',
+      ),
+  },
+  {
+    id: "MU-2787",
+    title:
+      "WEB-11a R2 F2: a conditional write no longer compares the stored state",
+    file: "src/data/plans/form-recovery.ts",
+    tests: [
+      "tests/data/conditional-form.test.ts",
+      "tests/features/people/held-run.test.ts",
+    ],
+    expect: /only from the state it names|replaces only the state it names/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!holds) return { result: { kind: "changed", stored: state } };',
+        "",
+      ),
+  },
+  {
+    id: "MU-2533",
+    title: "WEB-11a R2 F2: the policy attempt is sent before it is durable",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /durable before it is sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "            : await write({ ...copy.change, attempt })) &&",
+        "            : true) &&",
+      ),
+  },
+  {
+    id: "MU-2788",
+    title:
+      "WEB-11a R2 F2: a failed write of the confirmed audience does not stop the content step",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /CONFIRMED audience queues no content/,
+    patch: (t) => sub(t, "    if (!progressed) return refused();\n", ""),
+  },
+  {
+    id: "MU-2789",
+    title: "WEB-11a R2 F2: a run does not read the hold again under the lock",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /moved on by another page/,
+    // Re-anchored in WEB-11a revision 3 (review 3 rewrite of the code it mutates); the same intent.
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "    stored.copy.digest !== shown.digest ||\n    stored.copy.change.retired ||\n",
+        "    stored.copy.change.retired ||\n",
+      ),
+  },
+  {
+    id: "MU-2790",
+    title: "WEB-11a R2 F2/D1: a recovered hold runs by itself again",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /recovered hold online and writable|end FAILS stays visible/,
+    patch: (t) => sub(t, "      !authorised ||\n", ""),
+  },
+  {
+    id: "MU-2791",
+    title:
+      "WEB-11a R2 F3: an edit in place no longer compares the body it read",
+    file: "src/features/people/model/snapshot.ts",
+    tests: [
+      "tests/features/people/review-findings.test.tsx",
+      "tests/features/people/held-run.test.ts",
+    ],
+    expect:
+      /another page edited meanwhile|by another page while the form was open|replaces only the body it read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    draft.command_digest === snapshot.latestDigest;",
+        "    true;",
+      ),
+  },
+  {
+    id: "MU-2792",
+    title:
+      "WEB-11a R2 F3: a refused field edit falls back to queuing the older form",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /another page edited meanwhile|with ANOTHER body than the editor read/,
+    // Re-anchored in WEB-11a revision 12 (as MU-2385/MU-2386): the older form is ALSO refused at the write unless it names the save it
+    // follows, so the review-2 defect (an unguarded fallback) is the page's check bypassed AND no predecessor named.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(bound, base.fieldId),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2793",
+    title:
+      "WEB-11a R2 F3: a refused rename edit falls back to queuing the older form",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /by another page while the form was open/,
+    // Re-anchored in WEB-11a revision 12 (as MU-2385/MU-2386): the older form is ALSO refused at the write unless it names the save it
+    // follows, so the review-2 defect (an unguarded fallback) is the page's check bypassed AND no predecessor named.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(snapshot, person.id),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2794",
+    title:
+      "WEB-11a R2 F3: an unsent create is edited without comparing the body the editor read (both sites)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /by another page while the editor was open/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          // Revision 10 (review 10, finding 1): the comparison is the last of the pre-check's three (the origin's local id is the second).
+          "        draft.command_digest !== reviewed\n      )\n",
+          "        false\n      )\n",
+        ),
+        "            stored.command_digest === reviewed,",
+        "            true,",
+      ),
+  },
+  {
+    id: "MU-2795",
+    title:
+      "WEB-11a R2 F1: a generic rebuild re-binds a field change to the current audience",
+    file: "src/features/people/register.ts",
+    tests: ["tests/features/people/register.test.ts"],
+    expect: /audience moved since the save/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    current.policy_version !== put.policyVersion\n",
+          "    current.policy_version === undefined\n",
+        ),
+        "  const policyVersion = put.policyVersion;",
+        "  const policyVersion = current.policy_version as number;",
+      ),
+  },
+  {
+    id: "MU-2796",
+    title:
+      "WEB-11a R2 F1: the dialog's review never withholds a resend under a moved audience",
+    file: "src/features/people/register.ts",
+    tests: [
+      "tests/features/people/register.test.ts",
+      "tests/features/sync/recovery-screens.test.tsx",
+    ],
+    expect: /audience moved since the save|audience was WIDENED/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : put.policyVersion === null || now.policy_version !== put.policyVersion",
+        "        : false",
+      ),
+  },
+  {
+    id: "MU-2797",
+    title:
+      "WEB-11a R2 F1: the generic dialog ignores the slice's reason to withhold a resend",
+    file: "src/features/sync/ItemDetailDialog.tsx",
+    tests: ["tests/features/sync/recovery-screens.test.tsx"],
+    expect: /audience was WIDENED/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (!reviewable || (review !== null && review.blocked === null));",
+        "    true;",
+      ),
+  },
+  {
+    id: "MU-2798",
+    title:
+      "WEB-11a R2 F1: 'save as new' replaces a draft whose body changed since the dialog showed it",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /with the body the dialog showed/,
+    patch: (t) =>
+      sub(
+        t,
+        "          stored.command_digest === reviewed &&",
+        "          true &&",
+      ),
+  },
+  {
+    id: "MU-2799",
+    title:
+      "WEB-11a R2 F2/F4: a new hold no longer ends the earlier holds of its field",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /replaces the earlier one/,
+    // Re-anchored in WEB-11a revision 3 (review 3 rewrite of the code it mutates); the same intent.
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "    if (change.holdId === winner.holdId) continue;\n",
+        "    continue;\n",
+      ),
+  },
+  {
+    id: "MU-2800",
+    title:
+      "WEB-11a R2 F2: a run that found the field's lock taken waits for the env to change, not for the lock",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /looks again when it is let go/,
+    patch: (t) =>
+      sub(
+        t,
+        "        setLockBusy(true);\n",
+        "        setPausedFor(env);\n        return;\n",
+      ),
+  },
+  {
+    id: "MU-2801",
+    title:
+      "WEB-11a R3 F1: leaving the page ends the hold (suspension routed back to the terminal discard)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /navigat(ed|ing) away|navigating to the list|another page of held changes unmounts/,
+    patch: (t) =>
+      sub(
+        t,
+        '    run.cancelled && isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+        '    isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+      ),
+  },
+  {
+    id: "MU-2802",
+    title:
+      "WEB-11a R3 F2: 'Hold as draft' writes the new hold without the field's lock (create before lock)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect: /cannot interleave|the field's lock is taken/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  const answer = await env.exclusive(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const headRead",
+        "  const answer = await (async <T,>(_name: string, go: () => Promise<T>) => go())(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const headRead",
+      ),
+  },
+  {
+    id: "MU-2803",
+    title:
+      "WEB-11a R3 F2 (re-expressed in revision 4 for the field's head): a run no longer checks that it is its field's current hold (an earlier hold runs)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect: /create A, create B|retirement is refused|kept beside a later one/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  if (head.current !== key.holdId) {\n",
+        "  if (head.current !== key.holdId && (false as boolean)) {\n",
+      ),
+  },
+  {
+    id: "MU-2804",
+    title:
+      "WEB-11a R3 F2: a refused retirement of an earlier hold is reported as complete",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /retirement is refused is kept \(incomplete/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!isSettled(settled)) {\n      complete = false;",
+        "    if (false) {\n      complete = false;",
+      ),
+  },
+  {
+    id: "MU-2805",
+    title:
+      "WEB-11a R3 H7: a retry of the same attempt is sent without checking that the hold is still stored as read",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /fast path checks the stored state/,
+    patch: (t) =>
+      sub(t, "            ? await unchanged()\n", "            ? true\n"),
+  },
+  {
+    id: "MU-2806",
+    title:
+      "WEB-11a R3 C3c: a discard ends a hold whose policy attempt is unresolved (the attempt is kept only in page memory)",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /RETIRED|keeps its attempt for recovery|ANOTHER change does not take it/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  return unresolvedIn(copy, null)\n    ? retire(store, copy)\n",
+        "  return (false as boolean)\n    ? retire(store, copy)\n",
+      ),
+  },
+  {
+    id: "MU-2807",
+    title:
+      "WEB-11a R3 C3c (the assessment's outstanding fresh-key mutant): a retry of an unchanged attempt gets a fresh key",
+    file: "src/features/sharing/model/submission.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect:
+      /same key and byte-identical body|H7 control|takes the unresolved attempt over/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (uncertain !== null && uncertain.body === body) return uncertain;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2808",
+    title:
+      "WEB-11a R3 C3c: a new hold of exactly the same change does not take the earlier hold's unresolved attempt over",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /takes the unresolved attempt over/,
+    patch: (t) =>
+      sub(
+        t,
+        "        attempt: taken?.change.attempt ?? null,",
+        "        attempt: null,",
+      ),
+  },
+  {
+    id: "MU-2809",
+    title:
+      "WEB-11a R3 C3c: a retired hold (a reconciliation record) can run again",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /never ended/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "    stored.copy.change.retired ||\n    stored.copy.change.legacy\n",
+        "    stored.copy.change.legacy\n",
+      ),
+  },
+  {
+    id: "MU-2810",
+    title:
+      "WEB-11a R3 C3c: a direct audience change ignores the unresolved attempt kept on the device",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /sends the kept attempt's key/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        '      attempt = kept.kind === "found" ? kept.attempt : remembered;\n',
+        "      attempt = remembered;\n",
+      ),
+  },
+  {
+    id: "MU-2811",
+    title:
+      "WEB-11a R3 H11: a run writes progress after another identity is displayed",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /another identity is displayed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!isCurrentMemory(memory)) return { kind: "suspended" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2812",
+    title:
+      "WEB-11a R3 F3: a field's audience is named from a page's policy read whatever later policy version is known",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /reviewer's case|summary applied \(the floor\)|withdraws it at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    policyShownFor(known, row, env.memory.summaryFloors.get(row.id))\n",
+        "    true\n",
+      ),
+  },
+  {
+    id: "MU-2813",
+    title: "WEB-11a R3 F3: a late, older policy read replaces a later one kept",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/memory.test.ts"],
+    expect: /late policy read never lowers/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known === undefined || read.version >= known.version)\n",
+        "  if (true)\n",
+      ),
+  },
+  {
+    id: "MU-2814",
+    title:
+      "WEB-11a R3 F3: the policy version a summary applied (the floor) is not compared",
+    file: "src/features/people/model/summary.ts",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /summary applied \(the floor\)/,
+    patch: (t) =>
+      sub(t, "    read.version >= (floor?.policyVersion ?? 0)\n", "    true\n"),
+  },
+  {
+    id: "MU-2815",
+    title:
+      "WEB-11a R3 F3: closing the shared policy editor keeps the page's own read of the field's policy",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /closing the shared policy editor/,
+    patch: (t) =>
+      // Re-expressed in revision 23 (review 23, R23.1): the read is withdrawn by doubting it (its version kept as the floor), not deleted.
+      sub(t, "              doubtPolicy(env.memory, row.id);\n", ""),
+  },
+  {
+    id: "MU-2816",
+    title:
+      "WEB-11a R3 C6: the page's own policy read is named without when it was read",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /said with when it was read/,
+    patch: (t) =>
+      sub(
+        t,
+        "          {summary === null && read !== undefined && !field.projected ? (",
+        "          {false && read !== undefined && !field.projected ? (",
+      ),
+  },
+  {
+    id: "MU-2817",
+    title:
+      "WEB-11a R3 B1: an edit in place is not judged against the draft as stored inside its transaction (expectDraft ignored)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-reviewed-edit-delay.test.ts"],
+    expect: /while this edit waits|confirmed while the edit waits/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.expectDraft !== undefined && !request.expectDraft(draft))\n    return { kind: "refused", reason: "draft_changed" };\n  let built: BuildResult;',
+        "  let built: BuildResult;",
+      ),
+  },
+  {
+    id: "MU-2818",
+    title:
+      "WEB-11a R4 F1: the hand-off plan ignores whether the copy (and the head) are as read",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/held-handoff.test.ts"],
+    expect: /writes NOTHING|never undo|answer lost after it committed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        reads.existing !== undefined ||\n        !handOff.expect.every(",
+        "        reads.existing !== undefined ||\n        !handOff.expect.every(() => true) &&\n        !handOff.expect.every(",
+      ),
+  },
+  {
+    id: "MU-2819",
+    title:
+      "WEB-11a R4 F1: the hand-off adopts a draft that already has the local id",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/held-handoff.test.ts"],
+    expect: /never adopted as the hand-off/,
+    patch: (t) =>
+      sub(
+        t,
+        "        reads.existing !== undefined ||\n",
+        "        (false as boolean) ||\n",
+      ),
+  },
+  {
+    id: "MU-2820",
+    title:
+      "WEB-11a R4 F1: the hand-off writes the draft but does not end the copy (no tombstone)",
+    file: "src/data/plans/outbox.ts",
+    tests: [
+      "tests/data/held-handoff.test.ts",
+      "tests/features/people/held-run.test.ts",
+    ],
+    expect: /same commit|never undo|queues NOTHING|queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '        ...(handOff === undefined\n          ? []\n          : [w.put("form_recovery", handOff.tombstone)]),\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2821",
+    title:
+      "WEB-11a R4 F1: the facade runs a hand-off as a plain enqueue (the copy is not checked or ended)",
+    file: "src/data/outbox/outbox.ts",
+    tests: ["tests/data/held-handoff.test.ts"],
+    expect: /same commit|writes NOTHING|never adopted|never undo/,
+    patch: (t) =>
+      sub(
+        t,
+        "            handOff === undefined ? enqueueDraft : transferDraft,",
+        "            enqueueDraft,",
+      ),
+  },
+  {
+    id: "MU-2822",
+    title:
+      "WEB-11a R4 F2: a new hold's generation comes from the live holds only (the head is ignored: the generation goes back)",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /above the head even when every hold/,
+    patch: (t) => sub(t, "          head?.seq ?? 0,\n", "          0,\n"),
+  },
+  {
+    id: "MU-2823",
+    title:
+      "WEB-11a R4 F3: automatic cleanup ends a reconciliation record its successor does not carry",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /still found and A is still a record|both kept by a third save/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (copy.change.retired && !carried) return Promise.resolve({ kind: "kept" });\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2824",
+    title:
+      "WEB-11a R4 C9: a lookup that could not read every hold of the field answers `none`",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /never `found` by guess/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (field === null || field.unreadable.length > 0) return { kind: "unknown" };\n',
+        '  if (field === null || field.unreadable.length > 0) return { kind: "none" };\n',
+      ),
+  },
+  {
+    id: "MU-2825",
+    title:
+      "WEB-11a R4 C9: an attempt is matched by policy version and audience only, not by its body",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /never `found` by guess/,
+    patch: (t) =>
+      sub(
+        t,
+        "  samePolicy(earlier.to, to) &&\n  earlier.attempt.body ===\n    canonicalBody(policyChangeCommands(earlier.fieldId, from, to));\n",
+        "  samePolicy(earlier.to, to);\n",
+      ),
+  },
+  {
+    id: "MU-2826",
+    title:
+      "WEB-11a R4 F1: a run that hears no answer from its hand-off retries it instead of reading the copy's tombstone",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /answer was lost: done/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (now.kind === "ended" && now.tombstone.cause === "transferred")\n    return { kind: "done", ended: true };\n  refusal = differs(now);\n',
+        "  refusal = differs(now);\n",
+      ),
+  },
+  {
+    id: "MU-2827",
+    title:
+      "WEB-11a R4 F4: 'Check now' ends the reconciliation record after its read",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect:
+      /record STILL kept|the record is kept each time|says only what it is now|it may still be made, so the record stays|whether it was is not claimed/,
+    patch: (t) =>
+      sub(
+        t,
+        '  memory.touch();\n  return {\n    kind: "observed",',
+        '  await env.held.end(keyOf(change), shown.digest, "forgotten", change.seq);\n  memory.touch();\n  return {\n    kind: "observed",',
+      ),
+  },
+  {
+    id: "MU-2828",
+    title:
+      "WEB-11a R4 F4: 'Check now' reports the version as moved when it is the guarded one",
+    file: "src/features/people/field/held.ts",
+    tests: [
+      "tests/features/people/held-run.test.ts",
+      "tests/features/people/review-findings.test.tsx",
+    ],
+    expect: /unchanged version|it may still be made, so the record stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "    unchanged: read.value.version === change.from.version,\n",
+        "    unchanged: false,\n",
+      ),
+  },
+  {
+    id: "MU-2829",
+    title:
+      "WEB-11a R4 C9: the direct editor makes a fresh attempt when the device's lookup could not be completed",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /cannot be read: nothing is sent/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (kept.kind === "unknown") {\n',
+        '      if (kept.kind === "unknown" && (false as boolean)) {\n',
+      ),
+  },
+  {
+    id: "MU-2830",
+    title:
+      "WEB-11a R4 C9: the page's attempt of another change hides the device's attempt of this one (a fresh key)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /attempt of ANOTHER change/,
+    patch: (t) =>
+      sub(
+        t,
+        "    let attempt = remembered?.body === body ? remembered : null;\n",
+        "    let attempt = remembered;\n",
+      ),
+  },
+  {
+    id: "MU-2831",
+    title:
+      "WEB-11a R4 C10: a run's store is not pinned to one binding (a later call reaches the database displayed then)",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /displayed database changes while the run's policy read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const store = env.held.pinned();\n  const key = keyOf(shown.change);\n",
+        "  const store = env.held;\n  const key = keyOf(shown.change);\n",
+      ),
+  },
+  {
+    id: "MU-2832",
+    title:
+      "WEB-11a R4 C10: 'Hold as draft' is not pinned to one binding (it can write into another account's database)",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /takes the field's lock: NOTHING is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const store = env.held.pinned();\n  const answer = await env.exclusive(",
+        "  const store = env.held;\n  const answer = await env.exclusive(",
+      ),
+  },
+  {
+    id: "MU-2833",
+    title:
+      "WEB-11a R4 C10: a pinned port follows whichever service is displayed",
+    file: "src/data/ports/conditional-form.ts",
+    tests: ["tests/data/conditional-form.test.ts"],
+    expect: /PINNED port fails every call/,
+    patch: (t) =>
+      sub(
+        t,
+        "          return bound !== null && now === bound ? bound : null;\n",
+        "          return now;\n",
+      ),
+  },
+  {
+    id: "MU-2834",
+    title:
+      "WEB-11a R4 F5: a failed archive read is a settled step (the reviewer's defect: 'Nothing archived')",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect: /the archive read fails|Try again reads afresh/,
+    patch: (t) =>
+      sub(
+        t,
+        '          step.status === "failed" || drafts === "failed"\n            ? "failed"\n            : step.settled && drafts === "complete"\n              ? "complete"\n              : "loading";\n',
+        '          step.settled || step.status === "failed" ? "complete" : "loading";\n',
+      ),
+  },
+  {
+    id: "MU-2835",
+    title:
+      "WEB-11a R4 F5: a failed read of the outstanding drafts does not make the inventory incomplete",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect: /outstanding drafts folded over the rows cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        '            outstanding.status === "failed" ||\n            (outstanding.status === "ready" && !outstanding.complete)\n              ? "failed"\n',
+        '            (false as boolean)\n              ? "failed"\n',
+      ),
+  },
+  {
+    id: "MU-2836",
+    title:
+      "WEB-11a R4 F5: a field whose person could not be read is taken as not visible (the inventory claims to be complete)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the person is read WITH the field (`ChildScan`): "could not be read" is that page's failure, now taken as a
+    // settled, complete step (the person not visible) instead of a failed one.
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect: /cannot be read is hidden, and the inventory is incomplete/,
+    patch: (t) =>
+      sub(
+        t,
+        '          step.status === "failed"\n            ? "failed"\n            : step.settled\n',
+        '          (false as boolean)\n            ? "failed"\n            : step.settled || step.status === "failed"\n',
+      ),
+  },
+  {
+    id: "MU-2837",
+    title:
+      "WEB-11a R4 F5: 'Try again' clears the reports but does not read again",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect: /Try again reads afresh/,
+    // Re-expressed in revision 5: the reading and its reports are one state (`setLedger`); the old `setReading` anchor is gone.
+    patch: (t) =>
+      sub(
+        t,
+        "                reading: previous.reading + 1,\n",
+        "                reading: previous.reading,\n",
+      ),
+  },
+  {
+    id: "MU-2838",
+    title:
+      "WEB-11a R4: a held row that waited for another row's run never looks again when that run ends",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /two authorised holds of the field/,
+    patch: (t) =>
+      sub(
+        t,
+        "    run,\n    running,\n    fieldSettled,\n",
+        "    run,\n    fieldSettled,\n",
+      ),
+  },
+  {
+    id: "MU-2839",
+    title:
+      "WEB-11a R4 C10: a legacy copy (an earlier shape) can be written again as a runnable hold",
+    file: "src/features/people/field/held-store.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /legacy copy is never written again/,
+    patch: (t) =>
+      sub(
+        t,
+        "      from.change.legacy && !next.retired\n",
+        "      (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2586",
+    title:
+      "WEB-11a R5 F1: a run that is SUSPENDED (its row left the page) does not publish its end (the reviewer's defect: a waiting authorised hold never runs)",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /U12 \(the reviewer's schedule\): leaving the person|U12: another page of held changes unmounts the running A/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (isCurrentMemory(memory)) memory.touch();\n      }\n    })();\n",
+        '        if (isCurrentMemory(memory) && result?.kind !== "suspended")\n          memory.touch();\n      }\n    })();\n',
+      ),
+  },
+  {
+    id: "MU-2587",
+    title:
+      "WEB-11a R5 F2: a field's parent read still on its way counts as 'not visible' (the reviewer's defect: 'Nothing archived' on an earlier answer)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the parent's read is the field page's read: one still on its way counts as complete (nothing visible).
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
+    expect:
+      /U1\/U2: after a failed parent|U2: the SAME parent read again by a new watch|U6: Try again after the read/,
+    patch: (t) =>
+      sub(
+        t,
+        '            : step.settled\n              ? "complete"\n              : "loading";\n',
+        '            : step.settled\n              ? "complete"\n              : "complete";\n',
+      ),
+  },
+  {
+    id: "MU-2588",
+    title:
+      "WEB-11a R5 F2: an EARLIER owner's late report replaces the current owner's",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the owner of a report is the page read (its position and cursor): an earlier read's report at the same position
+    // is counted for the current step.
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/archive-reports.test.tsx"],
+    expect: /an earlier read's late report at the same position/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (entry === undefined || entry.after !== after)\n      return partial(index === 0 ? "loading" : "ready");\n',
+        '    if (entry === undefined)\n      return partial(index === 0 ? "loading" : "ready");\n',
+      ),
+  },
+  {
+    id: "MU-2589",
+    title:
+      "WEB-11a R5 F2: an earlier owner's cleanup withdraws the current owner's report",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): an earlier page read's late cleanup at the same position withdraws the current read's report.
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/archive-reports.test.tsx"],
+    expect: /an earlier read's LATE CLEANUP at the same position/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (known === undefined || known.after !== after) return previous;\n",
+        "    if (known === undefined) return previous;\n",
+      ),
+  },
+  {
+    id: "MU-2590",
+    title:
+      "WEB-11a R5 F2: the ledger applies a report of an earlier reading (checked only when it was made, not when it is applied)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/archive-reports.test.tsx"],
+    expect: /applies a kind's report only for its own reading/,
+    patch: (t) =>
+      sub(t, "  if (previous.reading !== of) return previous;\n", ""),
+  },
+  {
+    id: "MU-2591",
+    title:
+      "WEB-11a R6 F1: the field editor's success closes the instance that submitted it (the reviewer's defect: a new 'Add a field' after Cancel is closed and its input forgotten)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    // Revision 9: a replaced view's `close` now acts only while its view is shown (`useShown`, review 9, finding 1), so the submitting
+    // instance, unmounted by Cancel, no longer closes the new editor: the reviewer's schedules are masked by that second layer (they fail
+    // with it removed too: MU-2368). The schedules where the completion must reach the RESTORED mount of the same session still fail by
+    // assertion and are added to the expect (the survivor run is kept: revision-9/mutants-touched-1).
+    expect:
+      /the reviewer's schedule: the new editor and its input stay|a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays|the SAME session remounted \(a 403 elsewhere\) while its save runs: the completion closes the restored editor|the same session remounted and typed in further: the completion keeps the later input/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ended(ticket);\n  };\n",
+        "    if (stateRef.current.revision === ticket) close();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-2592",
+    title:
+      "WEB-11a R9 F1 with R6 F1: the field editor's success closes the instance that submitted it, and a replaced view's close still acts (both layers)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /the reviewer's schedule: the new editor and its input stay|a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    ended(ticket);\n  };\n",
+          "    if (stateRef.current.revision === ticket) close();\n  };\n",
+        ),
+        "    if (!shown()) return;\n    forget();\n",
+        "    forget();\n",
+      ),
+  },
+  {
+    id: "MU-2593",
+    title:
+      "WEB-11a R6 F1: an unmounted form is never withdrawn from its session (a closed editor still ends a later session's form)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    // Revision 8: Cancel now withdraws the session's form itself (`retireSession`), so the schedules where ONLY the unmount withdraws it
+    // (the form kept by the sync control and left closed) are where this defect is seen; the Cancel schedules no longer reach it.
+    expect:
+      /the reviewer's schedule: the new editor and its input stay|the new editor and its input stay|gone elsewhere \(the session kept, no editor open\): the completion forgets the saved input and does not navigate|kept by the in-dialog sync control and not reopened: the completion forgets the saved input and does not navigate/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.sessions.get(session) === owner)\n        memory.sessions.delete(session);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2594",
+    title:
+      "WEB-11a R6 F1: the input kept under the key is taken as the session's whatever session it belongs to (a later session's input is forgotten)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const keptHere = kept !== undefined && sessionOf(kept) === session;\n",
+        "  const keptHere = kept !== undefined;\n",
+      ),
+  },
+  {
+    id: "MU-2595",
+    title:
+      "WEB-11a R6 F1: a completion for an earlier revision ends the session anyway (input typed in a remounted form after the save is lost)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /the same session remounted and typed in further|the later name stays, said so/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (ticket !== null && revision !== ticket) {\n",
+        "  if (ticket !== null && revision !== ticket && ticket < 0) {\n",
+      ),
+  },
+  {
+    id: "MU-2596",
+    title:
+      "WEB-11a R6 F1: New person's success closes the form that submitted it and shows the saved person (a new form after Cancel is closed)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /New person > after Cancel and a new form .*the new form and its input stay|kept by the in-dialog sync control and not reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "    completeSession(\n      memory,\n      RETAINED,\n      session,\n      ticket,\n      (kept) => (kept as RetainedPerson).form.revision,\n      personId,\n    );\n",
+        '    void memory;\n    env.memory.drafts.delete(RETAINED);\n    if (stateRef.current.revision !== ticket) return;\n    onClose();\n    void navigate({ to: "/people/$personId", params: { personId } });\n',
+      ),
+  },
+  {
+    id: "MU-2597",
+    title:
+      "WEB-11a R6 F1: a queued rename's success closes the form that submitted it (a reopened rename loses its later name and stays open)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /a queued rename completing after the person was left and the rename reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        '    announcer.announce(copy.SAVED_NOT_SENT, "polite");\n    ended(ticket);\n  };\n',
+        '    announcer.announce(copy.SAVED_NOT_SENT, "polite");\n    close();\n  };\n',
+      ),
+  },
+  {
+    id: "MU-2598",
+    title:
+      "WEB-11a R6 F1: an unlink confirmed in a closed dialog closes the confirmation asked again",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect: /the old answer does not close the new confirmation/,
+    patch: (t) =>
+      sub(t, "      if (mounted.current) onClose();\n", "      onClose();\n"),
+  },
+  {
+    id: "MU-2599",
+    title:
+      "WEB-11a R6 F2: a FAILED person read is taken as 'not on this device' (the reviewer's defect)",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect: /the person read FAILS: never 'not on this device'/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (cached.status === "unavailable" && cached.reason !== "absent")\n',
+        '        if (cached.status === "unavailable" && cached.reason === "closed")\n',
+      ),
+  },
+  {
+    id: "MU-2600",
+    title:
+      "WEB-11a R6 F2: unreadable unsent changes and no cached person: 'not on this device'",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /a person only a queued create shows, with the unsent changes unreadable/,
+    patch: (t) =>
+      sub(
+        t,
+        '          if (outstanding.status === "failed")\n            return (\n              <ReadFailed message={copy.PERSON_READ_FAILED} onRetry={retry} />\n            );\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2601",
+    title:
+      "WEB-11a R6 F2: more unsent changes than the chain reads is taken as all of them: 'not on this device'",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect: /more unsent changes than the chain reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (outstanding.capped)\n            return (\n              <ReadFailed message={copy.PERSON_UNCONFIRMED} onRetry={retry} />\n            );\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2602",
+    title:
+      "WEB-11a R6 F2: the person's Try again re-renders the failed read instead of reading afresh",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the person read FAILS: never 'not on this device'|a person only a queued create shows, with the unsent changes unreadable|this device's unsent changes cannot be read/,
+    patch: (t) => sub(t, "        key={reading}\n", ""),
+  },
+  {
+    id: "MU-2603",
+    title:
+      "WEB-11a R6 F2: the fields' Try again re-renders the failed step instead of reading it afresh",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the field read FAILS: never 'No fields yet\.'|a later step's read FAILS/,
+    patch: (t) => sub(t, "      key={scan}\n", ""),
+  },
+  {
+    id: "MU-2604",
+    title:
+      "WEB-11a R6 F2: a failed field step is not said (the readable rows look like all of them)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the step's view moved into `FieldStep` (re-indented); same mutation.
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/detail-reads.test.tsx"],
+    expect:
+      /the field read FAILS: never 'No fields yet\.'|a later step's read FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        '      {step.status === "failed" ? (\n',
+        '      {step.status === ("never" as string) ? (\n',
+      ),
+  },
+  {
+    id: "MU-2605",
+    title:
+      "WEB-11a R6 F3: a press fixes no box (a read answering during it moves the pressed action: the reviewer's defect)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect:
+      /a press fixes every steady box at its height|a cancelled press releases them|a pointer released elsewhere|a second press measures afresh/,
+    patch: (t) =>
+      sub(
+        t,
+        // The anchor holds a template literal; it is spelt in two parts (no `$`+`{` inside a plain string).
+        "        box.style.height = `$" + "{heights[index]}px`;\n",
+        "        void heights[index];\n",
+      ),
+  },
+  {
+    id: "MU-2606",
+    title:
+      "WEB-11a R6 F3: a delivered click does not release the boxes (the detail stays at its old height until the fallback)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /the click reaches its target, then they are released/,
+    patch: (t) =>
+      sub(t, '    document.addEventListener("click", release);\n', ""),
+  },
+  {
+    id: "MU-2607",
+    title: "WEB-11a R6 F3: a cancelled press does not release the boxes",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /a cancelled press releases them at once/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 7 (a cancel now ends only its own pointer's press; the defect is unchanged).
+        '    document.addEventListener("pointercancel", cancel, true);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2608",
+    title:
+      "WEB-11a R7 F1: admission ignores a save already running for the key (the reviewer's defect: a reopened New person admits a second create)",
+    file: "src/features/people/lifetime.ts",
+    tests: [
+      "tests/features/people/lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /one save per key at a time|kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (keys.some((key) => memory.pending.has(key))) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2609",
+    title:
+      "WEB-11a R7 F1: an old save's settlement frees whatever claim holds the key (a later save's included)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/lifetime.test.tsx"],
+    expect: /an old save's settlement never frees a later save's claim/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (memory.pending.get(key) === token) {\n",
+        "    if (memory.pending.has(key)) {\n",
+      ),
+  },
+  {
+    id: "MU-2610",
+    title:
+      "WEB-11a R7 F1: New person admits every press (no session claim): a reopened form saves the same person again",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(memory, [session], env.newId);\n    if (admission === null) return;\n",
+        '    const admission = { memory, keys: [] as string[], token: "" };\n',
+      ),
+  },
+  {
+    id: "MU-2611",
+    title:
+      "WEB-11a R7 F1: New person shows saving only in the mount that pressed Save (a reopened form looks ready)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const saving = isPending(env.memory, session);\n",
+        "  const [saving] = useState(false);\n",
+      ),
+  },
+  {
+    id: "MU-2612",
+    title:
+      "WEB-11a R7 F1: a retry of the same input is prepared anew (new person and local ids: a write whose answer was lost is made twice)",
+    file: "src/features/people/lifetime.ts",
+    tests: [
+      "tests/features/people/lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /the retry of the same input is the same request|the same basis is the same request/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known !== undefined && known.basis === basis) return known.value as T;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2613",
+    title:
+      "WEB-11a R7 F1: a changed input reuses the earlier request (its local id would report the earlier save as this one)",
+    file: "src/features/people/lifetime.ts",
+    tests: [
+      "tests/features/people/lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /a retry after the input changed is a NEW request|the same basis is the same request/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known !== undefined && known.basis === basis) return known.value as T;\n",
+        "  if (known !== undefined) return known.value as T;\n",
+      ),
+  },
+  {
+    id: "MU-2614",
+    title:
+      "WEB-11a R7 F1: New person's refusal is told only to the mount that pressed Save (a reopened form is never told)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /while the form is kept and reopened: told to the reopened form/,
+    patch: (t) =>
+      sub(
+        t,
+        "        reportSession(memory, RETAINED, session, { refusal: outcome.message });\n",
+        "        setRefusal(outcome.message);\n",
+      ),
+  },
+  {
+    id: "MU-2615",
+    title:
+      "WEB-11a R7 F1: New person's request carries no local id of its own (the outbox allocates one per attempt)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /the retry of the same input is the same request/,
+    patch: (t) => sub(t, "            localId: env.newId(),\n", ""),
+  },
+  {
+    id: "MU-2616",
+    title:
+      "WEB-11a R7 F1: the field editor admits every press (no session claim): a remounted editor saves the same input again",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect:
+      /remounted \(a 403 elsewhere\) while its save runs: the restored editor shows it saving|remounted while its request is unanswered: no second request/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(env.memory, [session], env.newId);\n    if (admission === null) return;\n    try {\n      await run(choice);\n",
+        '    const admission = { memory: env.memory, keys: [] as string[], token: "" };\n    try {\n      await run(choice);\n',
+      ),
+  },
+  {
+    id: "MU-2617",
+    title:
+      "WEB-11a R7 F1: the editor's Archive is admitted apart from the session (it runs beside the session's save, and Save beside it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect:
+      /its Archive is not admitted beside it|the editor's Archive pressed twice while it is saved admits one archive, and Save waits for it/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "                  saving || isPending(env.memory, archiveTarget(existing.id))\n",
+          "                  isPending(env.memory, archiveTarget(existing.id))\n",
+        ),
+        "                        [session, archiveTarget(existing.id)],\n",
+        "                        [archiveTarget(existing.id)],\n",
+      ),
+  },
+  {
+    id: "MU-2618",
+    title:
+      "WEB-11a R7 F1: a rename admits every press (no session claim): a remounted rename form renames again",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect:
+      /a queued rename remounted while saved|a linked profile's rename remounted while unanswered/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(env.memory, [session], env.newId);\n    if (admission === null) return;\n    try {\n      await run();\n",
+        '    const admission = { memory: env.memory, keys: [] as string[], token: "" };\n    try {\n      await run();\n',
+      ),
+  },
+  {
+    id: "MU-2619",
+    title:
+      "WEB-11a R7 F1: unlink admits every confirmation (a confirmation asked again while one is sent sends again)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /unlink asked again while the first is unanswered/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const admission = admit(env.memory, [target], env.newId);\n    if (admission === null) return;\n    setMessage(null);\n",
+        '    const admission = { memory: env.memory, keys: [] as string[], token: "" };\n    setMessage(null);\n',
+      ),
+  },
+  {
+    id: "MU-2620",
+    title:
+      "WEB-11a R7 F1: the person's Archive admits every press (pressed twice, it archives twice); re-anchored in revision 8 to the shared owner (`archive.ts`), where every archive is now admitted",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /the person's Archive pressed twice while the first is saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const admission = admit(memory, [target], newId);\n      if (admission === null) return;\n",
+        '      const admission = { memory, keys: [] as string[], token: "" };\n',
+      ),
+  },
+  {
+    id: "MU-2621",
+    title:
+      "WEB-11a R7 F1: a field's Archive admits every press (pressed twice, it archives twice); re-anchored in revision 8 (the admission is the shared owner's, `archive.ts`): the field's button offers a second press while its archive runs",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/session-admission.test.tsx"],
+    expect: /the field's Archive pressed twice while the first is saved/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (action.pending)\n    return (\n      <Button variant="quiet" disabled reason={copy.SAVING}>\n',
+        '  if (false)\n    return (\n      <Button variant="quiet" disabled reason={copy.SAVING}>\n',
+      ),
+  },
+  {
+    id: "MU-2622",
+    title:
+      "WEB-11a R7 F1: every mount of a session counts as its owner (an older form's handler may keep input for, or save, a later one)",
+    file: "src/features/people/lifetime.ts",
+    tests: ["tests/features/people/lifetime.test.tsx"],
+    expect: /the latest mount owns it/,
+    patch: (t) =>
+      sub(
+        t,
+        "      mine.current !== null &&\n      memory.sessions.get(session) === mine.current,\n",
+        "      mine.current !== null,\n",
+      ),
+  },
+  {
+    id: "MU-2623",
+    title:
+      "WEB-11a R7 F2: the list takes its absence claims from the cache alone (the reviewer's defect: an unreadable queue shows 'No one here yet')",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /the unsent changes unreadable: no Empty|a queued archive may exist but the unsent changes are unreadable|the unsent changes unreadable: no 'No one matches'|the cap/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const known = changesKnown(outstanding);\n",
+        "  const known = true;\n",
+      ),
+  },
+  {
+    id: "MU-2624",
+    title:
+      "WEB-11a R7 F2: the list is not loading while its unsent changes are still read (it claims nobody meanwhile)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the unsent changes still read: loading, never Empty/,
+    patch: (t) =>
+      sub(
+        t,
+        '      (!step.settled && status !== "failed") ||\n      outstanding.status === "loading") &&\n',
+        '      (!step.settled && status !== "failed")) &&\n',
+      ),
+  },
+  {
+    id: "MU-2625",
+    title:
+      "WEB-11a R7 F2: the list's Try again keeps its failed watches (only the data layer's retry: a repaired store is never read again)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /Try again shows the person|a LATER window of the unsent changes fails|the cache read fails on a later page of a search/,
+    patch: (t) =>
+      sub(
+        t,
+        "        <OutstandingChain key={reading}>\n",
+        "        <OutstandingChain>\n",
+      ),
+  },
+  {
+    id: "MU-2626",
+    title:
+      "WEB-11a R7 F2: a scope's search matches the server's names, not the names shown (a queued rename is not found by its new name)",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /control, every unsent change read: found by the name shown/,
+    patch: (t) =>
+      sub(
+        t,
+        '          keep: (item) => wanted === "" || shownName(item).includes(wanted),\n',
+        '          keep: (item) =>\n            wanted === "" || normalise(item.label).includes(wanted),\n',
+      ),
+  },
+  {
+    id: "MU-2627",
+    title:
+      "WEB-11a R7 F2: a scope claims 'No one matches' with its unsent renames unread",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /the unsent changes unreadable: the failure is said, and 'No one matches' is not claimed/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const claimable = wanted === "" || changesKnown(outstanding);\n',
+        "  const claimable = true;\n",
+      ),
+  },
+  {
+    id: "MU-2628",
+    title:
+      "WEB-11a R7 assessment: a CLOSED database is taken as an absent one (every unsent change counted as read)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /absent only for a database known not to exist/,
+    patch: (t) =>
+      sub(
+        t,
+        '  return loadable.reason === "absent" ? "absent" : "failed";\n',
+        '  return loadable.reason === "error" ? "failed" : "absent";\n',
+      ),
+  },
+  {
+    id: "MU-2629",
+    title:
+      "WEB-11a R7 assessment: the field editor opens on an unreadable (or capped) chain of unsent changes",
+    // Re-anchored in WEB-11a revision 9 (review 9, finding 2): the failed and capped chain decisions moved to `field/prerequisites.ts`
+    // (two sites, as the one condition was); the same intent.
+    file: "src/features/people/field/prerequisites.ts",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the editor does not open on a guessed base/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '  if (outstanding.status === "failed")\n    return { kind: "failed", read: "changes" };\n',
+          "",
+        ),
+        '  if (outstanding.capped) return { kind: "capped" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2630",
+    title:
+      "WEB-11a R7 F3: the pressed action is never translated back (only the boxes' heights are held, as in revision 6)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /it is translated back while pressed/,
+    patch: (t) =>
+      sub(
+        t,
+        "      element.style.transform =\n        dx === 0 && dy === 0\n          ? held.style.transform\n          : `translate($" +
+          "{dx}px, $" +
+          "{dy}px)`;\n",
+        "      void element;\n",
+      ),
+  },
+  {
+    id: "MU-2631",
+    title:
+      "WEB-11a R7 F3: the pressed action's size is not held (a shorter label shrinks it from under the pointer)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect:
+      /it is translated back while pressed|is let go at once|a second pointer/,
+    patch: (t) =>
+      sub(
+        t,
+        "        action.style.width = `$" +
+          "{rect.width}px`;\n        action.style.height = `$" +
+          "{rect.height}px`;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2632",
+    title:
+      "WEB-11a R7 F3: an action disabled while pressed is still held for the click",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /an action disabled while pressed is let go at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !element.isConnected ||\n        element.matches(\":disabled, [aria-disabled='true']\")\n",
+        "        !element.isConnected\n",
+      ),
+  },
+  {
+    id: "MU-2633",
+    title:
+      "WEB-11a R7 F3: any pointer's release ends the press (a second pointer lets the first one's action go)",
+    file: "src/features/people/detail/steady.ts",
+    tests: ["tests/features/people/steady.test.tsx"],
+    expect: /a second pointer does not start another press/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (pointer === null || idOf(event) !== pointer) return;\n",
+        "      if (pointer === null) return;\n",
+      ),
+  },
+  {
+    id: "MU-2634",
+    title:
+      "WEB-11a R7 DA7-12: an absence is confirmed without the composed read (a hand-off from the queue to the cache claims it in between)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /the People list: the queue's read delivers first|the person's detail: the queue's read delivers first|a person's fields: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read.status === "loading") return children("unknown");\n',
+        '  return children("absent");\n',
+      ),
+  },
+  {
+    id: "MU-2635",
+    title:
+      "WEB-11a R7 DA7-12: the composed read stops after the step's first page",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /a step: the pages of the kind from the cursor/,
+    patch: (t) =>
+      sub(t, "        if (next === null) break;\n", "        break;\n"),
+  },
+  {
+    id: "MU-2636",
+    title:
+      "WEB-11a R7 DA7-12: the composed read stops after the first window of outstanding saves",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /a step: the pages of the kind from the cursor/,
+    patch: (t) =>
+      sub(t, "      if (page.next === null) break;\n", "      break;\n"),
+  },
+  {
+    id: "MU-2637",
+    title:
+      "WEB-11a R7 DA7-12: the list says 'No one here yet' from its separate reads alone",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the People list: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {neverSynced ? panel : confirmed(panel)}\n",
+        "        {panel}\n",
+      ),
+  },
+  {
+    id: "MU-2638",
+    title:
+      "WEB-11a R7 DA7-12: the detail confirms 'isn't on this device' whatever the composed read found",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the person's detail: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        '                (resource === null || resource.kind !== "person") &&\n',
+        "                true ||\n",
+      ),
+  },
+  {
+    id: "MU-2639",
+    title:
+      "WEB-11a R7 DA7-12: the detail confirms 'No fields yet.' whatever the composed read found",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /a person's fields: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ].every((row) => row.row.archived);\n",
+        "          ].every(() => true);\n",
+      ),
+  },
+  // ---- WEB-11a revision 8: review 8's findings 1 and 2 and observation 3 ----------------------------------------------------------
+  {
+    id: "MU-2640",
+    title:
+      "WEB-11a R8 F2: the ledger row ignores the target's running restore (a remounted row offers Restore again)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect:
+      /while the first restore is unsaved: Restore shows saving|restored from the detail, then the ledger opened/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {shown.row.can_edit && !shown.projected && action.pending ? (\n",
+        "      {shown.row.can_edit && !shown.projected && false ? (\n",
+      ),
+  },
+  {
+    id: "MU-2641",
+    title:
+      "WEB-11a R8 F2: each press claims a key of its own (the row-local latch: a remounted view's press is admitted beside the first)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect:
+      /while the first restore is unsaved: Restore shows saving|share the target's claim/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const admission = admit(memory, [target], newId);\n",
+        "      const admission = admit(memory, [newId()], newId);\n",
+      ),
+  },
+  {
+    id: "MU-2642",
+    title:
+      "WEB-11a R8 F2: the target's claim is let go before its save ends (as a row's latch is, on unmount)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /while the first restore is unsaved: Restore shows saving/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (admission === null) return;\n",
+        "      if (admission === null) return;\n      settle(admission);\n",
+      ),
+  },
+  {
+    id: "MU-2643",
+    title:
+      "WEB-11a R8 F2: every restore is a fresh request (a retry of one whose answer was lost is written twice)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /admits the retry as the SAME request/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const request = archiveRequestFor(memory, id, archived, version, newId);\n",
+        "      const request = archiveRequest({ id, archived });\n",
+      ),
+  },
+  {
+    id: "MU-2644",
+    title:
+      "WEB-11a R8 F2: the prepared request ignores the action (the opposite action reuses the earlier one's local id)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /the same action on the same version is the same request/,
+    patch: (t) =>
+      sub(
+        t,
+        "    `$" + "{archived}:$" + "{version}`,\n",
+        "    `$" + "{version}`,\n",
+      ),
+  },
+  {
+    id: "MU-2645",
+    title:
+      "WEB-11a R8 F2: a saved archive's request is not spent (the next deliberate action reuses its local id)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /the same action on the same version is the same request/,
+    patch: (t) => sub(t, "  memory.prepared.delete(target);\n", ""),
+  },
+  {
+    id: "MU-2646",
+    title:
+      "WEB-11a R8 F2: a refusal is told to no view but the one that pressed (a remounted row never says it)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /told to the remounted row/,
+    patch: (t) =>
+      sub(
+        t,
+        "        memory.actionReports.set(target, outcome.message);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2647",
+    title:
+      "WEB-11a R8 F2: a restore's answer is said whichever identity is shown by then",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /another identity is shown before the restore answers/,
+    patch: (t) => sub(t, "        !isCurrentMemory(memory) ||\n", ""),
+  },
+  {
+    id: "MU-2648",
+    title:
+      "WEB-11a R8 F1: the unread editor's close icon and Escape do not end the session (no discard given to the dialog)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect: /chain, (Close|Escape): the kept input is forgotten/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onDiscard={discard}\n      onRetainDraft={() => undefined}\n",
+        "      onRetainDraft={() => undefined}\n",
+      ),
+  },
+  {
+    id: "MU-2649",
+    title:
+      "WEB-11a R8 F1: the unread editor's Cancel only closes (the session's input stays kept)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect:
+      /chain, Cancel: the kept input is forgotten|a new field's kept input, its chain unreadable, Cancel/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in WEB-11a revision 9: the unread view's close is guarded by `shown()` (review 9, finding 1); the same intent.
+        "            onClick={() => {\n              discard();\n              close();\n            }}\n",
+        "            onClick={() => {\n              close();\n            }}\n",
+      ),
+  },
+  {
+    id: "MU-2650",
+    title:
+      "WEB-11a R8 F1: the unread editor's Try again ends the session (its input is lost to the read's repair)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect: /repaired, Try again: the same input comes back/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in WEB-11a revision 9: Try again is guarded by `shown()` (review 9, finding 1); the same intent.
+        "                  if (shown()) onRetry();\n",
+        "                  discard();\n                  if (shown()) onRetry();\n",
+      ),
+  },
+  {
+    id: "MU-2651",
+    title:
+      "WEB-11a R8 F1: the unread editor's sync control ends the session (its input is not kept for the next open)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect: /the sync control: the input is kept for the next open/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onDiscard={discard}\n      onRetainDraft={() => undefined}\n",
+        "      onDiscard={discard}\n      onRetainDraft={discard}\n",
+      ),
+  },
+  {
+    id: "MU-2652",
+    title:
+      "WEB-11a R8 O3: a quantity slot is restored without its texts checked (a numeric amount or a null unit is restored)",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect: /(numeric quantity amount|null quantity unit).*nothing is restored/,
+    patch: (t) =>
+      sub(
+        t,
+        '  quantity: (slot) => texts(slot, ["amount", "unit"]),\n',
+        "  quantity: (slot) => (isObject(slot) ? (slot as never) : null),\n",
+      ),
+  },
+  {
+    id: "MU-2653",
+    title:
+      "WEB-11a R8 O3: a list entry's flag is not checked (a choice selected by a text is restored)",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect: /a choice whose selection is a text/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read === null || !isObject(item) || typeof item[flag] !== "boolean")\n',
+        "  if (read === null || !isObject(item))\n",
+      ),
+  },
+  {
+    id: "MU-2654",
+    title:
+      "WEB-11a R8 O3: a malformed list entry is skipped instead of refusing the capture",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect:
+      /(checklist entry that is null|choice without a label|checklist item whose id is a number).*nothing is restored/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read === null) return null;\n",
+        "    if (read === null) continue;\n",
+      ),
+  },
+  {
+    id: "MU-2655",
+    title: "WEB-11a R8 O3: the boolean slot is restored whatever its value",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect: /a boolean that is a text/,
+    patch: (t) =>
+      sub(
+        t,
+        '    isObject(slot) && (typeof slot.value === "boolean" || slot.value === null)\n',
+        "    isObject(slot)\n",
+      ),
+  },
+  {
+    id: "MU-2656",
+    title:
+      "WEB-11a R9 F1: the field editor's owner is not keyed by its target (another field's route keeps the first field's view and session)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-target.test.tsx"],
+    expect:
+      /First → Second, (Cancel|Close|Escape): Second's session ends|First kept nothing, Second kept input/,
+    patch: (t) =>
+      sub(t, /key=\{`\$\{env\.identity\}[^`]*`\}/, "key={env.identity}"),
+  },
+  {
+    id: "MU-2657",
+    title:
+      "WEB-11a R9 F1: a replaced unread view's handlers still act (its Cancel ends a session and navigates after another view is shown)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-target.test.tsx"],
+    expect:
+      /the unread First's Cancel, invoked after Second is shown|the unread view's Cancel, invoked after Try again/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (shown() && shownSession !== undefined)\n",
+          "    if (shownSession !== undefined)\n",
+        ),
+        "  const close = () => {\n    if (shown()) onClose();\n  };\n",
+        "  const close = () => {\n    onClose();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-2658",
+    title:
+      "WEB-11a R9 F1: a replaced editor's Cancel still acts (it ends its session and navigates away from the field shown now)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-target.test.tsx"],
+    expect: /the normal First's Cancel, invoked after Second is shown/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (!shown()) return;\n    retired.current = true;\n",
+          "    retired.current = true;\n",
+        ),
+        "    if (!shown()) return;\n    forget();\n",
+        "    forget();\n",
+      ),
+  },
+  {
+    id: "MU-2659",
+    title:
+      "WEB-11a R9 F2: the editor's Try again reads nothing afresh (its failed watches stay failed)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect:
+      /repaired without any notification|one Try again reads both afresh|Try again while the read still fails|the field's read fails DURING an edit/,
+    patch: (t) => sub(t, "      key={reading}\n", ""),
+  },
+  {
+    id: "MU-2660",
+    title:
+      "WEB-11a R9 F2: a failed read of the edited field is taken as no field (the editor shows nothing)",
+    file: "src/features/people/field/prerequisites.ts",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect:
+      /the field's read fails (on the first open|DURING an edit|during an edit, Cancel|while the chain still loads)|repaired without any notification/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (field !== null && statusOf(field) === "failed")\n    return { kind: "failed", read: "field" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2661",
+    title:
+      "WEB-11a R9 F2: a failed read of the person in the editor is taken as no person (the editor shows nothing)",
+    file: "src/features/people/field/prerequisites.ts",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect: /the editor's read of the PERSON fails/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (statusOf(person) === "failed") return { kind: "failed", read: "person" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2662",
+    title:
+      "WEB-11a R9 F2: a known failure waits behind a read still loading (the chain's wait starves it)",
+    file: "src/features/people/field/prerequisites.ts",
+    tests: [
+      "tests/features/people/editor-reads.test.tsx",
+      "tests/features/people/editor-prerequisites.test.ts",
+    ],
+    expect:
+      /fails while the chain still loads|a failure is said even while every other read still loads/,
+    patch: (t) =>
+      sub(
+        t,
+        "): EditorReads {\n",
+        '): EditorReads {\n  if (outstanding.status === "loading") return { kind: "loading" };\n',
+      ),
+  },
+  {
+    id: "MU-2663",
+    title:
+      "WEB-11a R9 F2: a field the separate reads miss is said not to be here at once (no composed confirmation)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect: /delivered first: never 'not here'/,
+    patch: (t) =>
+      sub(
+        t,
+        "              absent={({ resource, drafts }) =>\n                foldRows(\n",
+        "              absent={({ resource, drafts }) =>\n                true ||\n                foldRows(\n",
+      ),
+  },
+  {
+    id: "MU-2664",
+    title:
+      "WEB-11a R9 F2: the unread editor names a field of another person in its title (PPL-5)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect: /the title names nothing of it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            field.value.merged.parent_id === personId\n              ? field.value.merged.label\n",
+        "            true\n              ? field.value.merged.label\n",
+      ),
+  },
+  {
+    id: "MU-2665",
+    title:
+      "WEB-11a R9 F2: Try again reads only the unsent changes afresh (the person's and the field's failed watches are above it)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the chain now carries the person as its witness; same mutation (the reads above it are not renewed).
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect:
+      /repaired without any notification|one Try again reads both afresh|Try again while the read still fails|the field's read fails DURING an edit/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(t, "      key={reading}\n", "      reading={reading}\n"),
+          "  retry,\n  onClose,\n}: {\n  env: PeopleEnv;\n",
+          "  retry,\n  onClose,\n  reading,\n}: {\n  reading?: number;\n  env: PeopleEnv;\n",
+        ),
+        "  return (\n    <OutstandingChain witness={personId}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
+        "  return (\n    <OutstandingChain key={reading} witness={personId}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
+      ),
+  },
+  {
+    id: "MU-2666",
+    title:
+      "WEB-11a R10 F1: an edit begun on an unsent create has no review once the create is published (Save waits for a sync that has happened)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: [
+      "tests/features/people/editor-publication.test.tsx",
+      "tests/features/people/editor-reads.test.tsx",
+    ],
+    expect:
+      /DA10-01: .*reviewed on the published field|DA9-08: .*delivered first/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const needsReview =\n    origin.kind === "create" &&\n',
+        "  const needsReview =\n    (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2667",
+    title:
+      "WEB-11a R10 F1: an unknown audience is taken as unchanged: the published field's edit is bound without its current audience having been read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-03: .*withheld/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const reviewAudienceReason =\n    nowAudience !== null\n",
+        "  const reviewAudienceReason =\n    (true as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2668",
+    title:
+      "WEB-11a R10 F1: the edit is bound (and saved) by itself when its create is published, without the person's review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-01: .* while-open:|DA10-03: .*withheld/,
+    patch: (t) =>
+      sub(
+        t,
+        '      announcer.announce(copy.PUBLISHED_TITLE, "polite");\n',
+        "      rebind();\n",
+      ),
+  },
+  {
+    id: "MU-2669",
+    title:
+      "WEB-11a R10 F1 (DA10-04): an unsent create is edited in place when it is not the create the edit began on (another create of the same field replaced it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-04: .*replaced the one the edit began on/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '        draft.local_id !== (origin.kind === "create" ? origin.localId : null) ||\n',
+          "",
+        ),
+        '            stored.local_id === draft.local_id &&\n            stored.status === "queued" &&\n            stored.command_digest === reviewed,',
+        '            stored.status === "queued" &&\n            stored.command_digest === reviewed,',
+      ),
+  },
+  {
+    id: "MU-2670",
+    title:
+      "WEB-11a R10 F1 (DA10-04): a create being sent is reported as a storage failure (Try again), not as being sent with the input kept",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-04: .*being sent/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (refusal === "not_queued") return fail(copy.CREATE_SENDING);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2671",
+    title:
+      "WEB-11a R10 F1 (DA10-07): the edit's origin is not kept with its input: a remount after the create was published takes the edit for one of the published field",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-01: .* (retained-remount|while-away):/,
+    patch: (t) =>
+      sub(
+        t,
+        "        retained: { ...kept, session: sessionOf(kept) ?? env.newId() },\n",
+        '        retained: {\n          ...kept,\n          origin: { kind: "field" },\n          session: sessionOf(kept) ?? env.newId(),\n        },\n',
+      ),
+  },
+  {
+    id: "MU-2672",
+    title:
+      "WEB-11a R10 F1 (DA10-03): the published field's edit is bound to the policy version the create made (a guessed 1), not to the one reviewed",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect:
+      /DA10-03: .*(shared since it was created|NEWER than the cached field)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setSnapshot(binding);\n    setOutcome(null);\n    setResubmit({ binding, revision: state.revision });\n",
+        "    const guessed = { ...binding, policyVersion: 1 };\n    setSnapshot(guessed);\n    setOutcome(null);\n    setResubmit({ binding: guessed, revision: state.revision });\n",
+      ),
+  },
+  // Review 11, R11.1 (DA11-03/DA11-08): the People world's outbox now judges a reviewed body at the write as the real one does, so the
+  // callers' predicates are held to a change the outbox itself committed while the person's save was held at the write.
+  {
+    id: "MU-2673",
+    title:
+      "WEB-11a R11 (DA11-03): a field's in-place edit of its queued update states no reviewed body, so another edit committed meanwhile is overwritten",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*field: .*while the outbox commits another edit of L/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...putFieldUpdateRequest(base),\n          expectDraft: reviewedDraft(bound),\n",
+        "          ...putFieldUpdateRequest(base),\n",
+      ),
+  },
+  {
+    id: "MU-2674",
+    title:
+      "WEB-11a R11 (DA11-03): an unlinked person's in-place rename states no reviewed body, so another rename committed meanwhile is overwritten",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*rename: .*while the outbox commits another rename/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...renameEditRequest(input),\n          expectDraft: reviewedDraft(snapshot),\n",
+        "          ...renameEditRequest(input),\n",
+      ),
+  },
+  {
+    id: "MU-2675",
+    title:
+      "WEB-11a R11 (DA11-03): an unsent create's in-place edit is not judged on its reviewed digest at the write (only before it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect:
+      /DA11-03: .*queued create: .*while the outbox commits another edit of the create/,
+    patch: (t) =>
+      sub(
+        t,
+        "            stored.command_digest === reviewed,",
+        "            true,",
+      ),
+  },
+  {
+    id: "MU-2676",
+    title:
+      "WEB-11a R11 (DA11-03): a field edit refused at the write (draft_changed) falls back to queuing the older form",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*field: .*while the outbox commits another edit of L/,
+    // Re-anchored in WEB-11a revision 12: the older form is now ALSO refused at the write unless it names the save it follows, so the
+    // R11 defect ("falls back to queuing the older form", unguarded) is the page's check bypassed AND no predecessor named.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(bound, base.fieldId),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2677",
+    title:
+      "WEB-11a R11 (DA11-03): a rename refused at the write (draft_changed) falls back to queuing the older form",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-continuation.test.tsx"],
+    expect: /DA11-03: .*rename: .*while the outbox commits another rename/,
+    // Re-anchored in WEB-11a revision 12: the older form is now ALSO refused at the write unless it names the save it follows, so the
+    // R11 defect ("falls back to queuing the older form", unguarded) is the page's check bypassed AND no predecessor named.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(snapshot, person.id),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2678",
+    title:
+      "WEB-11a R12.1 (DA12-02): the predecessor's body digest is not compared at the write",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /R12\.1 \(field\).*peer edit: changed/,
+    patch: (t) =>
+      sub(t, "    stored.command_digest !== expected.digest ||\n", ""),
+  },
+  {
+    id: "MU-2679",
+    title:
+      "WEB-11a R12.1 (DA12-02): the predecessor's base is not related to the base the transaction resolved",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /another save came between|a published version moved the base/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (typeof base !== "number" || bases[expected.resourceId] !== base + 1)',
+        '  if (typeof base !== "number")',
+      ),
+  },
+  {
+    id: "MU-2680",
+    title:
+      "WEB-11a R12.1 (DA12-02): an unsettled predecessor need not be the save the new draft waits on",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /not what the new draft waits on/,
+    patch: (t) =>
+      sub(
+        t,
+        '    stored.status === "acknowledged" || dependsOn.includes(stored.local_id)',
+        "    true",
+      ),
+  },
+  {
+    id: "MU-2681",
+    title:
+      "WEB-11a R12.1 (DA12-02): an acknowledged predecessor (its body answered and final) is refused because nothing waits on it",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /acknowledged, same body \(final\), not waited on: stands/,
+    patch: (t) =>
+      sub(
+        t,
+        '    stored.status === "acknowledged" || dependsOn.includes(stored.local_id)',
+        "    dependsOn.includes(stored.local_id)",
+      ),
+  },
+  {
+    id: "MU-2682",
+    title:
+      "WEB-11a R12.1 (DA12-01): the transaction comparison removed alone (the original R12.1 schedule)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/outbox-predecessor.test.ts",
+      "tests/features/people/editor-successor.test.tsx",
+    ],
+    expect:
+      /R12\.1 \((field|rename)\).*(peer edit: changed|edited elsewhere to B)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    request.expectPredecessor !== undefined &&\n    !predecessorStands(",
+        "    false &&\n    !predecessorStands(",
+      ),
+  },
+  {
+    id: "MU-2683",
+    title:
+      "WEB-11a R12.1 (DA12-03): the request boundary drops the predecessor (it never reaches the transaction)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /R12\.1 \((field|rename)\).*peer edit: changed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ...(request.expectPredecessor === undefined\n      ? {}\n      : {\n          expectPredecessor: {",
+        "    ...(true\n      ? {}\n      : {\n          expectPredecessor: {",
+      ),
+  },
+  {
+    id: "MU-2684",
+    title:
+      "WEB-11a R12.1 (DA12-03): the enqueue transaction does not read the predecessor by its key (absence taken)",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /R12\.1 \((field|rename)\).*peer edit: (none|identical)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      predecessor: reads.predecessor,",
+        "      predecessor: undefined,",
+      ),
+  },
+  {
+    id: "MU-2685",
+    title:
+      "WEB-11a review 12 (DA12-07): an edit in place ignores the newest-save rule",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /reverse schedule \((field|rename)\).*successor first/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (request.expectLatest === true) {",
+        "  if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-2686",
+    title:
+      "WEB-11a review 12 (DA12-07): any rebuild behind a later save counts as the audience's confirmation (content changes go on)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /content-changing rebuild/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return digestOf(before as JsonObject) === digestOf(after as JsonObject);",
+        "    return true;",
+      ),
+  },
+  {
+    id: "MU-2687",
+    title:
+      "WEB-11a review 12 (DA12-07): no rebuild counts as the audience's confirmation (the defaults review deadlocks behind a later save)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /confirmation \(the revision only\) is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return digestOf(before as JsonObject) === digestOf(after as JsonObject);",
+        "    return false;",
+      ),
+  },
+  {
+    id: "MU-2688",
+    title:
+      "WEB-11a review 12 (DA12-07): the edit transaction does not read the later saves of the draft's targets",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /reverse schedule \((field|rename)\).*successor first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (fold.latest !== undefined) later.push(fold.latest);",
+        "",
+      ),
+  },
+  {
+    id: "MU-2689",
+    title:
+      "WEB-11a review 12 (DA12-07): a settled later save still blocks an edit in place",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /later save that is settled/,
+    patch: (t) => sub(t, "              !isTerminal(other) &&\n", ""),
+  },
+  {
+    id: "MU-2690",
+    title:
+      "WEB-11a review 12 (DA12-07): a later save of an unrelated target blocks an edit in place",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /unrelated target: edited|another item does not block/,
+    patch: (t) =>
+      sub(
+        t,
+        "              other.index_targets.some((id) => primaries.includes(id)),",
+        "              true,",
+      ),
+  },
+  {
+    id: "MU-2691",
+    title:
+      "WEB-11a R12.1 (DA12-05): the field editor's successor names no predecessor",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(field\).*edited elsewhere to B/,
+    patch: (t) => sub(t, "        ...followsOf(bound, base.fieldId),\n", ""),
+  },
+  {
+    id: "MU-2692",
+    title:
+      "WEB-11a R12.1 (DA12-05): the unlinked rename's successor names no predecessor",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(rename\).*edited elsewhere to B/,
+    patch: (t) => sub(t, "        ...followsOf(snapshot, person.id),\n", ""),
+  },
+  {
+    id: "MU-2693",
+    title:
+      "WEB-11a review 12 (DA12-05): the field editor's in-place edit asks no newest-save rule",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(field\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        "          // Only while no later save of the field follows it (D-11a-15, review 12): that save was built over this body.\n          expectLatest: true,\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2694",
+    title:
+      "WEB-11a review 12 (DA12-05): the unlinked rename's in-place edit asks no newest-save rule",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(rename\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        "          // Only while no later rename of the person follows it (D-11a-15, review 12): that save was built over this body.\n          expectLatest: true,\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2695",
+    title:
+      "WEB-11a review 12 (DA12-05): the field editor reports not_latest as a failure instead of the review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(field\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        '          edited.reason !== "draft_changed" &&\n          edited.reason !== "not_latest"',
+        '          edited.reason !== "draft_changed"',
+      ),
+  },
+  {
+    id: "MU-2696",
+    title:
+      "WEB-11a review 12 (DA12-05): the unlinked rename reports not_latest as a failure instead of the review",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(rename\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        '          edited.reason !== "draft_changed" &&\n          edited.reason !== "not_latest"',
+        '          edited.reason !== "draft_changed"',
+      ),
+  },
+  {
+    id: "MU-2697",
+    title:
+      "WEB-11a R12.1 (DA12-05): the field editor reports predecessor_changed as a storage failure instead of the review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(field\).*edited elsewhere to B/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (queued.kind === "refused" && queued.reason === "predecessor_changed")\n        reviewAgain = true;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2698",
+    title:
+      "WEB-11a R12.1 (DA12-05): the unlinked rename reports predecessor_changed as a storage failure instead of the review",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(rename\).*edited elsewhere to B/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (queued.kind === "refused" && queued.reason === "predecessor_changed")\n        reviewAgain = true;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2699",
+    title:
+      "WEB-11a review 12 (DA12-05): the rename re-binds after a refusal to the render that saved, not the latest read",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(rename\).*edited elsewhere to B/,
+    patch: (t) =>
+      sub(
+        t,
+        "        now.person,\n        draftsRef.current,\n        now.latest?.localId ?? null,",
+        "        person,\n        drafts,\n        shown.latest?.localId ?? null,",
+      ),
+  },
+  {
+    id: "MU-2700",
+    title:
+      "WEB-11a review 12 (chain record): the unsent create's edit asks no newest-save rule",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(unsent create\).*a save of the same field is queued after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            stored.command_digest === reviewed,\n          expectLatest: true,\n",
+        "            stored.command_digest === reviewed,\n",
+      ),
+  },
+  {
+    id: "MU-2701",
+    title:
+      "WEB-11a R12.1 (DA12-09): the held content step names no predecessor in its hand-off",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /review 12: .*is edited to B by another page/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ...(predecessor === null\n          ? {}",
+        "        ...(true\n          ? {}",
+      ),
+  },
+  {
+    id: "MU-2702",
+    title:
+      "WEB-11a R12.1 (DA12-08, v4 record): an unknown binding is not refused before the audience step",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /unknown: nothing is sent/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (copy.change.predecessor === "unknown") return fail("needs_review");\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2703",
+    title:
+      "WEB-11a R12.1 (DA12-09): a binding the page already sees changed still changes the audience",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /known to have changed already/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (copy.change.predecessor !== null && deps.follows?.() === "changed")',
+        "  if (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2704",
+    title:
+      "WEB-11a R12.1 (DA12-09): a predecessor refusal at the hand-off is reported as not saved, not as changed content",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /is edited to B by another page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    guard.moved || predecessorChanged ? "content_changed" : "not_saved",',
+        '    guard.moved ? "content_changed" : "not_saved",',
+      ),
+  },
+  {
+    id: "MU-2705",
+    title:
+      "WEB-11a R12.1 (DA12-08, v4 record): a v 4 copy is read as bound to nothing (a binding guessed)",
+    file: "src/features/people/field/held-store.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /v 4 copy never recorded it/,
+    patch: (t) =>
+      sub(
+        t,
+        '    raw.v === 5 ? parsePredecessor(raw.predecessor) : "unknown";',
+        "    raw.v === 5 ? parsePredecessor(raw.predecessor) : null;",
+      ),
+  },
+  {
+    id: "MU-2706",
+    title:
+      "WEB-11a R12.1 (v4 record): an unbound hold is listed as an ordinary hold (Send now offered)",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /review 12: .*no Send now or Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        '            ) : held.change.predecessor === "unknown" ? (',
+        "            ) : (false as boolean) ? (",
+      ),
+  },
+  {
+    id: "MU-2707",
+    title: "WEB-11a R12.1 (DA12-08): 'Hold as draft' records no predecessor",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /Hold as draft' records the save its value was typed over: L queued/,
+    patch: (t) =>
+      sub(
+        t,
+        "          predecessor: heldPredecessorOf(bound, existing.id),",
+        "          predecessor: null,",
+      ),
+  },
+  {
+    id: "MU-2708",
+    title:
+      "WEB-11a R12.1 (DA12-02): the request boundary accepts a predecessor on an edit or a supersession (it would check nothing)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /accepted on an enqueue only/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (op !== "enqueue" && request.expectPredecessor !== undefined)',
+        "  if (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2709",
+    title:
+      "WEB-11a R12.1 (DA12-02): a predecessor of another resource than the request's version-checked target is accepted",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /one of another resource/,
+    patch: (t) => sub(t, "      !named ||\n", ""),
+  },
+  // ---- WEB-11a revision 16 (review 15, R15.1; design assessment DA15-01..04): a duplicate's field count only under a visible person ----
+  {
+    id: "MU-2751",
+    title:
+      "WEB-11a R15.1 (DA15-04): the parent-and-children read lists the children whatever the parent (no person in the cache)",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/visible-children.test.ts"],
+    expect:
+      /no person in the cache: hidden, though its fields are still cached/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (await reader.get("cache", input.parentId))?.kind === input.parentKind\n',
+        "    (true as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2752",
+    title:
+      "WEB-11a R15.1 (DA15-02): any cached row of the parent's id counts as a visible person (the kind is not checked)",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/visible-children.test.ts"],
+    expect: /a row of that id that is not a person: hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (await reader.get("cache", input.parentId))?.kind === input.parentKind\n',
+        '    (await reader.get("cache", input.parentId)) !== undefined\n',
+      ),
+  },
+  {
+    id: "MU-2753",
+    title:
+      "WEB-11a R15.1 (DA15-01): a duplicate hint's count reads its person's fields alone again (the review's counterexample)",
+    file: "src/features/people/duplicates/DuplicatesView.tsx",
+    tests: ["tests/features/people/duplicate-visibility.test.tsx"],
+    expect: /the person is removed, its field kept: no count/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '  const read = useVisibleChildren({\n    parentId: personId,\n    parentKind: "person",\n    kind: "field",\n  });\n  if (read.status !== "ready" || read.value === null) return null;\n  const page = read.value;\n',
+          '  const read = useResourceList({ kind: "field", parentId: personId });\n  if (read.status !== "ready") return null;\n  const page = read.value;\n',
+        ),
+        'import { useCachedResource, useVisibleChildren } from "../../../data";',
+        'import { useCachedResource, useResourceList } from "../../../data";',
+      ),
+  },
+  {
+    id: "MU-2754",
+    title:
+      "WEB-11a R15.1 (DA15-03): the parent-and-children read is not renewed for a new parent, so it keeps the earlier parent's answer",
+    file: "src/data/ui/react.tsx",
+    tests: ["tests/data/hooks.test.tsx"],
+    expect: /another parent is a NEW read that starts loading/,
+    patch: (t) =>
+      sub(
+        t,
+        "      options.kind,\n      options.parentId,\n      options.parentKind,\n",
+        "      options.kind,\n      options.parentKind,\n",
+      ),
+  },
+  {
+    id: "MU-2755",
+    title:
+      "WEB-11a R15.1 (DA15-06): the people list's field count reads the fields alone again, so a row its list has not yet withdrawn counts a removed person's fields",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/duplicate-visibility.test.tsx"],
+    expect: /the stale row shows no count/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '  const read = useVisibleChildren({\n    parentId: personId,\n    parentKind: "person",\n    kind: "field",\n  });\n  if (read.status !== "ready" || read.value === null) return null;\n  const page = read.value;\n',
+          '  const read = useResourceList({ kind: "field", parentId: personId });\n  if (read.status !== "ready") return null;\n  const page = read.value;\n',
+        ),
+        "  useStatusInputs,\n  useVisibleChildren,\n",
+        "  useStatusInputs,\n  useResourceList,\n",
+      ),
+  },
+  // ---- WEB-11a revision 17 (review 16, R16.1; design assessment DA16-01..10, DA16-S1): a field shown only with its person from the same read ----
+  {
+    id: "MU-2840",
+    title:
+      "WEB-11a R16.1 (DA16-02): the field page holds any cached row of the parent's id, whatever its kind",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /a row of the person's id that is not a person: not held/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (row): row is CacheRow => row?.kind === input.parentKind,\n",
+        "      (row): row is CacheRow => row !== undefined,\n",
+      ),
+  },
+  {
+    id: "MU-2841",
+    title:
+      "WEB-11a R16.1 (DA16-05): the drafts of rows the read does not answer (their person not held) are read with the page",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /no drafts of it are read/,
+    patch: (t) =>
+      sub(
+        t,
+        '                .filter((row) => parentIds.has(row.parent_id ?? ""))\n',
+        "                .filter(() => true)\n",
+      ),
+  },
+  {
+    id: "MU-2842",
+    title:
+      "WEB-11a R16.1 (DA16-05): every draft naming a row is folded over it, a conflict and a released acknowledgement included",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /only the outstanding drafts naming a field/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 18 (review 17, R17.1): the outstanding test moved into the windowed walk; same mutation.
+        "          LIVE.includes(draft.status) ||\n",
+        "          (true as boolean) ||\n",
+      ),
+  },
+  {
+    id: "MU-2843",
+    title:
+      "WEB-11a R16.1 (DA16-07): more drafts over a page than one read answers whole are answered as all of them",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /more draft entries over the page than one read answers whole/,
+    patch: (t) =>
+      // Re-anchored in revision 18 (review 17, R17.1): the bound is of the outstanding drafts held; same mutation.
+      sub(t, "          if (kept.size > NAMING_MOST) return null;\n", ""),
+  },
+  {
+    id: "MU-2844",
+    title:
+      "WEB-11a R16.1 (DA16-04): the person of a page is read only through its children (a person with none is not held, and the live read does not depend on them)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /a visible person with no fields: held, with an empty page/,
+    patch: (t) =>
+      sub(
+        t,
+        "      input.parentId === undefined ? [] : [input.parentId],\n",
+        "      [],\n",
+      ),
+  },
+  {
+    id: "MU-2845",
+    title:
+      "WEB-11a R16.1 (DA16-08): the editor's read ignores the person its route names (a field only this device creates has no person read with it)",
+    file: "src/data/plans/merged-under.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /the parent the caller names is read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const parentId = input.parentId ?? resource.reads.base?.parent_id ?? null;\n",
+        "    const parentId = resource.reads.base?.parent_id ?? null;\n",
+      ),
+  },
+  {
+    id: "MU-2846",
+    title:
+      "WEB-11a R16.1 (DA16-05): the drafts' window says its witness was held whatever its transaction read",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect:
+      /readOutstandingCreates: with a witness the window says whether the cache holds it/,
+    patch: (t) =>
+      sub(
+        t,
+        '          witnessed:\n            (await reader.get("cache", witness.id))?.kind === witness.kind,\n',
+        "          witnessed: true,\n",
+      ),
+  },
+  {
+    id: "MU-2847",
+    title:
+      "WEB-11a R16.1 (DA16-09): held copies are read under any cached row of the person's id, whatever its kind",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect:
+      /readFormCopiesUnder: the copies of a prefix and whether the cache holds the person, as that kind/,
+    patch: (t) =>
+      sub(
+        t,
+        '      (await reader.get("cache", input.witness.id))?.kind ===\n      input.witness.kind,\n',
+        '      (await reader.get("cache", input.witness.id)) !== undefined,\n',
+      ),
+  },
+  {
+    id: "MU-2848",
+    title:
+      "WEB-11a R16.1 (DA16-03, invariant 4): a field page read without the person is reported as an ordinary page (this device's own fields stay shown)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /WITHOUT the person withdraws this device's own unsent field shown before/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (parentId !== undefined && parents[parentId] === undefined)\n    return { status, rows: [], next: read.next, hidden: true };\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2849",
+    title:
+      "WEB-11a R16.1 (DA16-03, invariant 4): a step goes on past a page that no longer holds the parent (what earlier pages kept stays)",
+    file: "src/features/people/reads.tsx",
+    tests: [
+      "tests/features/people/archive-reports.test.tsx",
+      "tests/features/people/parent-read-coherence.test.tsx",
+    ],
+    expect:
+      /a later page whose read no longer holds the parent withdraws|WITHOUT the person withdraws this device's own unsent field/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (entry.report.hidden)\n      return { ...partial("ready"), rows: [], hidden: true };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2850",
+    title:
+      "WEB-11a R16.1 (DA16-05): the detail shows the unsent changes read from a state without the person under the person's earlier read",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /an unsent field created in another page, read from a state without the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "          outstanding.witnessed === false &&\n",
+        "          (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2851",
+    title:
+      "WEB-11a R16.1 (DA16-08): the editor shows the unsent changes read from a state without the person under the person's earlier read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /the editor's own read of the unsent changes, newer than its person-and-field read and the detail's: read without the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "          outstanding.witnessed === false &&\n",
+        "          (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2852",
+    title:
+      "WEB-11a R16.1 (DA16-06): the editor edits a cached field under a person only this device creates",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect: /only this device creates is never edited or shown in the editor/,
+    patch: (t) =>
+      sub(
+        t,
+        "                cachedPerson !== null &&\n                  field.status",
+        "                field.status",
+      ),
+  },
+  {
+    id: "MU-2853",
+    title:
+      "WEB-11a R16.1 (the review's counterexample, editor): the editor reads the person on its own again, beside the field's read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /the field's newer value with the person removed \((child-first|the editor's own read first)\)/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const person = partOf(read, (value) =>\n    fieldId === null ? value.resource : value.parent,\n  );\n",
+          "  const person = useCachedResource(personId);\n",
+        ),
+        "  useConflictInbox,\n  useDataActions,\n",
+        "  useCachedResource,\n  useConflictInbox,\n  useDataActions,\n",
+      ),
+  },
+  {
+    id: "MU-2854",
+    title:
+      "WEB-11a R16.1 (DA16-09): held changes are listed whatever the person's read in the same transaction says",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /removed the person is never listed under the person's earlier read/,
+    patch: (t) => sub(t, "  if (!read.value.witnessed) return null;\n", ""),
+  },
+  {
+    id: "MU-2855",
+    title:
+      "WEB-11a DA16-S1: the shared sharing dialog names and reads a field whatever its person's read in the same transaction",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /embedded: the field changed and its person removed|deep link \/sharing\/items\/<field> with the person not on this device/,
+    patch: (t) =>
+      sub(
+        t,
+        "    resource !== null && (parentId === null || read?.parent?.base)\n",
+        "    resource !== null\n",
+      ),
+  },
+  {
+    id: "MU-2856",
+    title:
+      "WEB-11a R16.1 (DA16-05): the ledger folds no unsent change over a field (its own drafts, read with it, are dropped)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect: /an unsent archive of a field, read with its person \(control\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  foldOne(child.row, changesById(changesOfAll(child.drafts)));\n",
+        "  foldOne(child.row, changesById([]));\n",
+      ),
+  },
+  {
+    id: "MU-2857",
+    title:
+      "WEB-11a R16.1 (DA16-05): the detail folds the separately read chain over a cached field instead of the drafts read with it",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /a cached field's unsent change is read WITH the field and its person: shown under the visible person \(control\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    foldOne(child.row, changesById(changesOfAll(child.drafts))),\n",
+        "    foldOne(child.row, changesById(changes)),\n",
+      ),
+  },
+  {
+    id: "MU-2858",
+    title:
+      "WEB-11a R16.1 (DA16-03): the field page's read is not renewed for another person, so it keeps the earlier person's answer",
+    file: "src/data/ui/outstanding.tsx",
+    tests: ["tests/data/hooks.test.tsx"],
+    expect: /a field page with its person: another parent is a NEW read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    [kind, parentKind, parentId, after, kinds],\n",
+        "    [kind, parentKind, after, kinds],\n",
+      ),
+  },
+  {
+    id: "MU-2859",
+    title:
+      "WEB-11a R16.1 (DA16-08): the editor's read is not renewed for another field, so it keeps the earlier field's answer",
+    file: "src/data/ui/merged-under.tsx",
+    tests: ["tests/data/hooks.test.tsx"],
+    expect: /a field with its person in one read: another field is a NEW read/,
+    patch: (t) => sub(t, "    [id, parentId],\n", "    [parentId],\n"),
+  },
+
+  // ---- WEB-11a revision 18 (review 17, R17.1; design assessment DA17-14): retained history never counts against a page's drafts ----
+  {
+    id: "MU-2860",
+    title:
+      "WEB-11a R17.1 (DA17-14): every entry naming the page is counted against the bound before its status is looked at (the reviewed defect)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: retained history never counts against a page's outstanding drafts/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const kept = new Map<LocalId, DraftRow>();\n  for (const id of [...new Set(ids)].sort()) {\n",
+          "  const kept = new Map<LocalId, DraftRow>();\n  let entries = 0;\n  for (const id of [...new Set(ids)].sort()) {\n",
+        ),
+        "      for (const draft of rows) {\n        // A draft naming several",
+        "      for (const draft of rows) {\n        if ((entries += 1) > NAMING_MOST) return null;\n        // A draft naming several",
+      ),
+  },
+  {
+    id: "MU-2861",
+    title:
+      "WEB-11a R17.1 (DA17-14): the page's drafts are not limited to the kinds asked for (another feature's queued work is folded over a field)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: retained history never counts against a page's outstanding drafts/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (kept.has(draft.local_id) || !kinds.includes(draft.kind)) continue;\n",
+        "        if (kept.has(draft.local_id)) continue;\n",
+      ),
+  },
+  {
+    id: "MU-2862",
+    title:
+      "WEB-11a R17.1 (DA17-14): a draft naming several rows of the page is counted once per row against the bound",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: each draft counted once; real overflow stays incomplete/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  const kept = new Map<LocalId, DraftRow>();\n  for (const id of [...new Set(ids)].sort()) {\n",
+            "  const kept = new Map<LocalId, DraftRow>();\n  let hits = 0;\n  for (const id of [...new Set(ids)].sort()) {\n",
+          ),
+          "        if (kept.has(draft.local_id) || !kinds.includes(draft.kind)) continue;\n",
+          "        if (!kinds.includes(draft.kind)) continue;\n",
+        ),
+        "          if (kept.size > NAMING_MOST) return null;\n",
+        "          if ((hits += 1) > NAMING_MOST) return null;\n",
+      ),
+  },
+  {
+    id: "MU-2863",
+    title:
+      "WEB-11a R17.1 (DA17-14): an acknowledged draft counts over the page whether or not its effect still stands",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: an acknowledgement counts only while its first primary target's effect stands/,
+    patch: (t) =>
+      sub(
+        t,
+        '          (draft.status === "acknowledged" &&\n            (await effectStands(reader, draft.target_resource_ids[0], draft)))\n',
+        '          draft.status === "acknowledged"\n',
+      ),
+  },
+  {
+    id: "MU-2864",
+    title:
+      "WEB-11a R17.1 (DA17-14): an acknowledgement's effect is looked up on the row walked, not on its first primary target",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: an acknowledgement counts only while its first primary target's effect stands/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (await effectStands(reader, draft.target_resource_ids[0], draft)))\n        ) {\n",
+        "            (await effectStands(reader, id, draft)))\n        ) {\n",
+      ),
+  },
+  {
+    id: "MU-2865",
+    title:
+      "WEB-11a R17.1 (DA17-14): the page's drafts are answered in key order, not queue order",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: live work among retained history, in queue order/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const rows = [...kept.values()].sort(bySeq);\n  const bodies",
+        "  const rows = [...kept.values()].sort((a, b) =>\n    a.local_id.localeCompare(b.local_id),\n  );\n  const bodies",
+      ),
+  },
+  {
+    id: "MU-2866",
+    title:
+      "WEB-11a R17.1 (DA17-14): only the first window of a row's index entries is walked (live work behind retained history is missed)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: live work among retained history, in queue order/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (rows.length < WINDOW) break;\n    }\n  }\n  const rows = [...kept.values()]",
+        "      break;\n    }\n  }\n  const rows = [...kept.values()]",
+      ),
+  },
+  {
+    id: "MU-2867",
+    title:
+      "WEB-11a R17.1 (DA17-14): only the first row of the page has its drafts read",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: live work among retained history, in queue order/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const id of [...new Set(ids)].sort()) {\n",
+        "  for (const id of [...new Set(ids)].sort().slice(0, 1)) {\n",
+      ),
+  },
+  {
+    id: "MU-2868",
+    title:
+      "WEB-11a R17.1 (design assessment C3): an outstanding header without its body is dropped, and the rest answered as all of them",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: a header without its body is not an answer of everything/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (body === undefined) return null;\n    out.push",
+        "    if (body === undefined) continue;\n    out.push",
+      ),
+  },
+  {
+    id: "MU-2869",
+    title:
+      "WEB-11a R17.1 (DA17-14): a page whose drafts could not be read whole is shown as if it had none",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/retained-history.test.tsx"],
+    expect: /control: 1,001 queued edits over (a field|an archived field)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (drafts === null) return { status: "failed", rows: [], next: null };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2870",
+    title:
+      "WEB-11a R19.1: New person keeps its input only through the sync control (the reviewed defect: a remount loses what was typed and its session)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: [
+      "tests/features/people/completion-lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /keeps its latest input and session across a remount (the same identity's tree remounted|the list moved at the tablet width)|New person remounted while its save runs remounted and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.memory.drafts.set(RETAINED, {\n      session,\n      form: state,\n    } satisfies RetainedPerson);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2871",
+    title:
+      "WEB-11a R19.1: New person keeps only what the form opened with (input typed later, after an earlier sync-control snapshot, is lost)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /typed after an earlier sync-control snapshot, then (remounted|moved at the tablet width): the later input/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [env, session, state, owns]);\n",
+        "    // biome-ignore lint/correctness/useExhaustiveDependencies: mutant\n  }, [env, session, owns]);\n",
+      ),
+  },
+  {
+    id: "MU-2872",
+    title:
+      "WEB-11a R19.1: an untouched New person is kept too (a remounted empty form says its unsaved changes were kept)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect: /control: an untouched form remounted keeps nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (state.revision === 0 && !restored.current) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2873",
+    title:
+      "WEB-11a R19.1: a restored New person begins a new session (its running save, prepared request and completion are no longer its own)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: [
+      "tests/features/people/completion-lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /reopened with the name, the note and the same session|remounted and reopened while its save runs: it shows saving|kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const [session] = useState(() => sessionOf(retained) ?? env.newId());\n",
+        "  const [session] = useState(() => env.newId());\n",
+      ),
+  },
+  {
+    id: "MU-2874",
+    title:
+      "WEB-11a R19.1: a restored New person opens empty (the kept form is ignored, though its session is restored)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: [
+      "tests/features/people/completion-lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /reopened with the name, the note and the same session|typed after an earlier sync-control snapshot|while the form is remounted and reopened: told to the reopened form/,
+    patch: (t) =>
+      sub(
+        t,
+        "    retained?.form ?? newPersonForm(),\n",
+        "    newPersonForm(),\n",
+      ),
+  },
+
+  // WEB-11a revision 20 (review 20, R20.1): a superseded linkage read changes nothing (src/features/people/reads.tsx `readLinkage`).
+  {
+    id: "MU-2875",
+    title:
+      "WEB-11a R20.1: every linkage read's answer is applied, whichever read is current (the reviewed defect: an answer read before the unlink replaces the one read after it)",
+    file: "src/features/people/reads.tsx",
+    tests: [
+      "tests/features/people/linkage-reads.test.ts",
+      "tests/features/people/linkage-supersession.test.tsx",
+    ],
+    expect:
+      /older answer last: the page knows the unlinked person|superseded, .*nothing changes|the rename's read answers last|the first Reload's read answers last/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (\n        !isCurrentMemory(memory) ||\n        memory.linkageReads.get(personId) !== reading\n      )\n        return;\n",
+        "      if (!isCurrentMemory(memory)) return;\n",
+      ),
+  },
+  {
+    id: "MU-2876",
+    title:
+      "WEB-11a R20.1: only a superseded SUCCESS is ignored (a superseded refusal or failure is still applied, and takes the current read's place)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /superseded, (forbidden|not found|uncertain|not sent|closed)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        memory.linkageReads.get(personId) !== reading\n",
+        "        (result.ok && memory.linkageReads.get(personId) !== reading)\n",
+      ),
+  },
+  {
+    id: "MU-2877",
+    title:
+      "WEB-11a R20.1: a superseded read still removes the read on its way (the current read is no longer joined, and its answer is lost)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /still loading, the current read stays the one joined/,
+    patch: (t) =>
+      sub(
+        t,
+        "      )\n        return;\n      memory.linkageReads.delete(personId);\n",
+        "      ) {\n        memory.linkageReads.delete(personId);\n        return;\n      }\n      memory.linkageReads.delete(personId);\n",
+      ),
+  },
+  {
+    id: "MU-2878",
+    title:
+      "WEB-11a R20.1: a read of another identity's memory is applied to it (only the read slot is compared, not the memory kept)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /a read answering after the account changed changes neither memory/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !isCurrentMemory(memory) ||\n        memory.linkageReads.get(personId) !== reading\n",
+        "        memory.linkageReads.get(personId) !== reading\n",
+      ),
+  },
+  {
+    id: "MU-2879",
+    title:
+      "WEB-11a R20.1: an env of a superseded identity still starts a linkage read",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /an env of a superseded identity asks nothing at all/,
+    patch: (t) => sub(t, "  if (!isCurrentMemory(memory)) return null;\n", ""),
+  },
+  {
+    id: "MU-2880",
+    title:
+      "WEB-11a R20.1: a forced read joins the read on its way (a read asked after a command is answered by one asked before it)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect:
+      /a forced read is a second|older answer last: the page knows the unlinked person/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (options.force) memory.refused.delete(personId);\n",
+        "  if (options.force) memory.refused.delete(personId);\n  const joined = memory.linkageReads.get(personId);\n  if (joined !== undefined) return joined;\n",
+      ),
+  },
+  {
+    id: "MU-2881",
+    title:
+      "WEB-11a R20.1: every failed answer is taken as superseded (the current read's refusal or failure is never applied)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect:
+      /current, (forbidden|not found|uncertain|not sent): applied|a current refusal|a current transient failure/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !isCurrentMemory(memory) ||\n",
+        "        !isCurrentMemory(memory) ||\n        !result.ok ||\n",
+      ),
+  },
+  {
+    id: "MU-2882",
+    title:
+      "WEB-11a R20.1: an offline 'Try again' forgets the refusal though it asks nothing (the edge the design assessment named)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /offline 'Try again' keeps the refusal and asks nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!env.online) return null;\n  if (options.force) memory.refused.delete(personId);\n",
+        "  if (options.force) memory.refused.delete(personId);\n  if (!env.online) return null;\n",
+      ),
+  },
+  {
+    id: "MU-2883",
+    title:
+      "WEB-11a R20.1 control of the count: an ordinary caller does not join the read on its way (a second request per caller)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /two ordinary callers make one request/,
+    patch: (t) =>
+      sub(t, "    if (inflight !== undefined) return inflight;\n", ""),
+  },
+
+  // WEB-11a revision 21 (review 21, R21.1): New person's shown first note is checked as an encoded text value
+  // (src/features/people/model/person-form.ts `applicablePerson`, and the shared `valueProblem` byte bound in values.ts).
+  {
+    id: "MU-2884",
+    title:
+      "WEB-11a R21.1: the first note is checked by its characters only (the reviewed defect: a note under 4,096 characters but over 8,192 bytes once encoded is queued)",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect:
+      /R21\.1.*(3,000 字|one byte over|newlines|at 8,193|refused|queue nothing)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const noteProblem = sendNote\n    ? valueProblem({ kind: "text", text: state.note })\n    : null;\n',
+        '  const noteProblem =\n    sendNote && charCount(state.note) > 4096 ? "text_too_long" : null;\n',
+      ),
+  },
+  {
+    id: "MU-2885",
+    title:
+      "WEB-11a R21.1: the first note's bytes are counted raw, not as the encoded value (escaped characters are counted once)",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect: /R21\.1.*(escaped|quotes|backslashes|control characters)/,
+    patch: (t) =>
+      sub(
+        t,
+        '    ? valueProblem({ kind: "text", text: state.note })\n',
+        '    ? charCount(state.note) > 4096\n      ? "text_too_long"\n      : new TextEncoder().encode(state.note).length + 25 > 8192\n        ? "value_too_large"\n        : null\n',
+      ),
+  },
+  {
+    id: "MU-2886",
+    title:
+      "WEB-11a R21.1: a value of exactly 8,192 encoded bytes is refused (the bound is exclusive)",
+    file: "src/features/people/model/values.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect: /R21\.1.*(at 8,192|at the limit)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    new TextEncoder().encode(JSON.stringify(value)).length > LIMITS.valueBytes\n",
+        "    new TextEncoder().encode(JSON.stringify(value)).length >= LIMITS.valueBytes\n",
+      ),
+  },
+  {
+    id: "MU-2887",
+    title:
+      "WEB-11a R21.1 with PRODUCT-DECISIONS item 2: a hidden first note is checked too, so a hidden note over the limit stops the save",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect: /R21\.1.*hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const noteProblem = sendNote\n",
+        '  const noteProblem = state.note.trim() !== ""\n',
+      ),
+  },
+  {
+    id: "MU-2888",
+    title:
+      "WEB-11a R21.1: a note too long once encoded is reported as too many characters (the error names a limit the note is within)",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect:
+      /R21\.1.*(3,000 字|one byte over|newlines|at 8,193|refused|queue nothing|reported together)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  else if (noteProblem !== null) problems.note = "value_too_large";\n',
+        '  else if (noteProblem !== null) problems.note = "note_too_long";\n',
+      ),
+  },
+
+  // WEB-11a revision 22 (review 22, R22.1): the PPL-6 subject note describes the policy a save leaves, from the one derivation the
+  // save sends (src/features/people/model/audience.ts `selectedPolicy`, `subjectNote`; the caller is the field editor).
+  {
+    id: "MU-2889",
+    title:
+      "WEB-11a R22.1: the subject note ignores the policy's exclusion of the subject (the reviewed defect: an excluded subject is told they will see the field)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R22\.1.*(excludes the subject|keep the exclusion|keeps the exclusion|exclusion is still)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (policy?.exclude_accounts.includes(linkage.accountId))\n    return `${personName} is excluded from this field's sharing, so they won't see it.`;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2890",
+    title:
+      "WEB-11a R22.1: any exclusion is taken for the subject's (the count decides, not the identity)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*ANOTHER account/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (policy?.exclude_accounts.includes(linkage.accountId))\n",
+        "  if ((policy?.exclude_accounts.length ?? 0) > 0)\n",
+      ),
+  },
+  {
+    id: "MU-2891",
+    title:
+      "WEB-11a R22.1 with D-11a-7: a change of an existing field's audience starts from an empty policy (its exclusions are dropped from the note and the save)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R22\.1.*(keeps the current exclusions|keep the exclusion|keeps the exclusion)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return quickPolicy(choice, input.current, input.primaryHouseholdId);\n",
+        "  return quickPolicy(choice, null, input.primaryHouseholdId);\n",
+      ),
+  },
+  {
+    id: "MU-2892",
+    title:
+      "WEB-11a R22.1: an unchanged choice is rebuilt from its label instead of keeping the current policy exactly",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*unchanged choice keeps/,
+    patch: (t) => sub(t, "  if (!input.changed) return input.current;\n", ""),
+  },
+  {
+    id: "MU-2893",
+    title:
+      "WEB-11a R22.1: the positive note promises the subject will see the field (a Home grant without the profile they must also see)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*(qualified|still includes|says nothing of the subject)/,
+    patch: (t) =>
+      sub(
+        t,
+        ", so this sharing includes them. They'll see it if they can also see this profile.`",
+        " and will be able to see it.`",
+      ),
+  },
+  {
+    id: "MU-2894",
+    title:
+      "WEB-11a R22.1: Home with its policy not known is described as including the subject (unknown exclusions taken as none)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*policy not known/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (choice === "custom" || policy === null || input.homeMembers === null)\n',
+        '  if (choice === "custom" || input.homeMembers === null)\n',
+      ),
+  },
+  {
+    id: "MU-2895",
+    title:
+      "WEB-11a R22.1: a changed audience leaves the current policy (the proposed one is never derived), so the note and the save describe the old one",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R22\.1.*(change to Home keeps|change to Only you|keep the exclusion|keeps the exclusion)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return quickPolicy(choice, input.current, input.primaryHouseholdId);\n}",
+        "  return input.current;\n}",
+      ),
+  },
+
+  {
+    id: "MU-2896",
+    title:
+      "WEB-11a R23.1: closing the sharing editor leaves the field editor's kept policy as it was (the reviewed defect: the old exclusion is said after it was removed)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R23\.1 (a saved removal|a newer policy read|an uncertain save that did commit|control: an uncertain save that did NOT commit)/,
+    patch: (t) =>
+      sub(
+        t,
+        "            doubtPolicy(memory, fieldId);\n            memory.invalidateSummaries();\n",
+        "            memory.invalidateSummaries();\n",
+      ),
+  },
+  {
+    id: "MU-2897",
+    title:
+      "WEB-11a R23.1: a doubted kept policy is still shown as who can see the field now",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 (closed while offline|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const known =\n    doubt === undefined &&\n    keptPolicy !== undefined &&\n",
+        "  const known =\n    keptPolicy !== undefined &&\n",
+      ),
+  },
+  {
+    id: "MU-2898",
+    title:
+      "WEB-11a R23.1: any policy read ends the field's doubt, whenever it was asked",
+    file: "src/features/people/memory.ts",
+    tests: [
+      "tests/features/people/memory.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R23\.1.*(takes the field's read away|LATEST doubt|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (answers !== undefined && memory.policyDoubts.get(fieldId) === answers)\n",
+        "  if (memory.policyDoubts.has(fieldId))\n",
+      ),
+  },
+  {
+    id: "MU-2899",
+    title:
+      "WEB-11a R23.1: a doubt leaves the read already on its way as the field's read (its answer ends what the doubt asked for)",
+    file: "src/features/people/memory.ts",
+    tests: [
+      "tests/features/people/memory.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R23\.1.*(takes the field's read away|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  memory.policyDoubts.set(fieldId, memory.policyGeneration);\n  memory.policyReads.delete(fieldId);\n",
+        "  memory.policyDoubts.set(fieldId, memory.policyGeneration);\n",
+      ),
+  },
+  {
+    id: "MU-2900",
+    title:
+      "WEB-11a R23.1: a fresh policy read joins the read already on its way (asked before the change it is asked after)",
+    file: "src/features/sharing/api.ts",
+    tests: ["tests/features/sharing/api.test.ts"],
+    expect: /R23\.1: a FRESH policy read/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (shared !== undefined && options?.fresh) {\n",
+        "      if (shared !== undefined && options?.fresh && false) {\n",
+      ),
+  },
+  {
+    id: "MU-2901",
+    title:
+      "WEB-11a R23.1: the field editor's read after a doubt is an ordinary one (a read on its way since before may answer it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 a saved removal: the old/,
+    patch: (t) =>
+      sub(
+        t,
+        "        doubted === undefined && !outdated ? undefined : { fresh: true },\n",
+        "        undefined,\n",
+      ),
+  },
+  {
+    id: "MU-2902",
+    title:
+      "WEB-11a R23.1: a quick change's confirming read is an ordinary one (a read on its way since before the receipt may confirm it)",
+    file: "src/features/sharing/apply-policy-change.ts",
+    tests: ["tests/features/sharing/apply-policy-change.test.ts"],
+    expect: /R23\.1: the confirming read is asked FRESH/,
+    patch: (t) =>
+      sub(
+        t,
+        "    () => env.api.readPolicy(input.resourceId, { fresh: true }),\n",
+        "    () => env.api.readPolicy(input.resourceId),\n",
+      ),
+  },
+  {
+    id: "MU-2903",
+    title:
+      "WEB-11a R23.1: a superseded policy read still ends (or refuses) the field's read, though a later one owns it",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 a read asked before a later doubt/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.policyReads.get(id) === owner) {\n",
+        "      if (owner !== null) {\n",
+      ),
+  },
+  {
+    id: "MU-2904",
+    title:
+      "WEB-11a R23.1: an edit restored on a later mount shows the policy kept from before, without reading it again",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R23\.1 (an edit kept while the page was elsewhere|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (\n      initial.restored &&\n      existing !== null &&\n      env.memory.policies.has(existing.id)\n    )\n      doubtPolicy(env.memory, existing.id);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2905",
+    title:
+      "WEB-11a R23.1: the sharing editor never reports what it read (the host learns nothing of a newer policy)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: [
+      "tests/features/sharing/policy-editor.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /(review 23.*onPolicyRead reports|R23\.1 closed offline after the sharing editor read a newer policy)/,
+    patch: (t) => sub(t, "    onPolicyRead?.(policyLoad.value);\n", ""),
+  },
+  {
+    id: "MU-2906",
+    title:
+      "WEB-11a R23.1: an edit can be bound to a policy that moved ahead of the field as this device has it",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 a saved removal: the old/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : policyMoved && nowAudience === null\n        ? reviewAudienceReason\n        : null;",
+        "      : null;",
+      ),
+  },
+  {
+    id: "MU-2907",
+    title:
+      "WEB-11a R23.1: a content save drops an audience chosen over one that is not known now",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 closed while offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (touched && currentChoice === null) return fail(copy.SHARING_CHANGED);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2908",
+    title:
+      "WEB-11a R23.1: only an undoubted read says the policy moved (a newer read the sharing editor made is ignored while doubted)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R23\.1 closed offline after the sharing editor read a newer policy/,
+    patch: (t) =>
+      sub(
+        t,
+        "    policyMovedFrom(snapshot.policyVersion, keptPolicy, floor);",
+        "    policyMovedFrom(snapshot.policyVersion, known, floor);",
+      ),
+  },
+  {
+    id: "MU-2909",
+    title:
+      "WEB-11a review 23: useSharingLoad's unmount leaves its started mark, so development's replay never reads again (the editor stays Loading)",
+    file: "src/features/sharing/parts.tsx",
+    tests: [
+      "tests/features/sharing/policy-editor.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /(review 23.*under StrictMode|R23\.1 control: the removal cancelled)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      generation.current += 1;\n      started.current = null;\n    },\n    [],",
+        "      generation.current += 1;\n    },\n    [],",
+      ),
+  },
+  {
+    id: "MU-2910",
+    title:
+      "WEB-11a review 23: the policy editor's mounted mark is not set again on development's replay, so a save's answer is dropped",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: [
+      "tests/features/sharing/policy-editor.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /(review 23.*under StrictMode|R23\.1 a saved removal)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    mounted.current = true;\n    return () => {",
+        "    return () => {",
+      ),
+  },
+  {
+    id: "MU-2911",
+    title:
+      "WEB-11a R23.1: the field row shows its doubted kept read after the sharing editor closed",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /closing the shared policy editor \(which may have changed it\) withdraws/,
+    patch: (t) => sub(t, "    !env.memory.policyDoubts.has(row.id) &&\n", ""),
+  },
+  {
+    id: "MU-2912",
+    title:
+      "WEB-11a R24.1 (the reviewed defect): the field editor's kept policy is who can see the field now whatever later version a summary applied",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 summary v7 before the policy read and the sync/,
+    patch: (t) =>
+      sub(
+        t,
+        "    policyShownFor(keptPolicy, existing, floor)\n",
+        "    policyShownFor(keptPolicy, existing, undefined)\n",
+      ),
+  },
+  {
+    id: "MU-2913",
+    title:
+      "WEB-11a R24.1: a later version a summary applied does not say the policy moved (only a read of another version does)",
+    file: "src/features/people/model/summary.ts",
+    tests: [
+      "tests/features/people/summary.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R24\.1.*(LATER summarised version alone|summary v7 before the policy read)/,
+    patch: (t) =>
+      sub(t, "    (floor?.policyVersion ?? 0) > (bound ?? 0)\n", "    false\n"),
+  },
+  {
+    id: "MU-2914",
+    title:
+      "WEB-11a R24.1: the field editor's read asks only for the synced version, never a later one a summary applied",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R24\.1 (summary v7 before the policy read|summary, then policy read)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      memory.summaryFloors.get(id)?.policyVersion ?? 0,\n",
+        "      0,\n",
+      ),
+  },
+  {
+    id: "MU-2915",
+    title:
+      "WEB-11a R24.1: a summary's later version does not run the field editor's read again (it waits for another render cause)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R24\.1 (summary v7 before the policy read|summary, then policy read)/,
+    patch: (t) =>
+      sub(t, "    requiredPolicy,\n    keptPolicy,\n", "    keptPolicy,\n"),
+  },
+  {
+    id: "MU-2916",
+    title:
+      "WEB-11a R24.1: a read answering below a version applied meanwhile leaves that version unasked",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 a later version applied while the read is on its way/,
+    patch: (t) =>
+      sub(t, "    requiredPolicy,\n    keptPolicy,\n", "    requiredPolicy,\n"),
+  },
+  {
+    id: "MU-2917",
+    title:
+      "WEB-11a R24.1: a read below the required version is asked again on every answer (not once per version)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/policy-read-bound.test.tsx"],
+    expect:
+      /R24\.1 a read answering below the summary's version revives nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "      read.version < required &&\n      asked.current !== required;\n",
+        "      read.version < required;\n",
+      ),
+  },
+  {
+    id: "MU-2918",
+    title:
+      "WEB-11a R24.1: the read a summary's later version asks is an ordinary one (a read on its way since before may answer it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 summary v7 before the policy read and the sync/,
+    patch: (t) =>
+      sub(
+        t,
+        "        doubted === undefined && !outdated ? undefined : { fresh: true },\n",
+        "        doubted === undefined ? undefined : { fresh: true },\n",
+      ),
+  },
+  {
+    id: "MU-2919",
+    title:
+      "WEB-11a R24.1: a summarised version ahead of the synced field does not make the edit wait for the sync",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R24\.1 (summary v7 before the policy read|a conflicted save is not saved)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    Math.max(keptPolicy?.version ?? 0, floor?.policyVersion ?? 0) >\n",
+        "    (keptPolicy?.version ?? 0) >\n",
+      ),
+  },
+  {
+    id: "MU-2920",
+    title:
+      "WEB-11a R24.1: the save checks the summarised version as last rendered, not as known at the press",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 a later version stored before the editor renders again/,
+    patch: (t) =>
+      sub(
+        t,
+        "        env.memory.policies.get(existing.id),\n        env.memory.summaryFloors.get(existing.id),\n      )\n",
+        "        env.memory.policies.get(existing.id),\n        floor,\n      )\n",
+      ),
+  },
+  {
+    id: "MU-2922",
+    title:
+      "WEB-11a R24.1: a conflicted save is saved on the synced version whatever later version is known at the press",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 a conflicted save is not saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "      livePolicyVersion === null ||\n      observedAhead()\n    )\n",
+        "      livePolicyVersion === null\n    )\n",
+      ),
+  },
+  {
+    id: "MU-2923",
+    title:
+      "WEB-11a R25.1: a kept linkage answer is current whatever later version of the person is known (the reviewed defect)",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /currentLinkage: an answer is current only at the latest version known \(DA25-02\) below the floor/,
+    patch: (t) =>
+      sub(
+        t,
+        "): LinkageState | null => (kept?.known && kept.version >= floor ? kept : null);\n",
+        "): LinkageState | null => (kept?.known ? kept : null);\n",
+      ),
+  },
+  {
+    id: "MU-2924",
+    title:
+      "WEB-11a R25.1: a summary's version of the person is not known to the linkage (the header and the note keep claiming the older answer)",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /DA25-01, DA25-03\) unlinked at v2 by a summary: the note and the header stop claiming v1 at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.summaryFloors.get(personId)?.version ?? 0,\n",
+        "    0,\n",
+      ),
+  },
+  {
+    id: "MU-2925",
+    title:
+      "WEB-11a R25.1: an ordinary caller asks nothing once ANY answer is kept, however out of date",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /withdrawn and read again once \(DA25-04, DA25-05\) withdrawn at once \(never 'unlinked'\), one read shared/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (currentLinkage(kept?.state, floor) !== null) return null;\n",
+        "    if (kept !== undefined) return null;\n",
+      ),
+  },
+  {
+    id: "MU-2926",
+    title:
+      "WEB-11a R25.1: the linkage hook reads only when the person or the env changes, not when a later version is known",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /DA25-01, DA25-03\) unlinked at v2 by a summary: the note and the header stop claiming v1 at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [env, personId, synced, due]);\n",
+        "  }, [env, personId, synced]);\n",
+      ),
+  },
+  {
+    id: "MU-2927",
+    title:
+      "WEB-11a R25.1: an out-of-date answer is read again on every ordinary call (no bound per version)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /an answer still older than the version it was asked at: not current, and not asked again by itself \(no loop\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  memory.failed.has(personId) ||\n  (memory.linkageAsked.get(personId) ?? 0) < floor;\n",
+        "  true;\n",
+      ),
+  },
+  {
+    id: "MU-2928",
+    title:
+      "WEB-11a R25.1: a linkage answer does not raise the version known of the person (a refusal then forgets it)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /personFloor never goes back \(DA25-02, I2\) a refusal withdraws the answer, not the version known/,
+    patch: (t) =>
+      sub(t, "        notePersonVersion(memory, personId, version);\n", ""),
+  },
+  {
+    id: "MU-2929",
+    title:
+      "WEB-11a R25.1: an answer of an earlier version replaces the kept later one",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /personFloor never goes back \(DA25-02, I2\) an answer of an earlier version never replaces the kept later one/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (kept?.person == null || version >= kept.person.version)\n",
+        "        if (kept?.person == null || true)\n",
+      ),
+  },
+  {
+    id: "MU-2930",
+    title:
+      "WEB-11a R25.1: the version a linkage read was asked at is not kept (an older answer is asked for again)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /an answer still older than the version it was asked at: not current, and not asked again by itself \(no loop\)/,
+    patch: (t) => sub(t, "  memory.linkageAsked.set(personId, floor);\n", ""),
+  },
+  {
+    id: "MU-2931",
+    title:
+      "WEB-11a R25.1: an answer still older than the version it was asked at is shown as the linkage again",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /an answer still older than the version it was asked at: not current, and not asked again by itself \(no loop\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (kept !== undefined && (memory.linkageAsked.get(personId) ?? 0) >= floor)\n    return unknownLinkage("failed");\n',
+        "  if (kept !== undefined && (memory.linkageAsked.get(personId) ?? 0) >= floor)\n    return kept.state;\n",
+      ),
+  },
+  {
+    id: "MU-2932",
+    title:
+      "WEB-11a R25.1: the synced row's version is not kept as known (no read is asked for it)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /the synced row's later version withdraws it too \(no summary\): one read, then current/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (synced !== undefined) notePersonVersion(env.memory, personId, synced);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2933",
+    title:
+      "WEB-11a R25.1: the unlink confirmation unlinks on what its render showed, not on the linkage known at the press",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /an open unlink confirmation never unlinks on an answer a later version superseded/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 26 (a NEW unlink is judged at the press; a kept uncertain one is not); same mutation: no judging at the press.
+        "    if (\n      replay === null &&\n      unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null\n    )\n      return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2934",
+    title:
+      "WEB-11a R25.1: the open unlink confirmation adopts any later version of the self linkage (not only after its own conflict)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /an open unlink confirmation never unlinks on an answer a later version superseded, nor adopts the later version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      conflicted &&\n      linkage.known &&\n",
+        "      linkage.known &&\n",
+      ),
+  },
+  {
+    id: "MU-2935",
+    title:
+      "WEB-11a R25.1: a rename is saved on the route its render showed, not on the linkage known at the press",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /a rename form open on an unlinked v1: a press of its earlier render sends nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (\n      renameRoute(linkageIn(env, person.id, synced), person.can_edit).kind !==\n      route.kind\n    )\n      return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2936",
+    title:
+      "WEB-11a R25.1: the open rename form's Save stays enabled when who controls the name is no longer known or is another account",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /self → other while a rename form is open: Save is disabled with the reason/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 26 (a kept uncertain rename's Save comes first); same mutation: the disabled route's reason is dropped.
+        '        : route.kind === "disabled"\n          ? renameDisabled(route.reason, person.label)\n          : offlineBlocked\n',
+        "        : offlineBlocked\n",
+      ),
+  },
+  {
+    id: "MU-2937",
+    title:
+      "WEB-11a R25.1: the field editor's subject note is told nothing of the person's synced version",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /the editor's own read of the person is ahead of the header's: the editor withdraws its note/,
+    patch: (t) =>
+      sub(
+        t,
+        "    person.projected ? undefined : person.row.version,\n",
+        "    undefined,\n",
+      ),
+  },
+
+  {
+    id: "MU-2938",
+    title:
+      "WEB-11a R26: the unlink confirmation's press never chooses the kept uncertain attempt: it is judged as a new unlink and refused",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since committed, then detail before Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const replay = unlinkReplay(env.memory, personId);\n",
+        "    const replay = null;\n",
+      ),
+  },
+  {
+    id: "MU-2939",
+    title:
+      "WEB-11a R26: the unlink confirmation's button ignores the kept uncertain attempt: disabled once its commit is read back",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since committed, then detail before Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : replaying\n          ? null\n          : unlinkBlocked(linkage, bound, name);\n",
+        "        : unlinkBlocked(linkage, bound, name);\n",
+      ),
+  },
+  {
+    id: "MU-2940",
+    title: "WEB-11a R26: the exact replay is sent under a new key",
+    file: "src/features/people/online.ts",
+    tests: [
+      "tests/features/people/replay.test.ts",
+      "tests/features/people/uncertain-replay.test.tsx",
+    ],
+    expect: /replayOnline sends the kept attempt exactly/,
+    patch: (t) =>
+      sub(
+        t,
+        "): Promise<PeopleResult<T>> => sendAttempt(env, key, attempt, send, sleep);\n",
+        "): Promise<PeopleResult<T>> =>\n  sendAttempt(env, key, { ...attempt, key: env.newId() }, send, sleep);\n",
+      ),
+  },
+  {
+    id: "MU-2941",
+    title:
+      "WEB-11a R26: the header is told nothing of the kept uncertain unlink: it is unreachable once the confirmation is closed",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty and the commit read back/,
+    patch: (t) =>
+      sub(
+        t,
+        "          retained={unlinkReplay(env.memory, person.id) !== null}\n",
+        "          retained={false}\n",
+      ),
+  },
+  {
+    id: "MU-2942",
+    title:
+      "WEB-11a R26: the reopened confirmation binds to the linkage read now, not to the kept attempt's own version",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty, then the linkage cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        "              replay !== null\n                ? attemptVersion(replay)\n                : linkage.known\n                  ? linkage.version\n                  : null;\n",
+        "              linkage.known\n                  ? linkage.version\n                  : null;\n",
+      ),
+  },
+  {
+    id: "MU-2943",
+    title:
+      "WEB-11a R26: a confirmation opened on the kept uncertain unlink does not say it is uncertain",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty and the commit read back/,
+    patch: (t) =>
+      sub(
+        t,
+        "  } | null>(() => (replaying ? { text: copy.UNCERTAIN } : null));\n",
+        "  } | null>(null);\n",
+      ),
+  },
+  {
+    id: "MU-2944",
+    title:
+      "WEB-11a R26: the Unlink entry ignores the kept uncertain unlink (offered only as the linkage read now allows)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty and the commit read back/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const offer = retained ? { kind: "enabled" as const } : unlinkOffer(linkage);\n',
+        "  const offer = unlinkOffer(linkage);\n",
+      ),
+  },
+  {
+    id: "MU-2945",
+    title:
+      "WEB-11a R26: the rename form's Save never chooses the kept uncertain rename: it is judged and re-bound as a new rename",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again committed, then sync before Save/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const replay = renameReplay(env.memory, person.id, name);\n    if (replay !== null) {\n",
+        "    const replay = null;\n    if (replay !== null) {\n",
+      ),
+  },
+  {
+    id: "MU-2946",
+    title:
+      "WEB-11a R26: the rename form's Save ignores the kept uncertain rename: disabled by the linkage read now",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again committed, then linked to another account: the unchanged Save sends the original online rename only/,
+    patch: (t) =>
+      sub(
+        t,
+        '      : replaying\n        ? env.online\n          ? null\n          : copy.NEEDS_CONNECTION\n        : route.kind === "disabled"\n',
+        '      : route.kind === "disabled"\n',
+      ),
+  },
+  {
+    id: "MU-2947",
+    title:
+      "WEB-11a R26: the kept rename is matched on the untrimmed name (what was sent was trimmed)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again the same name typed again \(changed and back, with spaces around it\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    renameProfileBody({ personId, version, name: name.trim() }),\n",
+        "    renameProfileBody({ personId, version, name }),\n",
+      ),
+  },
+  {
+    id: "MU-2948",
+    title: "WEB-11a R26: any kept attempt is replayed, whatever was submitted",
+    file: "src/features/people/model/attempt.ts",
+    tests: [
+      "tests/features/people/replay.test.ts",
+      "tests/features/people/uncertain-replay.test.tsx",
+    ],
+    expect:
+      /replayFor a changed name, another person or another command is not the kept attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return version !== null && canonicalBody(intent(version)) === retained.body\n    ? retained\n    : null;\n",
+        "  return version !== null ? retained : null;\n",
+      ),
+  },
+  {
+    id: "MU-2949",
+    title:
+      "WEB-11a R26: the Rename entry ignores the kept uncertain rename (disabled as the linkage read now says)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again cancelled after the uncertainty, then linked to another account/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (route.kind === "disabled" && !retained)\n',
+        '  if (route.kind === "disabled")\n',
+      ),
+  },
+  {
+    id: "MU-2950",
+    title:
+      "WEB-11a R26: an earlier send's late outcome overwrites the attempt a later send made",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/replay.test.ts"],
+    expect:
+      /a send never overwrites a later attempt of its target an earlier send's late outcome leaves the attempt a later send made/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if ((memory.attempts.get(key) ?? null) === previous) {\n",
+        "  if (true) {\n",
+      ),
+  },
+  {
+    id: "MU-2951",
+    title:
+      "WEB-11a R26: a not_sent is asked again after the identity ended during the wait",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/replay.test.ts"],
+    expect: /replayOnline the identity changes during a not_sent wait/,
+    patch: (t) =>
+      sub(
+        t,
+        "    await sleep(delay);\n    // Nothing more is sent for an identity that ended during the wait (review 26, DA26-08).\n    if (!isCurrentMemory(memory)) break;\n",
+        "    await sleep(delay);\n",
+      ),
+  },
+  {
+    id: "MU-2952",
+    title:
+      "WEB-11a R26: the unlink retry adopts the linkage version read now instead of sending the kept attempt",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since not committed, then relinked to the viewer at a later version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? await replayOnline(env, target, replay, send)\n",
+        "          ? await sendOnline(\n              env,\n              target,\n              unlinkBody({\n                personId,\n                version: linkage.known ? linkage.version : bound,\n              }),\n              send,\n            )\n",
+      ),
+  },
+  {
+    id: "MU-2953",
+    title:
+      "WEB-11a R26: the rename retry is rebuilt from the person as read now instead of sending the kept attempt",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again committed, then sync before Save/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const result = await replayOnline(\n        env,\n        `rename:${person.id}`,\n        replay,\n        (attempt) => env.api.peopleCommand(attempt),\n      );\n",
+        "      const result = await sendOnline(\n        env,\n        `rename:${person.id}`,\n        renameProfileBody({\n          personId: person.id,\n          version: person.version,\n          name: name.trim(),\n        }),\n        (attempt) => env.api.peopleCommand(attempt),\n      );\n",
+      ),
+  },
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
+  ...UNIT_WEB11B,
 ];
 
 /**
@@ -22000,6 +27685,60 @@ export const RETIRED = [
     why: "(WEB-10a revision 11, R23 S13) an unsaved enrolment draft shown under another identity: the draft's own owner check was removed as unreachable. The qualification run (`.agtx/evidence/web10a-revision-11/validation/runs/2026-10-15T20-43-03.594Z-612cc000`) found the mutant SURVIVED S13 with no failure at all, because the task detail's complete read belongs to one identity (`useTaskDetail`'s scope): another identity remounts the settings and drops the draft before it could be shown. A guard no composed schedule can reach is not kept, so there is no anchor (`draft?.owner === owner`) to patch",
     replacedBy:
       "enrolment-ownership S13 (asserts the composed behaviour) and the detail's identity-scoped read (its existing coherence mutants)",
+  },
+  {
+    id: "MU-2710",
+    why: "(REAL ENGINE; WEB-11a revision 9, review 9 finding 2) a failed field read taken as no field, alone: a real read fault of the row also fails the editor's composed absence confirmation (`readInventory` reads the same row), which says the read failed, so E-P36 passes with this mutant in three engines (pool request-0a91b0a1271943d7b398, job mutant-mu-2370 on the controller: caught 0, controls passing). The two layers are independent; the unit mutant MU-2362 keeps the prerequisite layer sensitive (its fault is specific to the field read)",
+    replacedBy:
+      "MU-2748 (real engine, E-P36: both layers removed) and MU-2660 (unit)",
+  },
+  {
+    id: "MU-2711",
+    why: "(REAL ENGINE; WEB-11a revision 9, review 9 finding 1) the field editor's success closes the instance that submitted it: since revision 9 a view's `close` acts only while that view is shown (`useShown`), so the submitting instance, unmounted by Cancel, closes nothing and E-P32 passes with this mutant in three engines (campaign 27, `validation/runs/2026-10-24T07-31-15.848Z-e1ff4136`, pool `request-e1e5957c04824b419bd6`, job `mutant-mu-2305` on m4-air: caught 0, controls passing). Completion through the current owner (`completeSession`) and the view guard are two independent layers; E-P32 has no restored-mount schedule, so the single-layer mutant is equivalent for what it asserts. Its unit counterpart MU-2286 stays (restored-mount schedules)",
+    replacedBy:
+      "MU-2743 (real engine, E-P32: both layers removed) and MU-2592 (unit, both layers); MU-2591 (unit) and MU-2658 (unit, the guard alone)",
+  },
+  {
+    id: "MU-2712",
+    why: "(WEB-11a revision 7, the design assessment's DA7-12) a FAILED field step counts as settled: 'No fields yet.' is now said only when ONE read of the person's fields and the unsent changes together (`ConfirmedAbsence`, `data.readInventory`) agrees, and that read sees the fields, so the claim is not made; the failure is still said (its banner reads the step's own status). Survived campaign 23 (`validation/runs/2026-10-24T03-06-29.382Z-9f0f614d`, 0 failing tests, controls passing): equivalent for what the tests assert, the step's guard being defence in depth",
+    replacedBy:
+      "MU-2634 (an absence confirmed without the composed read), MU-2635/MU-2636 (the composed read truncated), MU-2638/MU-2639 (the detail's confirmations made unconditional)",
+  },
+  {
+    id: "MU-2713",
+    why: "(WEB-11a revision 7, DA7-12) 'No fields yet.' without every unsent change read: the confirming read requires its own complete chain of unsent changes (`ConfirmedAbsence` returns `unknown` for an incomplete one) and finds the queued field, so the claim is not made. Survived campaign 23 (0 failing tests, controls passing): equivalent, the separate guard being defence in depth",
+    replacedBy:
+      "MU-2634 (an absence confirmed without the composed read), MU-2635/MU-2636 (the composed read truncated), MU-2638/MU-2639 (the detail's confirmations made unconditional)",
+  },
+  {
+    id: "MU-2714",
+    why: '(WEB-11a revision 7, DA7-12) a later window of unsent changes still on its way is taken as read: "isn\'t on this device" is now said only when the confirming read, complete by itself, finds neither the cached person nor a queued create, so the claim is not made. Survived campaign 23 (0 failing tests, controls passing): equivalent, the separate guard being defence in depth',
+    replacedBy:
+      "MU-2634 (an absence confirmed without the composed read), MU-2635/MU-2636 (the composed read truncated), MU-2638/MU-2639 (the detail's confirmations made unconditional)",
+  },
+  {
+    id: "MU-2715",
+    why: "(REAL ENGINE; WEB-11a revision 7, review 7 finding 3) a press fixes no box: since D-11a-29 the PRESSED ACTION itself is held in place and size, so whether the boxes above it keep their height no longer decides whether the press activates; E-P33 passes with this mutant in three engines (revision 7, `author-diagnostics/engine-mutants-1`, controls passing). The boxes' heights stay as defence in depth (what is below them does not jump); the mutant is equivalent for the activation the spec asserts",
+    replacedBy:
+      "MU-2746 (real engine, E-P33: the press fixes nothing, boxes and action), MU-2744/MU-2745 (real engine, E-P34/E-P35: the action not translated / not held) and MU-2630/MU-2631 (unit)",
+  },
+  {
+    id: "MU-2716",
+    why: "(WEB-11a revision 4, review 4 finding 1) a stop inside the content step leaves its admission (queued) standing: there is no separate content admission any more. The content is handed off in ONE transaction with the end of the hold's copy (`transferDraft`), so nothing is admitted before the draft is written and nothing is left to withdraw; the anchor (`write({ ...copy.change, queued: false })`) does not exist",
+    replacedBy:
+      "MU-2738 (the hand-off writes no tombstone), MU-2740 (the run queues without a hand-off) and MU-2818 (the plan ignores the copy's state)",
+  },
+  {
+    id: "MU-2717",
+    why: "(WEB-11a revision 4, review 4 finding 2) a save retires the earlier holds although its own new hold was ended elsewhere meanwhile: the new hold and the field's head are one commit now, and the head (not the new hold's survival) says no earlier hold may run, so retiring them after the new hold ended is correct and the re-read it mutated was removed",
+    replacedBy:
+      "MU-2822 (the generation is taken from the live holds, not the head) and MU-2803 re-expressed (a run no longer checks the head)",
+  },
+  {
+    id: "MU-2718",
+    why: "(WEB-11a revision 4, review 4 finding 4) 'Check now' says the attempt was made whenever the policy version moved: a check no longer says whether the attempt was made at all (it says what the audience IS now) and no longer ends the record; the claim it mutated does not exist",
+    replacedBy:
+      "MU-2827 (a check ends the record) and MU-2828 (a check says the version moved when it did not)",
   },
 ];
 
@@ -23026,7 +28765,7 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         "      // in a step, and reaches the loop's stop.\n      throw error;",
       ),
   },
@@ -24171,7 +29910,8 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        "              : await service.commit(activateSnapshot, {\n                  ...common,\n                  operation: issued.capture.operation,\n                  activateOperation: issued.capture.activateOperation as string,\n                  now: deps.clock.iso(),\n                  mode: issued.mode,\n                });",
+        // WEB-09c: re-anchored (the branch is one level deeper and formatted anew); the mutation is unchanged.
+        "                : await service.commit(activateSnapshot, {\n                    ...common,\n                    operation: issued.capture.operation,\n                    activateOperation: issued.capture\n                      .activateOperation as string,\n                    now: deps.clock.iso(),\n                    mode: issued.mode,\n                  });",
         '              : await (async () => {\n                  const first = await service.commit(commitStagingPage, {\n                    ...common,\n                    scan: { ...ok, hasMore: true },\n                    operation: issued.capture.operation,\n                  });\n                  if (first.kind !== "applied" || first.value.kind !== "staged")\n                    return first;\n                  return service.commit(activateSnapshot, {\n                    ...common,\n                    captured: { ...issued.captured, expectedPosition: ok.nextCursor },\n                    operation: issued.capture.operation,\n                    activateOperation: issued.capture.activateOperation as string,\n                    now: deps.clock.iso(),\n                    mode: issued.mode,\n                  });\n                })();',
       ),
   },
@@ -25066,11 +30806,16 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.data-composition.spec.ts",
     grep: "E-CG2:",
     expect: /E-CG2:/,
+    // WEB-09c (schema version 4): "stays at version 2" now means no barrier at all: both the barrier and the current version are 2.
     patch: (t) =>
       sub(
-        t,
-        "export const SCHEMA_VERSION = 3;",
-        "export const SCHEMA_VERSION = 2;",
+        sub(
+          t,
+          "export const SCHEMA_VERSION = 4;",
+          "export const SCHEMA_VERSION = 2;",
+        ),
+        "export const COMPOSITION_BARRIER_VERSION = 3;",
+        "export const COMPOSITION_BARRIER_VERSION = 2;",
       ),
   },
 
@@ -25299,7 +31044,594 @@ export const ENGINE = [
   ...ENGINE_R21,
   ...ENGINE_R22,
   ...ENGINE_R23,
+  // WEB-11a (plan §7.4, N-P1..N-P3): real-engine mutants, each caught by its native case.
+  {
+    id: "MU-2719",
+    title:
+      "WEB-11a N-P1: (REAL ENGINE) the field editor's draft is not retained across the remount a 403 causes",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P11:",
+    expect: /E-P11:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const kept = env.memory.drafts.get(draftKey) as Retained | undefined;",
+        "    const kept = undefined as Retained | undefined;",
+      ),
+  },
+  {
+    id: "MU-2720",
+    title:
+      "WEB-11a N-P2: (REAL ENGINE) a held change's content step is queued before replace_policy",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P6:",
+    expect: /E-P6:/,
+    // Re-anchored in WEB-11a revision 2 (review 2 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!samePolicy(copy.change.from.policy, copy.change.to)) {",
+        "  if (false) {",
+      ),
+  },
+  {
+    id: "MU-2721",
+    title:
+      "WEB-11a N-P3: (REAL ENGINE) a queued field create is not projected into the person's table",
+    file: "src/features/people/model/project.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P2:",
+    expect: /E-P2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (rowKind !== kind) continue;",
+        '      if (rowKind !== kind || rowKind === "field") continue;',
+      ),
+  },
+  // WEB-11a revision 1 (the review of 13 October 2026): real-engine mutants of the corrections, each caught by its native case.
+  {
+    id: "MU-2722",
+    title:
+      "WEB-11a R1 finding 1: (REAL ENGINE) the editor's save re-binds silently to the live row's policy version and base",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P14:",
+    expect: /E-P14:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const bound = snapshot;",
+        "    const bound =\n      snapshot === null\n        ? snapshot\n        : snapshotOf(existing, drafts, field?.latest?.localId ?? null);",
+      ),
+  },
+  {
+    id: "MU-2723",
+    title:
+      "WEB-11a R1 finding 3: (REAL ENGINE) 'Save mine' sends the current value instead of the conflicted save's content",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P5:",
+    expect: /E-P5:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const content = draftFieldContent(draft);",
+        "    const mine = draftFieldContent(draft);\n    const content =\n      mine === null || parsed === null || existing === null\n        ? mine\n        : { label: existing.label, value: parsed, policyVersion: mine.policyVersion };",
+      ),
+  },
+  {
+    id: "MU-2724",
+    title:
+      "WEB-11a R1 finding 6: (REAL ENGINE) 'Hold as draft' is acknowledged without a durable write",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P15:",
+    expect: /E-P15:/,
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "        kept = await holdChange(env, {",
+        '        kept = {\n          kind: "held",\n          copy: { change: { holdId: "never-written" } },\n          complete: true,\n        } as unknown as HoldOutcome;\n        void ({',
+      ),
+  },
+  {
+    id: "MU-2725",
+    title:
+      "WEB-11a R1 finding 2: (REAL ENGINE) a running held change ignores the person's Discard",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P16:",
+    expect: /E-P16:/,
+    // Re-anchored in WEB-11a revisions 2 and 3 (the review rewrites of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  const owns = () => !run.cancelled && present();",
+        "  const owns = () => present();",
+      ),
+  },
+  // MU-2162 (a person's screen not keyed, E-P17) was RETIRED after campaign 6 (pool request request-5ce6cedd4a164dbeb1a7): it survived with
+  // its control passing in all three engines because a real store answers a new person's read asynchronously, so navigation always passes
+  // the loading skeleton, which unmounts the header: equivalent in real engines. The defect (state carried by a synchronous answer) is caught
+  // at component level by MU-2145; E-P17 stays as the native behaviour check.
+  {
+    id: "MU-2726",
+    title:
+      "WEB-11a R1 finding 7: (REAL ENGINE) the people list offers no continuation past its step",
+    file: "src/features/people/list/PeopleList.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P18:",
+    expect: /E-P18:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            step.settled && step.next !== null\n              ? () => onStarts([...starts, step.next])\n              : null",
+        "            null",
+      ),
+  },
+
+  // WEB-11a finding 8 (API 0.29's viewer-safe summaries): real-engine mutants, each caught by its native case.
+  {
+    id: "MU-2727",
+    title:
+      "WEB-11a F8: (REAL ENGINE) a synced change does not re-read the summaries, so a superseded answer stands",
+    file: "src/features/people/summaries.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P21:",
+    expect: /E-P21:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    revision.status === "ready" ? String(revision.value) : revision.status,',
+        '    "revision",',
+      ),
+  },
+  {
+    id: "MU-2728",
+    title: "WEB-11a F8: (REAL ENGINE) a summary read earlier is shown offline",
+    file: "src/features/people/summaries.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P19:",
+    expect: /E-P19:/,
+    patch: (t) =>
+      sub(t, "  if (key === null || !env.online) {", "  if (key === null) {"),
+  },
+  {
+    id: "MU-2729",
+    title:
+      "WEB-11a F8: (REAL ENGINE) a server scope reads every person and so lists them all",
+    file: "src/features/people/list/PeopleList.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P19:",
+    expect: /E-P19:/,
+    patch: (t) =>
+      sub(
+        t,
+        "          env.api.readSummaries(scope, {",
+        '          env.api.readSummaries("all", {',
+      ),
+  },
+  {
+    id: "MU-2730",
+    title:
+      "WEB-11a F8: (REAL ENGINE) a partial rail does not say the owner may have shared it more widely",
+    file: "src/features/people/detail/SharedWith.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P20:",
+    expect: /E-P20:/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {rail.disclosure === "partial" ? (',
+        "          {false ? (",
+      ),
+  },
+  // ---- WEB-11a review 2 of 22 October 2026: the new native cases' causal mutants (real IndexedDB, Web Locks, the production tree) ----
+  {
+    id: "MU-2731",
+    title:
+      "WEB-11a R2 F2/D1: (REAL ENGINE) a hold recovered after the page closed runs by itself",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P15:",
+    expect: /E-P15:/,
+    patch: (t) => sub(t, "      !authorised ||\n", ""),
+  },
+  {
+    id: "MU-2732",
+    title:
+      "WEB-11a R2 F3: (REAL ENGINE) an edit in place no longer compares the queued body it read",
+    file: "src/features/people/model/snapshot.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P22:",
+    expect: /E-P22:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    draft.command_digest === snapshot.latestDigest;",
+        "    true;",
+      ),
+  },
+  {
+    id: "MU-2733",
+    title:
+      "WEB-11a R2 F1: (REAL ENGINE) the generic resend re-binds a People change to the current audience (rebuild and review)",
+    file: "src/features/people/register.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P23:",
+    expect: /E-P23:/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "    current.policy_version !== put.policyVersion\n",
+            "    current.policy_version === undefined\n",
+          ),
+          "  const policyVersion = put.policyVersion;",
+          "  const policyVersion = current.policy_version as number;",
+        ),
+        "        : put.policyVersion === null || now.policy_version !== put.policyVersion",
+        "        : false",
+      ),
+  },
+  {
+    id: "MU-2734",
+    title:
+      "WEB-11a R2 F4: (REAL ENGINE) terminal rows do not move the held-copy cursor",
+    file: "src/data/plans/form-copies.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P24:",
+    expect: /E-P24:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        cursor = [row.form_context, row.tab_instance_id];\n        if (row.terminal) continue;",
+        "        if (row.terminal) continue;\n        cursor = [row.form_context, row.tab_instance_id];",
+      ),
+  },
+  {
+    id: "MU-2735",
+    title: "WEB-11a R3 F1: (REAL ENGINE) leaving the page ends the hold",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P25:",
+    expect: /E-P25: .*navigating to the list/,
+    patch: (t) =>
+      sub(
+        t,
+        '    run.cancelled && isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+        '    isCurrentMemory(memory) ? cancel() : { kind: "suspended" };',
+      ),
+  },
+  {
+    id: "MU-2736",
+    title:
+      "WEB-11a R3 F2: (REAL ENGINE) 'Hold as draft' writes without the field's lock",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P26:",
+    expect: /E-P26:/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  const answer = await env.exclusive(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const headRead",
+        "  const answer = await (async <T,>(_name: string, go: () => Promise<T>) => go())(\n    lockOf(env, change.fieldId),\n    async (): Promise<HoldOutcome> => {\n      const headRead",
+      ),
+  },
+  {
+    id: "MU-2737",
+    title:
+      "WEB-11a R3 C3c: (REAL ENGINE) a discard ends a hold whose policy attempt is unresolved",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P27:",
+    expect: /E-P27:/,
+    // Re-anchored in WEB-11a revision 4 (review 4 rewrite of the code it mutates); the same intent.
+    patch: (t) =>
+      sub(
+        t,
+        "  return unresolvedIn(copy, null)\n    ? retire(store, copy)\n",
+        "  return (false as boolean)\n    ? retire(store, copy)\n",
+      ),
+  },
+  {
+    id: "MU-2738",
+    title:
+      "WEB-11a R4 F1: (REAL ENGINE) the hand-off writes the draft but does not end the copy",
+    file: "src/data/plans/outbox.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P28:",
+    expect: /E-P28:/,
+    patch: (t) =>
+      sub(
+        t,
+        '        ...(handOff === undefined\n          ? []\n          : [w.put("form_recovery", handOff.tombstone)]),\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2739",
+    title:
+      "WEB-11a R4 F2: (REAL ENGINE) a run no longer checks that it is its field's current hold",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P29:",
+    expect: /E-P29: .*after the newer hold is discarded/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (head.current !== key.holdId) {\n",
+        "  if (head.current !== key.holdId && (false as boolean)) {\n",
+      ),
+  },
+  {
+    id: "MU-2740",
+    title:
+      "WEB-11a R4 F1: (REAL ENGINE) the run queues the content without a hand-off (the copy ends later, separately: the reviewer's schedule)",
+    file: "src/features/people/field/held.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P28:",
+    expect: /E-P28:/,
+    // Re-anchored in WEB-11a revision 12 (the call is now inside a block that reads the refusal): the same defect, unchanged.
+    patch: (t) =>
+      sub(
+        sub(t, "      handOffOf(copy, head),\n    );\n", "    );\n"),
+        "    return queued;\n  });\n",
+        '    return queued;\n  });\n  if (saved.ok) await store.end(key, copy.digest, "transferred", copy.change.seq);\n',
+      ),
+  },
+  {
+    id: "MU-2741",
+    title:
+      "WEB-11a R5 F1: (REAL ENGINE) a suspended run does not publish its end: the next authorised hold waits for ever",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P30:",
+    expect: /E-P30: .*leaving the person while A's run waits/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (isCurrentMemory(memory)) memory.touch();\n      }\n    })();\n",
+        '        if (isCurrentMemory(memory) && result?.kind !== "suspended")\n          memory.touch();\n      }\n    })();\n',
+      ),
+  },
+  {
+    id: "MU-2742",
+    title:
+      "WEB-11a R5 F2 with R29.1: (REAL ENGINE) an atomic field-page read on its way counts as complete: 'Nothing archived' is claimed while a new ledger's field-page answer is withheld",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the parent is read with the field page; a page read on its way counts as complete (as MU-2587).
+    // Re-bound in revision 28 (WEB-11a review 29, R29.1): the reparent case observes one live watch from answer to answer, which never
+    // passes through `loading`, so it could not see this patch. Same patch and `E-P31:` controls; the expected case now holds the FIRST
+    // answer of a new field-page watch after the other contributors answered, and asserts no empty claim while it is withheld.
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P31:",
+    expect:
+      /E-P31: .*a new ledger's field-page read held before its first answer/,
+    patch: (t) =>
+      sub(
+        t,
+        '            : step.settled\n              ? "complete"\n              : "loading";\n',
+        '            : step.settled\n              ? "complete"\n              : "complete";\n',
+      ),
+  },
+  {
+    id: "MU-2743",
+    title:
+      "WEB-11a R9 F1 with R6 F1: (REAL ENGINE) the field editor's success closes the instance that submitted it, and a replaced view's close still acts: a new 'Add a field' after Cancel is closed",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P32:",
+    expect:
+      /E-P32: .*Cancel and a new 'Add a field' typed in before it answers/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    ended(ticket);\n  };\n",
+          "    if (stateRef.current.revision === ticket) close();\n  };\n",
+        ),
+        "    if (!shown()) return;\n    forget();\n",
+        "    forget();\n",
+      ),
+  },
+  {
+    id: "MU-2744",
+    title:
+      "WEB-11a R7 F3: (REAL ENGINE) the pressed action is never translated back: a field's audience and reach move Edit/Archive from under the pointer",
+    file: "src/features/people/detail/steady.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P34:",
+    expect: /E-P34: .*pressed before and released after the answer is shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "      element.style.transform =\n        dx === 0 && dy === 0\n          ? held.style.transform\n          : `translate($" +
+          "{dx}px, $" +
+          "{dy}px)`;\n",
+        "      void element;\n",
+      ),
+  },
+  {
+    id: "MU-2745",
+    title:
+      "WEB-11a R7 F3: (REAL ENGINE) the pressed action is not held at all (only the boxes, as in revision 6): a header action and a list row move",
+    file: "src/features/people/detail/steady.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P35:",
+    expect: /E-P35: .*pressed before and released after the/,
+    patch: (t) =>
+      sub(
+        t,
+        "        rect.width > 0 &&\n        rect.height > 0\n      ) {\n",
+        "        rect.width > 0 &&\n        (false as boolean)\n      ) {\n",
+      ),
+  },
+  {
+    id: "MU-2746",
+    title:
+      "WEB-11a R7 F3: (REAL ENGINE) a press fixes nothing (neither the boxes nor the pressed action): the linkage answer moves 'Add a field' from under the pointer",
+    file: "src/features/people/detail/steady.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P33:",
+    expect: /E-P33: .*pressed before and released after the answer/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          // The anchor holds a template literal; it is spelt in two parts (no `$`+`{` inside a plain string).
+          "        box.style.height = `$" + "{heights[index]}px`;\n",
+          "        void heights[index];\n",
+        ),
+        "        rect.width > 0 &&\n        rect.height > 0\n      ) {\n",
+        "        rect.width > 0 &&\n        (false as boolean)\n      ) {\n",
+      ),
+  },
+  {
+    id: "MU-2747",
+    title:
+      "WEB-11a R9 F1: (REAL ENGINE) the field editor's owner is not keyed by its target: another field reached through the same route (in-app or Back) is dismissed with the first field's session",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P36:",
+    // Revision 9: in real engines a new field's own read starts loading, which withdraws a view whose own field read failed, so the
+    // route-reuse cases whose FIELD read fails pass with this mutant (pool request-558ca1ddb06c4092bb75, MU-2369 attempt 1: caught 0); the
+    // cases whose UNSENT CHANGES cannot be read (review 9's reproduction) keep the view across the route change and are its expect.
+    expect:
+      /E-P36: .*unsent changes unread, .*, route reuse: only the field shown ends its session/,
+    patch: (t) =>
+      sub(t, /key=\{`\$\{env\.identity\}[^`]*`\}/, "key={env.identity}"),
+  },
+  {
+    id: "MU-2748",
+    title:
+      "WEB-11a R9 F2: (REAL ENGINE) the editor does not wait for or check its field's read, and a failed absence confirmation draws nothing: a real IndexedDB read of the field that fails shows nothing",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P36:",
+    expect: /E-P36: .*the failed read is said/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "          fieldId === null ? null : field,\n          outstanding,\n",
+          "          null,\n          outstanding,\n",
+        ),
+        '                confirmation === "absent" || confirmation === "failed" ? (\n',
+        '                confirmation === "absent" ? (\n',
+      ),
+  },
+  {
+    id: "MU-2749",
+    title:
+      "WEB-11a R10 F1: (REAL ENGINE) an edit begun on an unsent create has no review once the create is published: Save waits for a sync that has happened",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P37:",
+    expect:
+      /E-P37: .*while (open|away): the kept input is reviewed on the published field/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const needsReview =\n    origin.kind === "create" &&\n',
+        "  const needsReview =\n    (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2750",
+    title:
+      "WEB-11a R10 F1: (REAL ENGINE) the edit is bound and saved by itself when its create is published, without the person's review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P37:",
+    // Revision 29 (review 30, R30.1): the patched branch runs only when the SAME editor turns from the create to the published field.
+    // The original "while open" case leaves the commit's delivery order to the engines, and all three withdraw the editor there (a new
+    // editor starts with its review already said, so the branch never ran: Review 30's survivor). The case that holds the queue readers'
+    // answer while the cache's is delivered keeps the same editor, and is the expect. Patch, file, spec and grep are unchanged.
+    expect:
+      /E-P37: .*while open, the cache's answer first: the same editor reviews the published field/,
+    patch: (t) =>
+      sub(
+        t,
+        '      announcer.announce(copy.PUBLISHED_TITLE, "polite");\n',
+        "      rebind();\n",
+      ),
+  },
+  // WEB-11a revision 27 (review 28, R28.1). The defect itself is a stylesheet rule, and the harness redirects only modules (Tailwind
+  // resolves `@import` itself, so a patched `src/styles/base.css` never reaches a mutant build: it was tried, and the built CSS was the
+  // control's). These patch the gate dialog instead, with the same effects on the element: each is judged natively by its own assertion.
+  {
+    id: "MU-2954",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the closed resume gate keeps the cover's layout (an author display/position on the dialog whatever its `open`, as the unconditional `.neutral-gate` rule had): it still covers the page and takes the next click",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "R28\\.1: ",
+    expect: /R28\.1: /,
+    patch: (t) =>
+      sub(
+        t,
+        '    element.className = "neutral-gate";\n',
+        '    element.className = "neutral-gate";\n    element.style.cssText =\n      "display:flex;position:fixed;inset:0;z-index:100;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;background:var(--canvas)";\n',
+      ),
+  },
+  {
+    id: "MU-2955",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the pointer-only workaround: a closed gate keeps its opaque cover but lets clicks through (pointer-events: none), so it is still laid out and painted over the page",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "R28\\.1: ",
+    expect: /R28\.1: /,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      else dialog.removeAttribute("open");\n',
+          '      else dialog.removeAttribute("open");\n      dialog.style.cssText =\n        "display:flex;position:fixed;inset:0;z-index:100;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;background:var(--canvas);pointer-events:none";\n',
+        ),
+        '      if (typeof dialog.showModal === "function") dialog.showModal();\n',
+        '      dialog.style.cssText = "";\n      if (typeof dialog.showModal === "function") dialog.showModal();\n',
+      ),
+  },
+  {
+    id: "MU-2956",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the over-correction: the gate is hidden even while it is open (modal but not rendered), so the protected page shows through while the account is checked",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "R28\\.1: ",
+    expect: /R28\.1: /,
+    patch: (t) =>
+      sub(
+        t,
+        '      else dialog.setAttribute("open", "");\n',
+        '      else dialog.setAttribute("open", "");\n      dialog.style.display = "none";\n',
+      ),
+  },
+  {
+    id: "MU-2957",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the gate is never closed: the lift removes `inert` but the modal dialog stays open (the open/modal-state assertion, not rendering, must catch it)",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "visible: the gate STAYS UP",
+    expect: /visible: the gate STAYS UP/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (typeof dialog.close === "function") dialog.close();\n',
+        '      if (typeof dialog.close === "function") void dialog;\n',
+      ),
+  },
 
   ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
+  ...ENGINE_WEB11B,
 ];

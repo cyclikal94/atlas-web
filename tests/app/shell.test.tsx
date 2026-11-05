@@ -328,13 +328,22 @@ describe("More sheet (mobile)", () => {
 describe("the shell shows no account data", () => {
   // Adapted (WEB-10a): `/today` is no longer a placeholder (it is the Today view, which shows only its heading without a data layer), so
   // the remaining placeholder destination is asserted instead.
-  test("placeholder destinations render only a heading and a neutral line", async () => {
-    await mount("/people");
-    const main = screen.getByRole("main");
-    expect(main.textContent).toBe(
-      "PeopleThis area arrives in a later release.",
-    );
-  });
+  // ADAPTED AGAIN (WEB-11a revision 16, for the reviewer to accept or reject): after the accepted-base merge 73cec8b no destination is a
+  // placeholder (WEB-10a built Today and Tasks, WEB-11a People), so the merged test's `/people` placeholder expectation failed on f553a34
+  // ("People" received). Its intent, that the shell shows no account data, is kept for the three former placeholders: without a data
+  // layer each renders only its heading.
+  test.each([
+    ["/today", "Today"],
+    ["/tasks", "Tasks"],
+    ["/people", "People"],
+  ])(
+    "former placeholder destination %s renders only its heading without a data layer",
+    async (path, heading) => {
+      await mount(path);
+      const main = screen.getByRole("main");
+      expect(main.textContent).toBe(heading);
+    },
+  );
 });
 
 describe("accessibility (jsdom layer)", () => {

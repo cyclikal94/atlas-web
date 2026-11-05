@@ -710,7 +710,9 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
     expect(confirmButton()).toBeDisabled();
-    expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
+    expect(
+      within(screen.getByRole("dialog")).getByText(copy.REVIEW_NOW_FAILED),
+    ).toBeVisible();
     const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
     expect(retry).not.toBeNull();
     return retry as HTMLElement;
@@ -735,7 +737,15 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     await waitFor(() =>
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
-    expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
+    // The same error is announced outside the dialogue on the next frame. Exercise both copies, then assert the visible one.
+    await waitFor(() =>
+      expect(
+        document.querySelector('[aria-live="assertive"]'),
+      ).toHaveTextContent(copy.REVIEW_NOW_FAILED),
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByText(copy.REVIEW_NOW_FAILED),
+    ).toBeVisible();
     expect(
       screen.queryByRole("button", { name: copy.TRY_AGAIN }),
     ).not.toBeNull();

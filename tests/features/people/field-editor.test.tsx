@@ -1,0 +1,1598 @@
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { axe } from "jest-axe";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import type { Policy } from "../../../src/data";
+import { digestOf } from "../../../src/data/model/canonical";
+import {
+  forgetAllPeopleMemory,
+  peopleMemory,
+} from "../../../src/features/people/memory";
+import {
+  forgetRefusedPolicies,
+  type SharingResult,
+} from "../../../src/features/sharing/api";
+import { installMatchMedia } from "../../helpers/match-media";
+import { draftRow } from "../../support/data/rows";
+import { HOME, ME, MO, record } from "../../support/people/records";
+import { fieldRow, peopleWorld, person } from "../../support/people/world";
+import { ok } from "../../support/sharing/fake-api";
+
+/**
+ * WF-PEOPLE-03 (A3, A5, A6, A7, A15, A16, A20): the field editor's create paths (queued private/defaults, online shared), conditional
+ * values, the Q1 update, the online audience change (policy first, then content on the CONFIRMED policy version), the offline choice and a
+ * held change run on reconnect, the draft kept across a remount, the 403 memo, a version conflict and the PPL-6 note. Fixture evidence.
+ */
+installMatchMedia({ width: 1440 });
+beforeEach(() => {
+  forgetAllPeopleMemory();
+  forgetRefusedPolicies();
+});
+afterEach(async () => {
+  cleanup();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+const P = "55555555-5555-4555-8555-555555555555";
+const F = "66666666-6666-4666-8666-666666666666";
+const PRIVATE = { grants: [], exclude_accounts: [] };
+const HOME_VIEW = {
+  grants: [{ kind: "household" as const, id: HOME, edit: false }],
+  exclude_accounts: [],
+};
+const dialog = () => screen.findByRole("dialog");
+const INCLUDED =
+  "Mo is in Home, so this sharing includes them. They'll see it if they can also see this profile.";
+const EXCLUDED =
+  "Mo is excluded from this field's sharing, so they won't see it.";
+const PROMISE = "Mo is in Home and will be able to see it.";
+
+async function openNew(w: ReturnType<typeof peopleWorld>) {
+  await w.mount(`/people/${P}/fields/new`);
+  return dialog();
+}
+
+describe("creating a field", () => {
+  test("Only you: a queued put_field with an explicit private policy; the dialog closes and the row is shown, not sent yet", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    const d = await openNew(w);
+    expect((await axe(document.body)).violations).toEqual([]);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Medical note" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Penicillin" },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(w.built[0]?.command).toEqual({
+      command: {
+        kind: "put_field",
+        id: expect.any(String),
+        parent_id: P,
+        label: "Medical note",
+        value: { kind: "text", text: "Penicillin" },
+        initial_policy: PRIVATE,
+      },
+    });
+    expect(await screen.findByText("Penicillin")).toBeInTheDocument();
+  });
+
+  test("Use my defaults with defaults never fetched: queued and held for the review", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(null, true);
+    const d = await openNew(w);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Phone" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "0770" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.built[0]?.defaultsReview).toEqual(["field"]);
+    expect(w.built[0]?.command).not.toHaveProperty("defaults_revision");
+  });
+
+  test("the type switch keeps every slot; only the ACTIVE type is sent, with no warning", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    const d = await openNew(w);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Weight" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "about 70" },
+    });
+    fireEvent.change(within(d).getByRole("combobox", { name: "Type" }), {
+      target: { value: "quantity" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Amount" }), {
+      target: { value: "70" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Unit" }), {
+      target: { value: "kg" },
+    });
+    fireEvent.change(within(d).getByRole("combobox", { name: "Type" }), {
+      target: { value: "text" },
+    });
+    expect(within(d).getByRole("textbox", { name: "Value" })).toHaveValue(
+      "about 70",
+    );
+    fireEvent.change(within(d).getByRole("combobox", { name: "Type" }), {
+      target: { value: "quantity" },
+    });
+    expect(within(d).getByRole("textbox", { name: "Amount" })).toHaveValue(
+      "70",
+    );
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: { value: unknown } }).command
+        .value,
+    ).toEqual({
+      kind: "quantity",
+      amount: "70",
+      unit: "kg",
+    });
+  });
+
+  test("a refused save keeps everything typed and says why", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    w.outcomes.push({ kind: "refused", reason: "storage" });
+    const d = await openNew(w);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Phone" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "0770" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    expect(
+      await within(d).findByText("Couldn't save on this device. Try again."),
+    ).toBeInTheDocument();
+    expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+      "Phone",
+    );
+    expect(within(d).getByRole("textbox", { name: "Value" })).toHaveValue(
+      "0770",
+    );
+  });
+
+  test("invalid values are refused at their input, with the contract's bounds", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    const d = await openNew(w);
+    fireEvent.change(within(d).getByRole("combobox", { name: "Type" }), {
+      target: { value: "date" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Day" }), {
+      target: { value: "29" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Month" }), {
+      target: { value: "2" },
+    });
+    fireEvent.change(
+      within(d).getByRole("textbox", { name: "Year (optional)" }),
+      { target: { value: "2023" } },
+    );
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    expect(
+      await within(d).findByText("Give the field a name."),
+    ).toBeInTheDocument();
+    expect(within(d).getByText("That date doesn't exist.")).toBeInTheDocument();
+    expect(w.built).toEqual([]);
+  });
+
+  test("Home · can view is sent online to /task-access-commands (never queued); offline it is disabled with the reason", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    const d = await openNew(w);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Phone" },
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "0770" },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(w.built).toEqual([]);
+    expect(w.api.calls.find((c) => c.op === "putFieldShared")?.args[1]).toEqual(
+      {
+        command: {
+          kind: "put_field",
+          id: expect.any(String),
+          parent_id: P,
+          label: "Phone",
+          value: { kind: "text", text: "0770" },
+          initial_policy: HOME_VIEW,
+        },
+      },
+    );
+    cleanup();
+    forgetAllPeopleMemory();
+    const offline = peopleWorld({ online: false });
+    offline.setCache([person({ id: P, label: "Ada" })]);
+    offline.env.setDefaults(record());
+    const d2 = await openNew(offline);
+    expect(
+      within(d2).getByRole("radio", { name: "Home · can view" }),
+    ).toBeDisabled();
+    expect(
+      within(d2).getByText("Sharing a new field needs a connection"),
+    ).toBeInTheDocument();
+  });
+
+  test("PPL-6: a person linked to another account gets the subject note under 'Use my defaults'", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Mo" })]);
+    w.api.linked.set(P, MO);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    const d = await openNew(w);
+    expect(
+      await within(d).findByText(
+        "Mo won't see this field unless you share it with them.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    // Copy adaptation (review 22, R22.1): this asserted "Mo is in Home and will be able to see it." (D-11a-7's wording). A Home grant
+    // is not known to reach the subject (they must also see the person the field is on), so the same fixture now asserts the qualified
+    // note; the old promise is asserted absent.
+    expect(d.querySelector("[data-subject-note]")?.textContent).toBe(INCLUDED);
+    expect(
+      within(d).queryByText("Mo is in Home and will be able to see it."),
+    ).toBeNull();
+  });
+});
+
+describe("updating a field", () => {
+  test("an edit with the audience unchanged queues put_field with expected_version and expected_policy_version (Q1)", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Phone",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "0771" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.built[0]?.command).toEqual({
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        expected_version: 4,
+        expected_policy_version: 6,
+        label: "Phone",
+        value: { kind: "text", text: "0771" },
+      },
+    });
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("online audience change: read, replace_policy, confirming read, THEN the content on the confirmed policy version", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Phone",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "0771" },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.calls.map((c) => c.op)).toEqual([
+      "readPolicy",
+      "readPolicy",
+      "management",
+      "readPolicy",
+    ]);
+    expect(w.sharing.sent[0]?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: PRIVATE },
+    ]);
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command.expected_policy_version,
+    ).toBe(7);
+  });
+
+  test("a policy moved since it was shown: nothing is sent and the draft stays, with the review copy", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({ id: F, parent_id: P, policy_version: 6 }),
+    ]);
+    w.env.setDefaults(record());
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 8, policy: HOME_VIEW }),
+    );
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    expect(
+      await within(d).findByText(/The sharing changed since you opened this/),
+    ).toBeInTheDocument();
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.built).toEqual([]);
+  });
+
+  test("offline audience change: the export's choice; 'Hold as draft' keeps it, and on reconnect the policy goes first, then the content", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    w.setOnline(false);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Inhaler" },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    expect(
+      await within(d).findByText(
+        "You're offline, so the audience can't change yet",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(d).getByText(
+        /Save the Note now — Home · can view will still see it/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(d).getByText(
+        /Atlas checks the sharing policy hasn't changed before sending/,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(within(d).getByRole("button", { name: "Hold as draft" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The held row (the announcer's live region repeats its text, so the row is found by its own attribute).
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-held-field="${F}"]`),
+      ).toHaveTextContent("Waiting to change who can see Note"),
+    );
+    expect(w.built).toEqual([]);
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    w.setOnline(true);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    const order = w.sharing.calls.map((c) => c.op);
+    expect(order.slice(-3)).toEqual(["readPolicy", "management", "readPolicy"]);
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "Inhaler" },
+    });
+    await waitFor(() =>
+      expect(document.querySelector(`[data-held-field="${F}"]`)).toBeNull(),
+    );
+  });
+
+  test("a held change whose confirming read shows another policy sends no content and keeps the draft with the reason", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.env.setDefaults(record());
+    w.putHeld({
+      holdId: "hold-1",
+      fieldId: F,
+      personId: P,
+      label: "Note",
+      value: { kind: "text", text: "Inhaler" },
+      sameKind: true,
+      version: 4,
+      expectedBase: 4,
+      predecessor: null,
+      from: { version: 6, policy: HOME_VIEW },
+      to: PRIVATE,
+      attempt: null,
+      status: { kind: "waiting" },
+      heldAt: "2026-10-13T09:00:00.000Z",
+      rev: 0,
+      queued: false,
+      seq: 0,
+      retired: false,
+      legacy: false,
+    });
+    // Held in this page (D1: it may run by itself).
+    peopleMemory(w.people.identity).heldAuthority.add("hold-1");
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 8, policy: HOME_VIEW }),
+    );
+    await w.mount(`/people/${P}`);
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-held-field="${F}"]`),
+      ).toHaveTextContent(/The sharing changed since you opened this/),
+    );
+    expect(w.built).toEqual([]);
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+  });
+
+  test("the draft survives a remount of the tree (a 403 elsewhere) and is restored with a note; Cancel forgets it", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    let d = await openNew(w);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Kept" },
+    });
+    cleanup();
+    await w.mount(`/people/${P}/fields/new`);
+    d = await dialog();
+    expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+      "Kept",
+    );
+    expect(
+      within(d).getByText("Your unsaved changes were kept."),
+    ).toBeInTheDocument();
+    fireEvent.click(within(d).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    cleanup();
+    await w.mount(`/people/${P}/fields/new`);
+    d = await dialog();
+    expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue("");
+  });
+
+  test("a 403 on the field's policy is asked ONCE for the page: the audience says only the owner can change it", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({ id: F, parent_id: P }),
+    ]);
+    w.env.setDefaults(record());
+    w.sharing.defaults.policy = { ok: false, kind: "forbidden" };
+    await w.mount(`/people/${P}/fields/${F}`);
+    let d = await dialog();
+    expect(
+      await within(d).findByText(
+        "Only the owner can change who can see this field",
+      ),
+    ).toBeInTheDocument();
+    cleanup();
+    await w.mount(`/people/${P}/fields/${F}`);
+    d = await dialog();
+    expect(
+      await within(d).findByText(
+        "Only the owner can change who can see this field",
+      ),
+    ).toBeInTheDocument();
+    expect(w.sharing.calls.filter((c) => c.op === "readPolicy")).toHaveLength(
+      1,
+    );
+  });
+
+  test("an unsent create is edited in place", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Ada" })]);
+    w.env.setDefaults(record());
+    w.setDrafts([
+      draftRow({
+        local_id: "f1",
+        created_seq: 1,
+        endpoint: "/task-commands",
+        target_resource_ids: [F],
+        command: {
+          command: {
+            kind: "put_field",
+            id: F,
+            parent_id: P,
+            label: "Phone",
+            value: { kind: "text", text: "0770" },
+          },
+        },
+      }),
+    ]);
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "0771" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.built[0]?.op).toBe("edit");
+    expect(w.built[0]?.target).toBe("f1");
+    // Review 11 (R11.1): one stored pair, the edited body and its own digest, on the create's id.
+    const body = {
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        label: "Phone",
+        value: { kind: "text", text: "0771" },
+      },
+    };
+    expect(w.drafts.map((d) => [d.local_id, d.command])).toEqual([
+      ["f1", body],
+    ]);
+    expect(w.drafts[0]?.command_digest).toBe(digestOf(body));
+  });
+
+  test("a version conflict: 'Save mine on the current version' supersedes the CONFLICTED save's content on the current bases", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({ id: F, parent_id: P, version: 9, policy_version: 3 }),
+    ]);
+    w.env.setDefaults(record());
+    const command = {
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        expected_version: 8,
+        expected_policy_version: 3,
+        label: "Phone",
+        value: { kind: "text", text: "07700 900999" },
+      },
+    };
+    w.env.setDrafts([
+      draftRow({
+        local_id: "c",
+        kind: "put_field",
+        status: "version_conflict",
+        index_targets: [F],
+        target_resource_ids: [F],
+        command,
+      }),
+    ]);
+    w.putBody("c", command);
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    fireEvent.click(
+      await within(d).findByRole("button", {
+        name: "Save mine on the current version",
+      }),
+    );
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.built[0]).toMatchObject({ op: "supersede", target: "c" });
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_version: 9,
+      expected_policy_version: 3,
+      value: { kind: "text", text: "07700 900999" },
+    });
+  });
+});
+
+/**
+ * Review 22, R22.1 (family people-subject-audience-exclusion): the PPL-6 note under an EXISTING field's audience describes the policy the
+ * save leaves, the one it sends (`selectedPolicy`): a subject that policy excludes is told apart from one it includes, however the choice
+ * got there, and the exclusion is never dropped to make the note true. The reviewer's reproductions, through the public field route.
+ */
+describe("R22.1: the subject note describes the policy the save leaves", () => {
+  const OTHER = "77777777-7777-4777-8777-777777777777";
+  const homeExcluding = (excluded: string[]) => ({
+    grants: [{ kind: "household" as const, id: HOME, edit: false }],
+    exclude_accounts: excluded,
+  });
+  async function open(
+    policy: Policy,
+    opts: {
+      online?: boolean;
+      more?: { version: number; policy: Policy }[];
+    } = {},
+  ) {
+    const w = peopleWorld(opts.online === false ? { online: false } : {});
+    w.setCache([
+      person({ id: P, label: "Mo" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.api.linked.set(P, MO);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy }),
+      ...(opts.more ?? []).map((state) => ok(state)),
+    );
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    return { w, d };
+  }
+  const noteOf = (d: HTMLElement) =>
+    d.querySelector("[data-subject-note]")?.textContent ?? null;
+
+  test("R22.1 a current Home policy that excludes the subject: the note says they won't see it, never that they will", async () => {
+    const { w, d } = await open(homeExcluding([MO]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(within(d).queryByText(PROMISE)).toBeNull();
+    expect(within(d).queryByText(INCLUDED)).toBeNull();
+    // The content edit keeps the policy as it is: no policy step, the content on the bound policy version.
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Updated note" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.calls.map((c) => c.op)).not.toContain("management");
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command.expected_policy_version,
+    ).toBe(6);
+  });
+
+  test("R22.1 a private field that excludes the subject, changed to Home: the note and the sent policy both keep the exclusion", async () => {
+    const privateExcluding: Policy = { grants: [], exclude_accounts: [MO] };
+    const target = homeExcluding([MO]);
+    const { w, d } = await open(privateExcluding, {
+      more: [
+        { version: 6, policy: privateExcluding },
+        { version: 7, policy: target },
+      ],
+    });
+    await within(d).findByRole("radio", { name: "Only you", checked: true });
+    expect(noteOf(d)).toBeNull();
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(within(d).queryByText(PROMISE)).toBeNull();
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Updated note" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent[0]?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: target },
+    ]);
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command.expected_policy_version,
+    ).toBe(7);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  test("R22.1 Home to Only you and back, unsaved: the exclusion is still the field's, and the note says so", async () => {
+    const { d } = await open(homeExcluding([MO]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    await waitFor(() => expect(noteOf(d)).toBeNull());
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+  });
+
+  test("R22.1 control: a Home policy excluding nobody includes the subject, qualified by the profile they must also see", async () => {
+    const { d } = await open(homeExcluding([]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(INCLUDED));
+    expect(within(d).queryByText(EXCLUDED)).toBeNull();
+  });
+
+  test("R22.1 control: a Home policy excluding ANOTHER account still includes the subject", async () => {
+    const { d } = await open(homeExcluding([OTHER]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(INCLUDED));
+  });
+
+  test("R22.1 offline, held: a change to Home keeps the exclusion in the note and in the policy sent on reconnect", async () => {
+    const privateExcluding: Policy = { grants: [], exclude_accounts: [MO] };
+    const target = homeExcluding([MO]);
+    const { w, d } = await open(privateExcluding);
+    await within(d).findByRole("radio", { name: "Only you", checked: true });
+    w.setOnline(false);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Inhaler" },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    fireEvent.click(
+      await within(d).findByRole("button", { name: "Hold as draft" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: privateExcluding }),
+      ok({ version: 7, policy: target }),
+    );
+    w.setOnline(true);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent.at(-1)?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: target },
+    ]);
+  });
+});
+
+/**
+ * Review 23, R23.1 (family people-policy-editor-return-coherence): the field editor's audience after the full sharing editor, opened from
+ * it ("Choose people…"), closes. That editor reads and saves the field's policy on its own; what the field editor kept of the policy may be
+ * out of date when it comes back, so it is read again (never answered by a read asked before), and until then nothing of it is said as who
+ * can see the field now. The unfinished input, its session and what the edit is bound to stay as they were: a policy that moved is
+ * reviewed, and the edit is bound to it only once the field has synced to it (never adopted on its own). Through the public field route.
+ */
+describe("R23.1: the field editor's audience after the sharing editor closes", () => {
+  const ORIGINAL: Policy = {
+    grants: [{ kind: "household", id: HOME, edit: false }],
+    exclude_accounts: [MO],
+  };
+  const REMOVED: Policy = { ...ORIGINAL, exclude_accounts: [] };
+  const CHANGED =
+    "Who can see this field changed since you opened it. Check the change above before saving yours.";
+  const RECHECK =
+    "Who can see this field may have changed. It's checked again when you're online.";
+  const MOVED_TITLE = "Who can see this field changed since you opened it";
+  const AHEAD =
+    "Who can see it now is shown here once this field has finished syncing.";
+  const SAVE_MINE = "Save mine on the current version";
+  const field = (policyVersion: number) =>
+    fieldRow({
+      id: F,
+      parent_id: P,
+      label: "Note",
+      version: 4,
+      policy_version: policyVersion,
+    });
+  const noteOf = (d: HTMLElement) =>
+    d.querySelector("[data-subject-note]")?.textContent ?? null;
+  const audienceOf = (d: HTMLElement) =>
+    d.querySelector("[data-audience]")?.getAttribute("data-audience") ?? null;
+  const unknownText = (d: HTMLElement) =>
+    d.querySelector('[data-audience="unknown"]')?.textContent ?? null;
+  const reads = (w: ReturnType<typeof peopleWorld>) =>
+    w.sharing.calls.filter((c) => c.op === "readPolicy").length;
+  const value = () =>
+    within(screen.getByRole("dialog")).getByRole("textbox", { name: "Value" });
+
+  /** The field at policy v6 (Home, excluding Mo, the linked subject in Home), its editor open with unfinished input. */
+  async function begin() {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Mo" }), field(6)]);
+    w.api.linked.set(P, MO);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    w.sharing.defaults.households = ok(record().snapshot.households);
+    w.sharing.defaults.policy = ok({ version: 6, policy: ORIGINAL });
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "My unfinished input" },
+    });
+    return w;
+  }
+  /** "Choose people…", then the sharing editor's draft with Mo's exclusion removed. */
+  async function removeExclusion() {
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: /^Remove exclusion:/,
+      }),
+    );
+  }
+  /** The sharing editor's Save, answered by the server's policy `after` (what it holds once the change committed). */
+  async function save(w: ReturnType<typeof peopleWorld>, after: Policy) {
+    w.sharing.defaults.policy = ok({ version: 7, policy: after });
+    const save = screen.getByRole("dialog").querySelector("[data-save]");
+    fireEvent.click(save as Element);
+    await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+    expect(w.sharing.sent[0]?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: after },
+    ]);
+  }
+  const back = async () => {
+    await waitFor(() =>
+      expect(
+        screen.getByRole("dialog").querySelector("[data-policy-state]"),
+      ).toBeNull(),
+    );
+    return screen.getByRole("dialog");
+  };
+
+  test("R23.1 a saved removal: the old exclusion is not said; the change is reviewed, the input kept, nothing written", async () => {
+    const w = await begin();
+    const asked: Array<{ fresh?: boolean } | undefined> = [];
+    const read = w.sharing.readPolicy;
+    w.sharing.readPolicy = (id, options) => {
+      asked.push(options);
+      return read(id, options);
+    };
+    await removeExclusion();
+    const atSave = reads(w);
+    await save(w, REMOVED);
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(d.textContent).not.toContain(EXCLUDED);
+    expect(value()).toHaveValue("My unfinished input");
+    // The policy was read again, once, after the sharing editor closed, by a read that a read on its way since before cannot answer.
+    expect(reads(w)).toBe(atSave + 1);
+    expect(asked.at(-1)).toEqual({ fresh: true });
+    const panel = d.querySelector("[data-field-conflict]");
+    expect(panel?.querySelector("h3")?.textContent).toBe(MOVED_TITLE);
+    expect(panel?.querySelector("[data-review-audience]")?.textContent).toBe(
+      AHEAD,
+    );
+    // Bound to v7 only once the field has synced to it: until then "Save mine" waits, and nothing of the content is written.
+    expect(d.querySelector('[data-people-action="save-mine"]')).toBeNull();
+    expect(w.built).toEqual([]);
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+
+  test("R23.1 a saved removal, once the field syncs to it: reviewed, bound by the person, and the content saved under v7", async () => {
+    const w = await begin();
+    await removeExclusion();
+    await save(w, REMOVED);
+    let d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    w.setCache([person({ id: P, label: "Mo" }), field(7)]);
+    d = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(d.querySelector("[data-review-audience]")?.textContent).toBe(
+        "Who can see it now: Home · can view",
+      ),
+    );
+    // Seeing the change binds nothing by itself.
+    expect(w.built).toEqual([]);
+    expect(noteOf(d)).toBeNull();
+    const mine = d.querySelector('[data-people-action="save-mine"]');
+    expect(mine?.textContent).toBe(SAVE_MINE);
+    fireEvent.click(mine as Element);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "My unfinished input" },
+    });
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+
+  test("R23.1 control: the removal cancelled: nothing sent, the exclusion said again, and the content saves under v6", async () => {
+    const w = await begin();
+    await removeExclusion();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(audienceOf(d)).toBe("existing");
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.sharing.sent).toEqual([]);
+    expect(d.querySelector("[data-field-conflict]")).toBeNull();
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_policy_version: 6,
+      value: { kind: "text", text: "My unfinished input" },
+    });
+    expect(w.sharing.calls.map((c) => c.op)).not.toContain("management");
+  });
+
+  test("R23.1 a newer policy read in the sharing editor, then Cancel: the obsolete exclusion is not said and nothing is sent", async () => {
+    const w = await begin();
+    // Someone else removed the exclusion (v7) before the sharing editor opened.
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]')?.textContent,
+      ).toContain("Nobody is excluded."),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.built).toEqual([]);
+  });
+
+  test("R23.1 an uncertain save that did commit, then Cancel: what the server holds is read, never the old exclusion", async () => {
+    const w = await begin();
+    await removeExclusion();
+    w.sharing.next.management.push({ ok: false, kind: "uncertain" });
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-save]") as Element,
+    );
+    await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+    // It had committed: the server holds the removal.
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.built).toEqual([]);
+  });
+
+  test("R23.1 control: an uncertain save that did NOT commit, then Cancel: the exclusion, read again, is said again", async () => {
+    const w = await begin();
+    await removeExclusion();
+    w.sharing.next.management.push({ ok: false, kind: "uncertain" });
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-save]") as Element,
+    );
+    await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+    const before = reads(w);
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(reads(w)).toBe(before + 1));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(value()).toHaveValue("My unfinished input");
+  });
+
+  test("R23.1 closed while offline: who can see it is not claimed until it is read again online; a chosen audience is not dropped", async () => {
+    const w = await begin();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("radio", {
+        name: "Only you",
+      }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    w.setOnline(false);
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    let d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(RECHECK));
+    expect(noteOf(d)).toBeNull();
+    // A content save would drop the chosen "Only you" while the current audience is unknown: refused, the input kept.
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(d.textContent).toContain(
+        "The sharing changed since you opened this. Review who can see it, then save again.",
+      ),
+    );
+    expect(w.built).toEqual([]);
+    expect(value()).toHaveValue("My unfinished input");
+    w.setOnline(true);
+    d = screen.getByRole("dialog");
+    await waitFor(() => expect(audienceOf(d)).toBe("existing"));
+    // The read again shows v6 as it was; the choice made before is still the one shown.
+    expect(within(d).getByRole("radio", { name: "Only you" })).toBeChecked();
+  });
+
+  test("R23.1 closed offline after the sharing editor read a newer policy: that read says the audience moved, never the old one", async () => {
+    const w = await begin();
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]')?.textContent,
+      ).toContain("Nobody is excluded."),
+    );
+    w.setOnline(false);
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("R23.1 a read asked before a later doubt answers late: it ends nothing, and the latest read still decides", async () => {
+    const w = await begin();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    // The read after this close (A) is held; the edit then comes back on another mount, whose read (B) is held too.
+    type Answer = SharingResult<{ version: number; policy: Policy }>;
+    let releaseA: (answer: Answer) => void = () => undefined;
+    let releaseB: (answer: Answer) => void = () => undefined;
+    w.sharing.next.policy.push(
+      () =>
+        new Promise<Answer>((resolve) => {
+          releaseA = resolve;
+        }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    await back();
+    const atA = reads(w);
+    w.sharing.next.policy.push(
+      () =>
+        new Promise<Answer>((resolve) => {
+          releaseB = resolve;
+        }),
+    );
+    cleanup();
+    await w.mount(`/people/${P}/fields/${F}`);
+    let d = await dialog();
+    await waitFor(() => expect(reads(w)).toBe(atA + 1));
+    await act(async () => {
+      releaseA(ok({ version: 6, policy: ORIGINAL }));
+    });
+    d = screen.getByRole("dialog");
+    // A answered the doubt before this mount's: B is still the read that decides.
+    expect(unknownText(d)).toBe("Checking who can see this field…");
+    expect(noteOf(d)).toBeNull();
+    await act(async () => {
+      releaseB(ok({ version: 6, policy: ORIGINAL }));
+    });
+    await waitFor(() =>
+      expect(noteOf(screen.getByRole("dialog"))).toBe(EXCLUDED),
+    );
+    expect(value()).toHaveValue("My unfinished input");
+  });
+
+  test("R23.1 an edit kept while the page was elsewhere comes back to a policy changed meanwhile: read again, not said from memory", async () => {
+    const w = await begin();
+    cleanup();
+    // The Sharing screen (or another window) removed the exclusion meanwhile.
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.built).toEqual([]);
+  });
+});
+
+/**
+ * Review 24, R24.1 (family people-policy-editor-return-coherence, incomplete_fix): a field audiences summary applied a LATER policy version
+ * of the field while its editor is open, before any policy read or sync of it. The kept read, and the exclusion it names, is not who can see
+ * the field now: it is never said as such, a read asked since is made (once per version), and the edit is bound to the newer policy only by
+ * the person, once the field has synced to it and its policy is read at that version. A summary proves the move; it is never the policy.
+ * The reviewer's coherent fixture: the signed-in account owns the field (complete own audience), Mo owns the profile (partial effective).
+ */
+describe("R24.1: a summary's later policy version reaches the open field editor", () => {
+  const ORIGINAL: Policy = {
+    grants: [{ kind: "household", id: HOME, edit: false }],
+    exclude_accounts: [MO],
+  };
+  const REMOVED: Policy = { ...ORIGINAL, exclude_accounts: [] };
+  const CHANGED =
+    "Who can see this field changed since you opened it. Check the change above before saving yours.";
+  const AHEAD =
+    "Who can see it now is shown here once this field has finished syncing.";
+  const MOVED_TITLE = "Who can see this field changed since you opened it";
+  type Answer = SharingResult<{ version: number; policy: Policy }>;
+  const field = (policyVersion: number) =>
+    fieldRow({
+      id: F,
+      parent_id: P,
+      label: "Note",
+      version: 4,
+      policy_version: policyVersion,
+    });
+  const summary = (version: number, excluded: number) => ({
+    policy_version: version,
+    audience: {
+      disclosure: "complete" as const,
+      in_home: true,
+      households: [
+        {
+          id: HOME,
+          can_edit: false,
+          you_are_member: true,
+          name: "Home",
+          version: 1,
+          member_count: 2,
+        },
+      ],
+      your_direct_grant: null,
+      direct_grant_count: 0,
+      excluded_count: excluded,
+    },
+    effective: {
+      disclosure: "partial" as const,
+      account_count: null,
+      limited_count: null,
+    },
+  });
+  const noteOf = (d: HTMLElement) =>
+    d.querySelector("[data-subject-note]")?.textContent ?? null;
+  const unknownText = (d: HTMLElement) =>
+    d.querySelector('[data-audience="unknown"]')?.textContent ?? null;
+  const value = () =>
+    within(screen.getByRole("dialog")).getByRole("textbox", { name: "Value" });
+  const memory = () => peopleMemory(`${ME}:1`);
+
+  /** The field at policy v6 (Home, excluding Mo), its editor open with unfinished input; every field policy read recorded with its options. */
+  async function begin() {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Mo" }), field(6)]);
+    w.api.linked.set(P, MO);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    w.sharing.defaults.households = ok(record().snapshot.households);
+    w.sharing.defaults.policy = ok({ version: 6, policy: ORIGINAL });
+    w.api.summary.persons.set(P, {
+      owner: {
+        account_id: MO,
+        username: "mo",
+        you: false,
+        person: { id: P, label: "Mo" },
+      },
+      your_access: "edit",
+      added_by_you: "no",
+      audience: {
+        disclosure: "partial",
+        in_home: true,
+        households: [
+          {
+            id: HOME,
+            can_edit: true,
+            you_are_member: true,
+            name: "Home",
+            version: 1,
+            member_count: 2,
+          },
+        ],
+        your_direct_grant: null,
+        direct_grant_count: null,
+        excluded_count: null,
+      },
+    });
+    w.api.summary.fields.set(F, summary(6, 1));
+    const asked: Array<{ fresh?: boolean } | undefined> = [];
+    const read = w.sharing.readPolicy;
+    w.sharing.readPolicy = (id, options) => {
+      if (id === P)
+        return Promise.resolve(
+          ok({
+            version: 1,
+            policy: {
+              grants: [{ kind: "household", id: HOME, edit: true }],
+              exclude_accounts: [],
+            },
+          }),
+        );
+      asked.push(options);
+      return read(id, options);
+    };
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    await waitFor(() =>
+      expect(memory().summaryFloors.get(F)?.policyVersion).toBe(6),
+    );
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Unfinished input" },
+    });
+    return { w, asked };
+  }
+  /** The server's summary (and policy) move to `version`; the page's summaries are read again, as its refresh does. */
+  async function summarise(
+    w: ReturnType<typeof peopleWorld>,
+    version: number,
+    excluded: number,
+  ) {
+    w.api.summary.fields.set(F, summary(version, excluded));
+    act(() => memory().invalidateSummaries());
+    await waitFor(() =>
+      expect(memory().summaryFloors.get(F)?.policyVersion).toBe(version),
+    );
+  }
+  const held = (w: ReturnType<typeof peopleWorld>) => {
+    let release: (answer: Answer) => void = () => undefined;
+    w.sharing.next.policy.push(
+      () =>
+        new Promise<Answer>((resolve) => {
+          release = resolve;
+        }),
+    );
+    return (answer: Answer) => release(answer);
+  };
+
+  test("R24.1 summary v7 before the policy read and the sync: the exclusion is not said; the move is reviewed, the input kept, nothing written", async () => {
+    const { w, asked } = await begin();
+    const before = asked.length;
+    const release = held(w);
+    await summarise(w, 7, 0);
+    const d = screen.getByRole("dialog");
+    // Before any newer policy body: the summary alone withdraws the obsolete explanation, and asks one read made since.
+    await waitFor(() =>
+      expect(unknownText(d)).toBe("Checking who can see this field…"),
+    );
+    expect(noteOf(d)).toBeNull();
+    expect(d.textContent).not.toContain(EXCLUDED);
+    expect(asked.length).toBe(before + 1);
+    expect(asked.at(-1)).toEqual({ fresh: true });
+    const panel = d.querySelector("[data-field-conflict]");
+    expect(panel?.querySelector("h3")?.textContent).toBe(MOVED_TITLE);
+    expect(panel?.querySelector("[data-review-audience]")?.textContent).toBe(
+      AHEAD,
+    );
+    expect(d.querySelector('[data-people-action="save-mine"]')).toBeNull();
+    // The policy at v7, read: still not bound while the field has not synced to it.
+    await act(async () => {
+      release(ok({ version: 7, policy: REMOVED }));
+    });
+    await waitFor(() =>
+      expect(unknownText(screen.getByRole("dialog"))).toBe(CHANGED),
+    );
+    expect(noteOf(screen.getByRole("dialog"))).toBeNull();
+    expect(
+      screen
+        .getByRole("dialog")
+        .querySelector('[data-people-action="save-mine"]'),
+    ).toBeNull();
+    expect(value()).toHaveValue("Unfinished input");
+    expect(w.built).toEqual([]);
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("R24.1 control: the same version summarised again changes nothing: the exclusion is still said and the content saves under v6", async () => {
+    const { w, asked } = await begin();
+    const before = asked.length;
+    await summarise(w, 6, 1);
+    // Another field's later version is not this field's.
+    act(() => {
+      memory().summaryFloors.set("77777777-7777-4777-8777-777777777777", {
+        version: 1,
+        policyVersion: 9,
+      });
+      memory().touch();
+    });
+    const d = screen.getByRole("dialog");
+    expect(noteOf(d)).toBe(EXCLUDED);
+    expect(asked.length).toBe(before);
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 6,
+      value: { kind: "text", text: "Unfinished input" },
+    });
+  });
+
+  test("R24.1 summary, then policy read, then sync to v7: reviewed by the person, bound once, and the content saved under v7", async () => {
+    const { w } = await begin();
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    await summarise(w, 7, 0);
+    await waitFor(() => expect(memory().policies.get(F)?.version).toBe(7));
+    expect(w.built).toEqual([]);
+    act(() => {
+      w.setCache([person({ id: P, label: "Mo" }), field(7)]);
+    });
+    const d = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(d.querySelector("[data-review-audience]")?.textContent).toBe(
+        "Who can see it now: Home · can view",
+      ),
+    );
+    expect(w.built).toEqual([]);
+    expect(noteOf(d)).toBeNull();
+    const mine = d.querySelector('[data-people-action="save-mine"]');
+    fireEvent.click(mine as Element);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "Unfinished input" },
+    });
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("R24.1 a later version applied while the read is on its way: its answer leaves the newer version asked, once", async () => {
+    const { w, asked } = await begin();
+    const before = asked.length;
+    const releaseA = held(w);
+    await summarise(w, 7, 0);
+    await waitFor(() => expect(asked.length).toBe(before + 1));
+    const releaseB = held(w);
+    await summarise(w, 8, 0);
+    // A still runs: nothing is asked beside it.
+    expect(asked.length).toBe(before + 1);
+    await act(async () => {
+      releaseA(ok({ version: 7, policy: REMOVED }));
+    });
+    await waitFor(() => expect(asked.length).toBe(before + 2));
+    expect(asked.at(-1)).toEqual({ fresh: true });
+    expect(noteOf(screen.getByRole("dialog"))).toBeNull();
+    await act(async () => {
+      releaseB(ok({ version: 8, policy: ORIGINAL }));
+    });
+    await waitFor(() => expect(memory().policies.get(F)?.version).toBe(8));
+    // v8 excludes Mo again, but the edit is bound to v6: nothing is said as the edit's audience until the person reviews it.
+    const d = screen.getByRole("dialog");
+    expect(noteOf(d)).toBeNull();
+    expect(asked.length).toBe(before + 2);
+    expect(value()).toHaveValue("Unfinished input");
+    expect(w.built).toEqual([]);
+  });
+
+  test("R24.1 offline after the summary moved: Save writes nothing, the input stays, and who can see it is not claimed", async () => {
+    const { w } = await begin();
+    held(w);
+    await summarise(w, 7, 0);
+    await act(async () => {
+      w.setOnline(false);
+    });
+    const d = screen.getByRole("dialog");
+    expect(noteOf(d)).toBeNull();
+    const save = within(d).queryByRole("button", { name: "Save" });
+    if (save !== null) fireEvent.click(save);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(w.built).toEqual([]);
+    expect(w.sharing.sent).toEqual([]);
+    expect(value()).toHaveValue("Unfinished input");
+    expect(noteOf(screen.getByRole("dialog"))).toBeNull();
+  });
+
+  test("R24.1 the owner-only refusal is remembered: a summary's later version asks no policy read again", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Mo" }), field(6)]);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    w.sharing.defaults.households = ok(record().snapshot.households);
+    w.sharing.next.policy.push({ ok: false, kind: "forbidden" });
+    w.api.summary.fields.set(F, summary(6, 1));
+    await w.mount(`/people/${P}/fields/${F}`);
+    await dialog();
+    await waitFor(() =>
+      expect(memory().policyRefusals.get(F)).toBe("forbidden"),
+    );
+    const reads = () =>
+      w.sharing.calls.filter((c) => c.op === "readPolicy" && c.args[0] === F)
+        .length;
+    const before = reads();
+    await summarise(w, 7, 0);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(reads()).toBe(before);
+    expect(w.built).toEqual([]);
+  });
+
+  test("R24.1 a later version stored before the editor renders again: Save and Save mine act on what is known now, and write nothing", async () => {
+    const { w } = await begin();
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    // Without a render (no notification): the ordinary save, bound to v6, is refused at the action.
+    memory().summaryFloors.set(F, { version: 4, policyVersion: 7 });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Save" }),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(w.built).toEqual([]);
+    expect(value()).toHaveValue("Unfinished input");
+    // Reviewed and coherent at v7: "Save mine" is offered; with a v8 stored just before the press, the save it starts is refused where it
+    // is admitted (the policy known then), and writes nothing.
+    act(() => memory().touch());
+    await waitFor(() => expect(memory().policies.get(F)?.version).toBe(7));
+    act(() => {
+      w.setCache([person({ id: P, label: "Mo" }), field(7)]);
+    });
+    const d = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(
+        d.querySelector('[data-people-action="save-mine"]'),
+      ).not.toBeNull(),
+    );
+    memory().summaryFloors.set(F, { version: 4, policyVersion: 8 });
+    fireEvent.click(
+      d.querySelector('[data-people-action="save-mine"]') as Element,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(w.built).toEqual([]);
+    expect(w.sharing.sent).toEqual([]);
+    expect(value()).toHaveValue("Unfinished input");
+  });
+
+  test("R24.1 a conflicted save is not saved on a version a summary has already moved past", async () => {
+    const w = peopleWorld();
+    w.setCache([
+      person({ id: P, label: "Ada" }),
+      fieldRow({ id: F, parent_id: P, version: 9, policy_version: 3 }),
+    ]);
+    w.env.setDefaults(record());
+    const command = {
+      command: {
+        kind: "put_field",
+        id: F,
+        parent_id: P,
+        expected_version: 8,
+        expected_policy_version: 3,
+        label: "Phone",
+        value: { kind: "text", text: "07700 900999" },
+      },
+    };
+    w.env.setDrafts([
+      draftRow({
+        local_id: "c",
+        kind: "put_field",
+        status: "version_conflict",
+        index_targets: [F],
+        target_resource_ids: [F],
+        command,
+      }),
+    ]);
+    w.putBody("c", command);
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    const mine = await within(d).findByRole("button", {
+      name: "Save mine on the current version",
+    });
+    // Stored without a render: the press itself refuses.
+    memory().summaryFloors.set(F, { version: 9, policyVersion: 4 });
+    fireEvent.click(mine);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(w.built).toEqual([]);
+    // Once rendered, the reason is said.
+    act(() => memory().touch());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("dialog").querySelector("[data-field-conflict]")
+          ?.textContent,
+      ).toContain("Wait for this field to finish syncing"),
+    );
+    expect(w.built).toEqual([]);
+  });
+});

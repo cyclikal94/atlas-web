@@ -8,6 +8,7 @@ import {
   type DraftRow,
   useDataActions,
   useDataEnv,
+  useDraftWithCommand,
 } from "../../data";
 import {
   DETAIL_COPY,
@@ -59,8 +60,11 @@ import { formatSavedAt } from "./rows";
  * attempt is rebuilt on), indeterminate (shown plainly, nothing forced), and failed ("Couldn't load the current state of this item to
  * compare.", the new attempt disabled until the person explicitly continues without it). Discarding needs no read.
  *
- * No command-specific comparison is invented (no command kind exists yet): a feature slice's registered description is the title. All
- * copy not quoted from the wireframe is PROPOSED, pending Kieran's visual and copy sign-off. Closing the dialog keeps the change.
+ * No command-specific comparison is invented here: a feature slice's registered description is the title, and a slice that registered
+ * `review` (WEB-11a review 2 of 22 October 2026, finding 1) adds one line of the retained change's content and one of the current state's,
+ * and may withhold the resend with its reason (for example, the audience the person saved it under has changed since: only the slice's
+ * own screen shows the audience now). Its resend is then bound to the body shown. All copy not quoted from the wireframe is PROPOSED,
+ * pending Kieran's visual and copy sign-off. Closing the dialog keeps the change.
  */
 export type DetailVariant =
   | "version_conflict"
@@ -110,6 +114,17 @@ export function ItemDetailDialog({
     open && variant !== "online_only" && target !== undefined,
   );
   const rebuildable = env.commands.canRebuild(draft);
+  // The slice's own lines (content, and why it may not be resent here), from the draft's body as it is stored now.
+  const reviewable = env.commands.canReview(draft);
+  const body = useDraftWithCommand(
+    open && reviewable && variant !== "online_only" ? draft.local_id : null,
+  );
+  const shownBody =
+    body.status === "ready" &&
+    body.value !== null &&
+    body.value.local_id === draft.local_id
+      ? body.value
+      : null;
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
@@ -127,6 +142,8 @@ export function ItemDetailDialog({
             : ("failed" as const);
   const base: CacheRow | null =
     current !== null && current.kind === "loaded" ? current.value : null;
+  const review =
+    shownBody === null ? null : env.commands.review(shownBody, base);
 
   const discard = async (): Promise<void> => {
     setBusy(true);
@@ -153,6 +170,7 @@ export function ItemDetailDialog({
         draft.local_id,
         base,
         current?.kind === "loaded" ? current.related : undefined,
+        shownBody?.command_digest,
       )
       .catch(() => null);
     setBusy(false);
@@ -179,9 +197,10 @@ export function ItemDetailDialog({
   // The new attempt waits for the read: allowed once it has loaded or is shown as indeterminate, or after the person explicitly continues
   // without it when it failed. Never while it is loading.
   const newAllowed =
-    read === "loaded" ||
-    read === "indeterminate" ||
-    (read === "failed" && proceed);
+    (read === "loaded" ||
+      read === "indeterminate" ||
+      (read === "failed" && proceed)) &&
+    (!reviewable || (review !== null && review.blocked === null));
 
   const footer =
     variant === "online_only" ? null : confirming ? (
@@ -234,7 +253,10 @@ export function ItemDetailDialog({
                   ? "Working…"
                   : read === "loading"
                     ? DETAIL_READ_LOADING
-                    : DETAIL_READ_FAILED
+                    : (review?.blocked ??
+                      (reviewable && review === null
+                        ? DETAIL_READ_LOADING
+                        : DETAIL_READ_FAILED))
               }
             >
               {variant === "operation_conflict"
@@ -285,6 +307,9 @@ export function ItemDetailDialog({
                 {read === "loaded" && base !== null ? (
                   <>
                     <p className="text-foreground">{base.label}</p>
+                    {review?.current ? (
+                      <p className="text-foreground">{review.current}</p>
+                    ) : null}
                     <p className="font-num text-xs">
                       {DETAIL_VERSION(base.version)}
                     </p>
@@ -317,6 +342,9 @@ export function ItemDetailDialog({
                     {DETAIL_RETAINED}
                   </h3>
                   <p className="text-foreground">{title}</p>
+                  {review?.retained ? (
+                    <p className="text-foreground">{review.retained}</p>
+                  ) : null}
                   <p className="font-num text-xs">
                     {DETAIL_QUEUED_SINCE(
                       formatSavedAt(draft.created_at, new Date()),
@@ -327,6 +355,9 @@ export function ItemDetailDialog({
             </div>
           </>
         )}
+        {review?.blocked && variant !== "online_only" ? (
+          <p className="text-foreground">{review.blocked}</p>
+        ) : null}
         {failed ? <p className="text-foreground">{failed}</p> : null}
       </div>
     </Dialog>

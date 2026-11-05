@@ -69,6 +69,7 @@ export { StampedRequestError } from "./api";
  */
 export { openHold, unrevokedHold } from "./kernel/persistence";
 export {
+  exactVersionRange,
   formatRange,
   rangeFromPin,
   type VersionRange,

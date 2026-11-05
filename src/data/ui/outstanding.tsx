@@ -1,16 +1,31 @@
 import { useMemo } from "react";
-import type { DraftRow, DraftWithCommand, ResourceId } from "../model/types";
-import { readDraftWithCommand } from "../plans/draft-detail";
+import type {
+  DraftRow,
+  DraftWithCommand,
+  ResourceId,
+  ResourceKind,
+} from "../model/types";
+import type { FormCopyCursor } from "../plans/form-copies";
 import type { ListedResource } from "../plans/outbox";
 import {
   type CachePosition,
+  type ChildPage,
+  type ChildPageInput,
+  type FormCopiesUnder,
+  type Inventory,
+  type InventoryInput,
   type OutstandingByKindPage,
+  type OutstandingCreatesPage,
   type OutstandingCursor,
   type OutstandingForResource,
   type OutstandingPage,
   readCachePosition,
+  readChildPage,
+  readFormCopiesUnder,
+  readInventory,
   readOutstanding,
   readOutstandingByKind,
+  readOutstandingCreates,
   readResourcesById,
 } from "../plans/outstanding-reads";
 import type { Loadable, Watchable } from "../store/port";
@@ -296,24 +311,117 @@ export function useCachePosition(): Loadable<CachePosition | null> {
   }, []);
 }
 
+// Both slices share the same single-draft hook, kept separate from these larger read plans.
+export { useDraftWithCommand } from "./draft-body";
+
 /**
- * ONE draft with its stored command, live (WEB-10a revision 2, C5): what a slice's conflict choices read to know what the person actually
- * submitted, durably (a reload, another tab or a second conflict of a replacement still have it), never page memory. `null` when the draft
- * no longer exists. One body read for one draft, as every body read is (D-23).
+ * WEB-11a's live read of outstanding work, in a module of its own: only the (lazy) people screens import it, so the plan stays out of every
+ * initial bundle.
  */
-export function useDraftWithCommand(
-  localId: string | null,
-): Loadable<DraftWithCommand | null> {
+
+/**
+ * One window of this device's OUTSTANDING saves of the command kinds asked for, with their bodies (`readOutstandingCreates`): the
+ * queued, in-flight and capacity-blocked drafts, and the acknowledged ones whose change the cache has not published yet, oldest first,
+ * at most 100. Pass the page's `next` back as `after` to read the following window. A screen uses it to show what the cache cannot yet
+ * (a resource created on this device, a change not yet sent); it never creates a database.
+ */
+export function useOutstandingCreates(
+  kinds: readonly string[],
+  after?: number | null,
+  witness?: { id: ResourceId; kind: ResourceKind },
+): Loadable<OutstandingCreatesPage> {
+  const key = kinds.join("\u0000");
+  const witnessId = witness?.id;
+  const witnessKind = witness?.kind;
   return useWatch(
     (env) => {
       const service = env.service();
-      return service && localId !== null
-        ? service.store.watch(readDraftWithCommand, {
+      return service
+        ? service.store.watch(readOutstandingCreates, {
             incarnationId: service.incarnationId,
-            localId,
+            kinds: key === "" ? [] : key.split("\u0000"),
+            ...(typeof after === "number" ? { after } : {}),
+            ...(witnessId === undefined || witnessKind === undefined
+              ? {}
+              : { witness: { id: witnessId, kind: witnessKind } }),
           })
         : null;
     },
-    [localId],
+    [key, after, witnessId, witnessKind],
+  );
+}
+
+/**
+ * One page of `kind` (under `parentId`) with the parents of its rows, and on request the drafts over them, read in ONE transaction
+ * (`readChildPage`, WEB-11a review 16): rows whose parent the cache does not hold as `parentKind` are not answered. A new parent, page or
+ * kind is a new read that starts `loading`.
+ */
+export function useChildPage(
+  options: Omit<ChildPageInput, "incarnationId">,
+): Loadable<ChildPage> {
+  const { kind, parentKind, parentId, after } = options;
+  const kinds = options.kinds?.join("\u0000");
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readChildPage, {
+            incarnationId: service.incarnationId,
+            kind,
+            parentKind,
+            ...(parentId === undefined ? {} : { parentId }),
+            after: after ?? null,
+            ...(kinds === undefined
+              ? {}
+              : { kinds: kinds === "" ? [] : kinds.split("\u0000") }),
+          })
+        : null;
+    },
+    [kind, parentKind, parentId, after, kinds],
+  );
+}
+
+/** A page of form copies with whether the cache held `witness` in the same read (`readFormCopiesUnder`, WEB-11a review 16). */
+export function useFormCopiesUnder(
+  prefix: string,
+  after: FormCopyCursor | null,
+  witness: { id: ResourceId; kind: ResourceKind },
+): Loadable<FormCopiesUnder> {
+  const { id, kind } = witness;
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readFormCopiesUnder, {
+            incarnationId: service.incarnationId,
+            prefix,
+            after,
+            witness: { id, kind },
+          })
+        : null;
+    },
+    [prefix, after, id, kind],
+  );
+}
+
+/**
+ * The cache and this device's outstanding saves of `kinds` read in ONE transaction (`readInventory`): what a screen asks, after its
+ * separate reads, before it says something is NOT there. `query` null reads nothing (loading).
+ */
+export function useInventory(
+  query: Omit<InventoryInput, "incarnationId"> | null,
+): Loadable<Inventory> {
+  const key = query === null ? null : JSON.stringify(query);
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service && key !== null
+        ? service.store.watch(readInventory, {
+            incarnationId: service.incarnationId,
+            ...(JSON.parse(key) as Omit<InventoryInput, "incarnationId">),
+          })
+        : null;
+    },
+    [key],
   );
 }

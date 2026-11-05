@@ -389,15 +389,27 @@ describe("L4: an archive reads the task first, the list only on its 404", () => 
       expect(asked).toHaveLength(1);
     },
   );
-  test("a task no longer readable (404) is looked for among the lists too, and ends inaccessible", async () => {
+  test("a task no longer readable (404) is looked for among the lists too; the shared registry permits another resource kind", async () => {
     const draft = draftOf(archive({ taskId: TASK, archived: true }), "archive");
     const { read, asked } = await readWith(draft, serving([], []));
-    expect(read).toEqual({ kind: "failed", reason: "inaccessible" });
+    // Merge adaptation: the standalone task/list reader retains its original absence result, while the shared archive registry
+    // cannot infer that an unrecognised id is absent from People or Fields. Both readers still walk both list collections.
+    const standaloneAsked: string[] = [];
+    const standalone = await specs.archive?.readCurrent?.(draft, {
+      signal: new AbortController().signal,
+      get: async (path) => {
+        standaloneAsked.push(path);
+        return serving([], [])(path);
+      },
+    });
+    expect(standalone).toEqual({ kind: "failed", reason: "inaccessible" });
+    expect(read).toEqual({ kind: "indeterminate" });
     expect(asked).toEqual([
       `/tasks/${TASK}`,
       listPath(false, null),
       listPath(true, null),
     ]);
+    expect(standaloneAsked).toEqual(asked);
   });
 });
 
