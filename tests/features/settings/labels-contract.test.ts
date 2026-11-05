@@ -20,7 +20,7 @@ import { serverAcceptsName } from "../../support/session/server";
 /**
  * WEB-08d: the decoders against the BE-Q25 contract. `tests/fixtures/be-q25/labels-and-capacity-30fec6a.json` is a verbatim extract
  * of backend commit 30fec6a (the schemas, the `behaviour.labels_and_capacity` probe payloads, and the name vectors of the backend's
- * own Rust tests). The accepted API 0.29 release retains these schemas: keep the original extract and compare it with the current
+ * own Rust tests). The released API 0.31 contract retains these schemas: keep the original extract and compare it with the current
  * released contract, while checking that contract's bytes against the independently verified release pin.
  */
 interface Extract {
@@ -56,21 +56,21 @@ const enumOf = (schema: string, member: string): unknown[] => {
 };
 
 describe("drift: the released contract preserves the BE-Q25 decoder contract", () => {
-  test("the installed contract matches accepted API 0.29 and retains the original extract's provenance", () => {
+  test("the installed contract matches released API 0.31 and retains the original extract's provenance", () => {
     expect(extract.source.commit).toBe(
       "30fec6a3f31aaeea9c69d10216c78b8c02645661",
     );
     expect(extract.source.openapi_sha256).toBe(
       "087ced05e7a731d99b6374bbe0572e40746cec88dad0ce350c7bfe52fbf153fc",
     );
-    expect(pin.backend_commit).toBe("4396c99300d00798fc10e61d459f4d9fce699ee8");
+    expect(pin.backend_commit).toBe("7dc51e39fdf296b14ba7c438ad9730fa3485d964");
     expect(pin.contract_sha256).toBe(
-      "369ca0de5ab0cd5983252b55d4a546263819c236fa285a386b0dd374bf82b6e0",
+      "c43796e63d2c5adc54d2c9f9769dcc9e6b85e635f984b15a08520b2db6fee848",
     );
     expect(createHash("sha256").update(releasedBytes).digest("hex")).toBe(
       pin.contract_sha256,
     );
-    expect(released.info.version).toBe("0.29.0");
+    expect(released.info.version).toBe("0.31.0");
   });
 
   test.each(["ClientLabel", "Capacity", "DeviceName", "DeviceNameUpdate"])(

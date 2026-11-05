@@ -205,7 +205,7 @@ export function leaderWorld(): LeaderWorld {
       const compat = {
         get: (): ApiCompatibility => ({
           status: "supported",
-          version: "0.29.0",
+          version: "0.31.0",
         }),
         subscribe: () => () => undefined,
       };

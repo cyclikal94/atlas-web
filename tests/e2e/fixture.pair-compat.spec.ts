@@ -15,8 +15,8 @@ import { expect, test } from "./helpers";
  * only with `?leader=production`), boot's `diagnosticCompatibility`, the session's real `/health` check and its one compatibility store, the
  * production leader's outbox dispatcher gate (W5/W6) and the production outbox facade (W2). The stubbed `/health` answers the version a case
  * names; nothing else is altered and no receipt is seeded:
- *   - the released range (no descriptor) sends at 0.29.0 and keeps a draft queued, never attempted, at 0.30.0 (the exact F-O11 combination);
- *   - the exact policy for 0.30.0 sends at 0.30.0 and refuses 0.30.1 and 0.29.0 (it admits ONE version, never a wider range);
+ *   - the released range (no descriptor) sends at 0.31.0 and keeps a draft queued, never attempted, at 0.30.0 (the diagnostic version, below the released range);
+ *   - the exact policy for 0.30.0 sends at 0.30.0 and refuses 0.30.1 and 0.31.0 (it admits ONE version, never a wider range);
  *   - a malformed or incomplete descriptor is refused by the harness before boot (no session, no `/health`);
  *   - each DOCUMENT establishes its own policy: a follower without it is unsupported while the leader with it sends the follower's draft; once
  *     that leader is gone the follower leads and holds a new draft; reloaded with the policy it sends the held draft once.
@@ -24,7 +24,7 @@ import { expect, test } from "./helpers";
  */
 
 const SELECTION = "a".repeat(64);
-const RELEASED = ">=0.29.0 <0.30.0";
+const RELEASED = ">=0.31.0 <0.32.0";
 
 /** The `/health` answer for the context (registered after `leaderNetwork`'s, so it wins), and the count of requests it answered. */
 async function healthAt(context: BrowserContext, version: string) {
@@ -153,17 +153,17 @@ async function heldUnsupported(p: Page, net: LeaderNet, localId: string) {
 }
 
 test.describe("WEB-09c r38: the development-pair page's compatibility policy through the production composition (R38-DIAG)", () => {
-  test("released range (no descriptor), /health 0.29.0: supported; the production dispatcher sends a saved draft once and admits its receipt", async ({
+  test("released range (no descriptor), /health 0.31.0: supported; the production dispatcher sends a saved draft once and admits its receipt", async ({
     context,
   }) => {
     const net = await fresh(context);
-    await healthAt(context, "0.29.0");
+    await healthAt(context, "0.31.0");
     const p = await page(context, net, "leader", null);
     await displayed(p);
     expect(await recordOf(p)).toBeNull();
     expect(await verdictOf(p)).toEqual({
       status: "supported",
-      version: "0.29.0",
+      version: "0.31.0",
     });
     await sentOnce(p, net, await save(p, "R38 released"), "leader");
   });
@@ -206,7 +206,7 @@ test.describe("WEB-09c r38: the development-pair page's compatibility policy thr
     await sentOnce(p, net, await save(p, "R38 exact"), "leader");
   });
 
-  for (const health of ["0.30.1", "0.29.0"])
+  for (const health of ["0.30.1", "0.31.0"])
     test(`exact policy 0.30.0, /health ${health}: unsupported (one version only); held, nothing sent`, async ({
       context,
     }) => {

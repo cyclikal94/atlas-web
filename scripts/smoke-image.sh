@@ -41,7 +41,7 @@ IMAGES=()
 CHILD=""
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/atlas-web-image.XXXXXX")"
 STUB_CONF=scripts/smoke-image-backend.conf
-STUB_HEALTH='{"api_version":"0.29.0","status":"ok"}'
+STUB_HEALTH='{"api_version":"0.31.0","status":"ok"}'
 STUB_READY='{"status":"ready"}'
 echo "run_id=$RUN_ID" >"$EVIDENCE/run.txt"
 
