@@ -293,6 +293,17 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     },
     outbox: () => null,
     service: () => null,
+    // No database is ever bound here, so nothing is admitted against it.
+    quota: {
+      check: async () => "ok",
+      reserve: async () => ({
+        verdict: "ok",
+        live: () => true,
+        settle: () => undefined,
+      }),
+      lastFree: () => null,
+      invalidate: () => undefined,
+    },
     serviceStore: new Cell(null),
     cacheLifetime: new Cell(null),
     attachLeader: () => () => undefined,

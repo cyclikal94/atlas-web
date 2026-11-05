@@ -5,7 +5,7 @@
 // for it, so only an assertion of those tests catches it.
 //
 // Revision 8 (review 8 R7a/R7b): the entries whose code revision 8 rewrote are RE-ANCHORED at the corrected code with the same defect
-// (MU-2657/2658/2659/2660/2664/2665/2668), and MU-2666 is RE-EXPRESSED (its old oracle rewarded the loss of input; see its entry). Ids,
+// (MU-5130/2658/2659/2660/2664/2665/2668), and MU-5139 is RE-EXPRESSED (its old oracle rewarded the loss of input; see its entry). Ids,
 // files and the defects restored are kept; revision 8's own mutants are in `catalogue-web13b-r8.mjs`.
 //
 // Considered and not selected (recorded for the reviewer): notifying the page's listeners for a publication that is not the newest is
@@ -29,7 +29,7 @@ export const UNIT_13B_R7 = [
   // followed by W18 → W23 leaves a durable trace (the generation), so the comparison alone still ends the session (L1/L2 pass under this
   // mutant); only a known-invalid interval that leaves NO durable trace (L5, a failed invalidation's streak, later gone) needs the observer.
   {
-    id: "MU-2656",
+    id: "MU-5129",
     title:
       "WEB-13b R7 (revision 7): the kept import observes the controller mounted when it opened (a remount disposes it; the later invalidation is missed)",
     file: SOURCES,
@@ -46,7 +46,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2657",
+    id: "MU-5130",
     title:
       "WEB-13b R7 (revision 7): a hidden session ignores the cache's witness (an invalidation and recovery nobody observed keep the old input)",
     file: KEPT,
@@ -62,7 +62,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2658",
+    id: "MU-5131",
     title:
       "WEB-13b R7 (revision 7): reopening refreshes the session's basis to the cache's now (stale input legitimised on return)",
     file: KEPT,
@@ -79,7 +79,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2659",
+    id: "MU-5132",
     title:
       "WEB-13b R7 (revision 7): facts not established yet end a hidden or waiting session (every remount, or every unread showing, discards the kept import)",
     file: KEPT,
@@ -95,7 +95,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2660",
+    id: "MU-5133",
     title:
       "WEB-13b R7 (revision 7): a hidden session ignores a cache KNOWN to be invalid under the same witness (an admitted invalidation not yet written)",
     file: KEPT,
@@ -111,7 +111,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2661",
+    id: "MU-5134",
     title:
       "WEB-13b R7 (revision 7): a controller's cache lifetime never says known-invalid (a failed invalidation's streak, marker or hold is not published)",
     file: ENV,
@@ -128,7 +128,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2662",
+    id: "MU-5135",
     title:
       "WEB-13b R7 (revision 7): hiding a session does not judge the cache as it is then (an invalidation a shown dialog stayed open through is kept)",
     file: KEPT,
@@ -143,7 +143,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2663",
+    id: "MU-5136",
     title:
       "WEB-13b R7 (revision 7): a withdrawn controller's publication stays the page's (a disposed controller still speaks for the cache)",
     file: LIFETIME,
@@ -153,7 +153,7 @@ export const UNIT_13B_R7 = [
     patch: (t) => sub(t, "    sources.splice(at, 1);\n", ""),
   },
   {
-    id: "MU-2664",
+    id: "MU-5137",
     title:
       "WEB-13b R7 (revision 7): the sync facts do not carry the cache's witness (an unobserved invalidation and recovery are invisible)",
     file: FACTS,
@@ -169,7 +169,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2665",
+    id: "MU-5138",
     title:
       "WEB-13b R7 (revision 7): a shown session does not follow the cache it is shown against (a pending source's dialog kept open through a recovery ends once hidden)",
     file: KEPT,
@@ -183,13 +183,13 @@ export const UNIT_13B_R7 = [
         "    if (known !== null && which.basis === null)\n",
       ),
   },
-  // RE-EXPRESSED in revision 8 (review 8 R7a; design assessment C6). Revision 7's MU-2666 removed the `verifiable` precondition of a
+  // RE-EXPRESSED in revision 8 (review 8 R7a; design assessment C6). Revision 7's MU-5139 removed the `verifiable` precondition of a
   // reopening and was caught by the C3 oracle that EXPECTED the kept input to be discarded while the new controller's facts were unread
   // (the loss review 8 reproduced). The old intent, "kept input is not used before its cache can be compared", is now this mutant: the
   // session shown again does not wait for its verification (it is ready at once). Its oracles assert the SAME session with its input AND
   // the waiting state, so a mutant that deleted the input would be caught by them too: deletion is never rewarded.
   {
-    id: "MU-2666",
+    id: "MU-5139",
     title:
       "WEB-13b R7a (revision 8, re-expressed): a kept session shown again is ready before its basis is verified (unverified input could be saved)",
     file: KEPT,
@@ -200,7 +200,7 @@ export const UNIT_13B_R7 = [
       sub(t, "  which.pending = true;\n", "  which.pending = false;\n"),
   },
   {
-    id: "MU-2667",
+    id: "MU-5140",
     title:
       "WEB-13b R7 (revision 7): the mounted controller does not publish its cache lifetime (nothing observes the cache for a kept import)",
     file: REACT,
@@ -217,7 +217,7 @@ export const UNIT_13B_R7 = [
       ),
   },
   {
-    id: "MU-2668",
+    id: "MU-5141",
     title:
       "WEB-13b R7 (revision 7): showing a kept session again does not judge the cache as it is then, while still hidden (a change no publication announced is missed)",
     file: KEPT,

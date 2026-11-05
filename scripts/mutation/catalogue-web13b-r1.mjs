@@ -1,4 +1,4 @@
-// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85).
+// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-5065..MU-5109 (+85).
 // Historical reports keep their original IDs; mutation patches, selectors and assertions are unchanged.
 // WEB-13b revision 1's mutants (review 1, R1–R6), in the form and under the rules of `data-catalogue.mjs`, which spreads them into its
 // `UNIT` list after `catalogue-web13b.mjs`. Each removes ONE guard the revision added; `expect` names the test written for it, so only an
@@ -25,13 +25,13 @@ const T_SECTION = "tests/features/tasks/anchor-section.test.tsx";
 const T_FORM = "tests/features/tasks/task-form-anchor.test.tsx";
 
 /**
- * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the model), MU-2471..MU-2589. Clear time's own
+ * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the model), MU-5035..MU-5068. Clear time's own
  * end of the kept time has no mutant: the time field's edit ends it too, so removing it changes nothing observable (an equivalent mutant,
  * recorded in the revision report).
  */
 export const UNIT_13B_R1 = [
   {
-    id: "MU-2471",
+    id: "MU-5035",
     title:
       "WEB-13b R1: a submission while the latest file is being read is not refused (the dialog says a file is missing)",
     file: IMPORT_DIALOG,
@@ -48,7 +48,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2472",
+    id: "MU-5036",
     title:
       "WEB-13b R1: choosing another file keeps the previous one until the new one has been read",
     // Revision 6 (R7): re-expressed in the editing session, which now owns the chosen file (same defect).
@@ -63,7 +63,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2473",
+    id: "MU-5037",
     title:
       "WEB-13b R1: Import is offered (enabled) while the file just chosen is being read",
     file: IMPORT_DIALOG,
@@ -73,7 +73,7 @@ export const UNIT_13B_R1 = [
       sub(t, "          ) : reading ? (\n", "          ) : false ? (\n"),
   },
   {
-    id: "MU-2474",
+    id: "MU-5038",
     title:
       "WEB-13b R3: a queued import closes the dialog whatever was changed in it while it was being stored",
     // Revision 6 (R7): re-expressed in the editing session, which now settles the save it made (same defect).
@@ -89,7 +89,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2475",
+    id: "MU-5039",
     title:
       "WEB-13b R3/R2's rule: a stored import's identity is not spent (Import again with the same choices is taken for the stored one)",
     // Revision 6 (R7): re-expressed in the editing session, which now holds the save identity (same defect).
@@ -99,7 +99,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "    submission?.invalidate();\n", ""),
   },
   {
-    id: "MU-2476",
+    id: "MU-5040",
     title:
       "WEB-13b R4: the drop zone is unavailable when the first page of sources holds none to import into",
     file: DROP_ZONE,
@@ -113,7 +113,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2477",
+    id: "MU-5041",
     title:
       "WEB-13b R4: the import dialog's chosen source is not an option while another page of sources is shown",
     file: IMPORT_DIALOG,
@@ -127,7 +127,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2478",
+    id: "MU-5042",
     title:
       "WEB-13b R4: a chooser shows one page of sources only (no Show previous/next calendars)",
     file: SOURCE_PAGES,
@@ -142,7 +142,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2479",
+    id: "MU-5043",
     title:
       "WEB-13b R4: the event picker's chosen source is not an option while another page of sources is shown",
     file: PICKERS,
@@ -156,7 +156,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2480",
+    id: "MU-5044",
     title:
       "WEB-13b R4: paging the event picker's calendars changes the source shown by default (its events' cursor goes stale)",
     file: PICKERS,
@@ -170,7 +170,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2481",
+    id: "MU-5045",
     title:
       "WEB-13b R4: the review panel has no way back to an earlier page (Show previous reviews)",
     file: REVIEW_PANEL,
@@ -185,7 +185,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2482",
+    id: "MU-5046",
     title:
       "WEB-13b R4: a later page with nothing unresolved hides the whole panel (and its way back)",
     file: REVIEW_PANEL,
@@ -199,7 +199,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2483",
+    id: "MU-5047",
     title:
       "WEB-13b R2's rule: a stored acknowledgement's identity is not spent (Acknowledge again reuses it)",
     file: REVIEW_PANEL,
@@ -208,7 +208,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "        keys.current.delete(what);\n", ""),
   },
   {
-    id: "MU-2484",
+    id: "MU-5048",
     title:
       "WEB-13b R2: a stored anchor change's identity is not retired (A, B, then A again is taken for the first A)",
     file: SECTION,
@@ -218,7 +218,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "        keys.delete(what);\n", ""),
   },
   {
-    id: "MU-2485",
+    id: "MU-5049",
     title:
       "WEB-13b R2: every press is a new change (the same change pressed again after a failure that may have stored it is stored twice)",
     file: SECTION,
@@ -232,7 +232,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2486",
+    id: "MU-5050",
     title:
       "WEB-13b R3: a done anchor save closes the panel whatever was edited in it meanwhile",
     // Re-expressed in revision 2: a done save consumes the editing session (whose consumption closes the panel) at any edit count.
@@ -248,7 +248,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2487",
+    id: "MU-5051",
     title:
       "WEB-13b R3: after a superseding save that kept newer input, the next save supersedes the same (already replaced) change again",
     file: SECTION,
@@ -262,7 +262,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2488",
+    id: "MU-5052",
     title:
       "WEB-13b R3: the save after a kept one is checked against the read the panel was opened from (refused as changed by its own change)",
     file: SECTION,
@@ -277,7 +277,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2489",
+    id: "MU-5053",
     title:
       "WEB-13b R5: an anchor's own time is always rebuilt from its minutes (seconds dropped when anything else is edited)",
     file: ANCHOR_MODEL,
@@ -292,7 +292,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2490",
+    id: "MU-5054",
     title:
       "WEB-13b R5: editing the time field keeps the anchor's own exact time (typed back to the same minute, the old seconds are sent)",
     file: ANCHOR_DIALOG,
@@ -306,7 +306,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2491",
+    id: "MU-5055",
     title:
       "WEB-13b R6: the binding read is not given its caller's lifetime (a not_sent retry is admitted after the visit ended)",
     file: TASKS_API,
@@ -320,7 +320,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2492",
+    id: "MU-5056",
     title:
       "WEB-13b R6: a lifetime-bound read never asks its caller's lifetime (admitted before and after every wait)",
     file: TASKS_API,
@@ -335,7 +335,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2493",
+    id: "MU-5057",
     title:
       "WEB-13b R6: a lifetime-bound read retried after a not_sent wait ignores going offline meanwhile (it is admitted again)",
     file: TASKS_API,
@@ -344,7 +344,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "    if (away !== null) return away;\n", ""),
   },
   {
-    id: "MU-2494",
+    id: "MU-5058",
     title:
       "WEB-13b R6: the section's lifetime is always live (leaving the task's screen does not stop the read's admissions)",
     file: SECTION,
@@ -358,7 +358,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2495",
+    id: "MU-5059",
     title:
       "WEB-13b R6 (I-CAL-ANC1 finding): the read's lifetime is the visit's, not the task screen's (revision 3: a section kept mounted across away-and-back follows the visit going on, so the same patch now sends an unsent read from the sync screens, where the visit goes on but the person is not at the task)",
     file: SECTION,
@@ -373,7 +373,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2496",
+    id: "MU-5060",
     title:
       "WEB-13b I1 (R3's family): the anchor panel's in-dialog sync control keeps nothing (its input is lost at the sync screens)",
     file: ANCHOR_DIALOG,
@@ -384,7 +384,7 @@ export const UNIT_13B_R1 = [
       sub(t, "      {...(onRetain === undefined\n", "      {...(true\n"),
   },
   {
-    id: "MU-2497",
+    id: "MU-5061",
     title:
       "WEB-13b I1: the task detail does not resume a kept panel (the next panel starts from the binding)",
     // Re-expressed in revision 2: the task's visit never shows a kept session again (`openPanel`).
@@ -400,7 +400,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2498",
+    id: "MU-5062",
     title:
       "WEB-13b I1: the visit's end does not drop a kept panel (another visit resumes it)",
     file: KEPT,
@@ -419,7 +419,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2499",
+    id: "MU-5063",
     title:
       "WEB-13b I1: a resumed panel is not taken (a Cancel of it does not discard: the next panel resumes it again)",
     // Re-expressed in revision 2: a session shown again stays marked as kept by the sync control, so its Cancel does not end it.
@@ -434,7 +434,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2500",
+    id: "MU-5064",
     title:
       "WEB-13b I1: a kept panel whose pending save stored exactly what it held is still resumed (offered to be saved twice)",
     // Re-expressed in revision 2: a session whose save stored exactly what it held is not consumed.
@@ -449,7 +449,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2586",
+    id: "MU-5065",
     title:
       "WEB-13b I1: a kept panel's newer input after its own save keeps the old context (its save is refused as changed by its own change)",
     // Re-expressed in revision 2: the session's own done save does not renew what its next save is checked against.
@@ -459,7 +459,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "      current = renew(current);\n", ""),
   },
   {
-    id: "MU-2587",
+    id: "MU-5066",
     title:
       "WEB-13b I1: a save done after the panel was kept is never settled (the kept state of a saved change is resumed)",
     // Re-expressed in revision 2: the session never hears its save's completion.
@@ -474,7 +474,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2588",
+    id: "MU-5067",
     title: "WEB-13b I1: the new-task form does not resume its kept panel",
     file: TASK_FORM,
     tests: [T_FORM],
@@ -483,7 +483,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "        ...(panel ?? {\n", "        ...({\n"),
   },
   {
-    id: "MU-2589",
+    id: "MU-5068",
     title:
       "WEB-13b I1: the new-task form's resumed panel, cancelled, is resumed again (Cancel does not discard it)",
     file: TASK_FORM,

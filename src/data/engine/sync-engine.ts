@@ -4,7 +4,11 @@ import {
   type Store,
   type Trace,
 } from "../../session";
-import { DATA_CONFIG, maxResponseBytesFor } from "../model/config";
+import {
+  admissionBytesFor,
+  DATA_CONFIG,
+  maxResponseBytesFor,
+} from "../model/config";
 import {
   INVALIDATE_PREFIX,
   initialReadRetry,
@@ -15,6 +19,7 @@ import {
   onUnrecognised,
   resumeOnOnline,
 } from "../model/retry";
+import { maxChangesFor, SEGMENT_CONTRACT } from "../model/segmented-sync";
 import {
   type DeviceSignals,
   isAllocationError,
@@ -28,6 +33,10 @@ import type {
   SizingState,
 } from "../model/types";
 import { type CommitPageResult, commitPage } from "../plans/commit-page";
+import {
+  type StageSegmentResult,
+  stageDeltaSegment,
+} from "../plans/delta-segments";
 import {
   recordLocalWriteOutcome,
   recordReadOutcome,
@@ -131,6 +140,9 @@ export type EngineState = (
   invalidating?: true;
 };
 
+/** What a request asked of segmented delivery (WEB-09c): the `max_changes` it carried, and whether its page may carry a segment. */
+type Segmented = ReturnType<typeof maxChangesFor>;
+
 export interface EngineDeps {
   /** The displayed account's service, or null when there is none. */
   service(): AccountService | null;
@@ -173,6 +185,12 @@ export interface EngineDeps {
   trace?: Trace;
   ids: { uuid(): string };
   elapsed?: () => number;
+  /**
+   * WEB-09c (segmented delivery, `model/segmented-sync.ts`): whether the server is KNOWN to support BE-Q23's `max_changes`. Absent: false,
+   * so no request opts in (production, until the contract is in a released, reviewed pin and `segmentedMinApiVersion` is set from it). A
+   * continuation already held is followed whatever this says: only a server that segments can have issued it.
+   */
+  segmentedCapable?: () => boolean;
   /** Overrides for tests (the provisional constants otherwise). */
   config?: Partial<typeof DATA_CONFIG>;
 }
@@ -740,10 +758,20 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       expectedPosition: capture.cursor,
     });
 
-    // The quota reserve: data writes refuse BEFORE atlas-auth writes could fail.
+    // 3's request budget, decided ONCE from the capture, before the quota check that judges the response it may bring (R21-QUOTA). WEB-09c:
+    // `max_changes` when the server is known to segment, or a segmented revision is being received.
+    const segmented = maxChangesFor({
+      configured: config.segmentedMaxChanges,
+      capable: deps.segmentedCapable?.() ?? false,
+      stepped: capture.steppedChanges,
+      staged: capture.staged,
+    });
+
+    // The quota reserve: data writes refuse BEFORE atlas-auth writes could fail. The estimate is of THIS request's response: `max_changes`
+    // bounds it whatever the limit, and without one the whole-batch estimate stands.
     const verdict = await deps.quota.check(
       "cache",
-      maxResponseBytesFor(capture.limit),
+      admissionBytesFor(capture.limit, segmented.maxChanges, config),
     );
 
     // The last test before the request, and the quota read above is an asynchronous gap that everything this step decided before it may
@@ -760,10 +788,15 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
 
     setState({ kind: "running", catchingUp: behind });
 
-    // 3: the request.
+    // 3: the request, with the budget decided above.
     const url = deps.apiUrl("/sync");
     if (capture.cursor !== null) url.searchParams.set("cursor", capture.cursor);
     url.searchParams.set("limit", String(capture.limit));
+    if (segmented.maxChanges !== null)
+      url.searchParams.set(
+        SEGMENT_CONTRACT.parameter,
+        String(segmented.maxChanges),
+      );
     let response: Response;
     try {
       response = await deps.fetchFor(
@@ -779,7 +812,15 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     notSent = 0;
     notCovered = 0;
     staleRun = 0;
-    return dispatch(id, service, captured, capture.limit, response, gateSaw);
+    return dispatch(
+      id,
+      service,
+      captured,
+      capture.limit,
+      response,
+      gateSaw,
+      segmented,
+    );
   }
 
   /**
@@ -985,10 +1026,11 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     limit: number,
     response: Response,
     saw: GateSaw,
+    segmented: Segmented,
   ): Promise<Next> {
     const status = response.status;
     if (status === 200)
-      return applyPage(id, service, captured, limit, response, saw);
+      return applyPage(id, service, captured, limit, response, saw, segmented);
     if (status === 410)
       return invalidate(id, service, captured, "resync_required", saw);
     if (status === 400 || status === 422)
@@ -1020,7 +1062,9 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     limit: number,
     response: Response,
     saw: GateSaw,
+    segmented: Segmented,
   ): Promise<Next> {
+    const budget = segmented.maxChanges;
     const declared = Number(response.headers.get("content-length"));
     const ceiling = maxResponseBytesFor(limit, config);
     if (Number.isFinite(declared) && declared > ceiling)
@@ -1030,7 +1074,12 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       bytes = new Uint8Array(await response.arrayBuffer());
     } catch (error) {
       if (isAllocationError(error))
-        return sizingFailure(id, service, { kind: "allocation_failed" });
+        return sizingFailure(
+          id,
+          service,
+          { kind: "allocation_failed" },
+          budget,
+        );
       return failRead(id, service, captured, "failure");
     }
     if (bytes.length > ceiling)
@@ -1038,14 +1087,23 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     const scanStarted = deps.elapsed?.();
     let scan: ScanResult;
     try {
-      scan = scanSyncPage(bytes, config);
+      // A segment is read only where it was asked for, or a continuation is being followed (WEB-09c).
+      scan = scanSyncPage(
+        bytes,
+        segmented.allowSegment ? { ...config, allowSegment: true } : config,
+      );
     } catch (error) {
       // The scan's allocation failures (its offset arrays, their growth and trimmed copies, the decoding of a key or the cursor) are the
       // device's, exactly like the body's above (R44): the ladder steps down and the same position is asked for again, a smaller page.
       // Nothing was written and no attempt marker exists yet, so there is nothing to retire. Anything else the scan throws is a defect
       // in a step, and reaches the loop's stop.
       if (isAllocationError(error))
-        return sizingFailure(id, service, { kind: "allocation_failed" });
+        return sizingFailure(
+          id,
+          service,
+          { kind: "allocation_failed" },
+          budget,
+        );
       throw error;
     }
     const scanMs =
@@ -1066,6 +1124,7 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       limit,
       bytes,
       scan,
+      budget,
     );
     if (admitted === "ended") return { when: "event" };
     if (admitted === "refused") {
@@ -1106,10 +1165,15 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       // The hold the page was admitted under ended on every one of its admissions: nothing was applied and nothing is counted as a
       // failure, and the page is requested again, paced like a commit whose identity could not be verified.
       if (value.kind === "lease_lapsed") return dropped("unverified");
+      // WEB-09c: the page did not continue the staged revision. The writer abandoned the stage and moved the position back to where the
+      // revision began; the answer is an unrecognised one (counted, and paused at the bound like any other).
+      if (value.kind === "restarted")
+        return failRead(id, service, captured, "unrecognised");
       failures = 0;
       unverified = 0;
       unsaved = null;
-      behind = value.hasMore;
+      // A staged segment is never the end of the feed: the rest of its revision follows (WEB-09c).
+      behind = value.kind === "staged" ? true : value.hasMore;
       // This page's operation succeeded: its durable streak went with the commit; the fallback marker of the failure the request was
       // admitted over goes here, and no newer one (R51, revision 31).
       retireMarker(service, `page:${captured.expectedPosition ?? ""}`, saw);
@@ -1126,14 +1190,16 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       deps.channel?.post({
         type: "data_changed",
         account: service.account,
-        stores: ["cache", "sync_state"],
+        // A staged segment changes no cache row: only the position moved.
+        stores:
+          value.kind === "staged" ? ["sync_state"] : ["cache", "sync_state"],
       });
-      if (value.hasMore) return { when: "now" };
+      if (value.kind === "staged" || value.hasMore) return { when: "now" };
       setState({ kind: "idle", lastSyncedAt: deps.clock.iso() });
       return { when: "after", ms: config.syncIdleMs };
     }
     if (outcome.kind === "dropped") return dropped(outcome.reason);
-    return commitFailure(id, service, captured, outcome.failure);
+    return commitFailure(id, service, captured, outcome.failure, budget);
   }
 
   /**
@@ -1150,11 +1216,15 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     limit: number,
     bytes: Uint8Array,
     scan: ScanOk,
+    budget: number | null,
   ): Promise<
     | "ended"
     | "refused"
     | "unestablished"
-    | { outcome: CommitOutcome<CommitPageResult>; commitMs: number | undefined }
+    | {
+        outcome: CommitOutcome<CommitPageResult | StageSegmentResult>;
+        commitMs: number | undefined;
+      }
   > {
     for (let round = 1; ; round += 1) {
       const reservation = await deps.quota.reserve("cache", bytes.length);
@@ -1182,27 +1252,44 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
               id: attempt,
               limit,
               startedAt: deps.clock.now(),
+              maxChanges: budget,
             });
           } catch {
             // The marker is a refinement; a page is not refused for want of it.
           }
         }
         const started = deps.elapsed?.();
-        const outcome = await service.commit(commitPage, {
-          captured,
-          bytes,
-          scan,
-          now: deps.clock.iso(),
-          decode: deps.decode,
-          elapsed: deps.elapsed,
-          leaseLive: () => reservation.live(),
-        });
+        // WEB-09c: a non-final segment is staged (W27); the final one, with its activation, and every whole page are W1's.
+        const piece =
+          scan.batches.length === 1 ? scan.batches[0]?.segment : undefined;
+        const outcome: CommitOutcome<CommitPageResult | StageSegmentResult> =
+          piece !== undefined && !piece.last
+            ? await service.commit(stageDeltaSegment, {
+                captured,
+                bytes,
+                scan,
+                now: deps.clock.now(),
+                decode: deps.decode,
+                elapsed: deps.elapsed,
+                leaseLive: () => reservation.live(),
+              })
+            : await service.commit(commitPage, {
+                captured,
+                bytes,
+                scan,
+                now: deps.clock.iso(),
+                decode: deps.decode,
+                elapsed: deps.elapsed,
+                leaseLive: () => reservation.live(),
+              });
         const commitMs =
           started === undefined || deps.elapsed === undefined
             ? undefined
             : deps.elapsed() - started;
         written =
-          outcome.kind === "applied" && outcome.value.kind === "committed";
+          outcome.kind === "applied" &&
+          (outcome.value.kind === "committed" ||
+            outcome.value.kind === "staged");
         const lapsed =
           outcome.kind === "applied" && outcome.value.kind === "lease_lapsed";
         // The attempt's outcome is KNOWN now (R42): a page that landed cleared its marker in its own transaction, and anything else (a
@@ -1270,6 +1357,7 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     service: AccountService,
     captured: Captured,
     failure: import("../store/port").StoreFailure,
+    budget: number | null = null,
   ): Promise<Next> {
     // The binding the failed commit belongs to, taken before the sizing record below is awaited (`localFailure`, N1).
     const run = alive(id) ? ownership : null;
@@ -1292,20 +1380,29 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
         failure.detail?.stage === "apply" &&
         failure.detail.reason === "watchdog"
       )
-        return sizingFailure(id, service, {
-          kind: "watchdog",
-          elapsedMs: config.syncApplyWatchdogMs,
-        });
+        return sizingFailure(
+          id,
+          service,
+          {
+            kind: "watchdog",
+            elapsedMs: config.syncApplyWatchdogMs,
+          },
+          budget,
+        );
       // A page the contract does not allow: nothing was written; not exhaustion, so the ladder does not move.
       return invalidPage(id, service, captured, "invalid");
     }
     if (isAllocationFailure(failure))
-      return sizingFailure(id, service, { kind: "allocation_failed" });
+      return sizingFailure(id, service, { kind: "allocation_failed" }, budget);
     // abort / error: a local write failure. The same page is re-requested (the stamp is fresh) up to the bound.
-    await recordSizing(service, {
-      kind: "commit_failed",
-      cause: failure.cause === "abort" ? "abort" : "error",
-    });
+    await recordSizing(
+      service,
+      {
+        kind: "commit_failed",
+        cause: failure.cause === "abort" ? "abort" : "error",
+      },
+      budget,
+    );
     return localFailure(
       id,
       service,
@@ -1416,8 +1513,9 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     id: number,
     service: AccountService,
     outcome: SizingOutcome,
+    budget: number | null = null,
   ): Promise<Next> {
-    const record = await recordSizing(service, outcome);
+    const record = await recordSizing(service, outcome, budget);
     if (!alive(id)) return { when: "event" };
     if (record.kind === "failed") {
       // The ladder cannot step and the floor cannot count, so asking again at the same size would repeat the same download and the same
@@ -1440,6 +1538,7 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
   async function recordSizing(
     service: AccountService,
     outcome: SizingOutcome,
+    budget: number | null = null,
   ): Promise<
     | {
         kind: "recorded";
@@ -1451,6 +1550,7 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       const result = await service.store.run(recordSizingOutcome, {
         incarnationId: service.incarnationId,
         outcome,
+        segmented: budget,
       });
       return {
         kind: "recorded",

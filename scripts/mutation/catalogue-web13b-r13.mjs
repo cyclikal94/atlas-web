@@ -7,7 +7,7 @@
 // Considered and not selected (recorded for the reviewer): dropping only the resource-ID comparison has no reachable schedule (the
 // section's read is keyed by its own task's ID and a session by the task's panel key), so it is an equivalent mutant kept as defence in
 // depth; recapturing a read when a kept session is shown again needs an editor API that does not exist (a session's context changes only
-// by its own settlement), so there is nothing to restore; making the builder's `observed` optional again changes types only (MU-2723
+// by its own settlement), so there is nothing to restore; making the builder's `observed` optional again changes types only (MU-5187
 // restores the runtime defect it allowed).
 import { sub } from "./data-catalogue.mjs";
 
@@ -24,7 +24,7 @@ const REQUEST =
 
 export const UNIT_13B_R13 = [
   {
-    id: "MU-2723",
+    id: "MU-5187",
     title:
       "WEB-13b R11 (revision 13): the original defect — a session with no read of the task saves anyway, its request stating none (written on whatever version the transaction finds)",
     file: SECTION,
@@ -39,7 +39,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2724",
+    id: "MU-5188",
     title:
       "WEB-13b R11 (revision 13): a session opened before the task's read takes the read shown at its first press (its opening read silently filled in)",
     file: SECTION,
@@ -53,7 +53,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2725",
+    id: "MU-5189",
     title:
       "WEB-13b R11 (revision 13): every press is checked against the task as shown at the press, not the read its session was opened on",
     file: SECTION,
@@ -63,7 +63,7 @@ export const UNIT_13B_R13 = [
     patch: (t) => sub(t, CHOICE, "    const observed = observedNow;\n"),
   },
   {
-    id: "MU-2726",
+    id: "MU-5190",
     title:
       "WEB-13b R11 (revision 13): a renewed session whose task is not readable now falls back to the read it was opened on",
     file: SECTION,
@@ -78,7 +78,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2727",
+    id: "MU-5191",
     title:
       "WEB-13b R11 (revision 13): the refusal without a read keeps the session as it was (never renewed: its input can never be saved)",
     file: SECTION,
@@ -93,7 +93,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2728",
+    id: "MU-5192",
     title:
       "WEB-13b R11 (revision 13): Remove anchor states no read of the task (the removal written on a version nobody saw)",
     file: SECTION,
@@ -107,7 +107,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2729",
+    id: "MU-5193",
     title:
       "WEB-13b R11 (revision 13): Review's replacement of a conflicted change states no read of the task",
     file: SECTION,
@@ -121,7 +121,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2730",
+    id: "MU-5194",
     title:
       "WEB-13b R11 (revision 13): a refusal without a read retires the identities of the changes pressed (the retry becomes a new operation)",
     file: SECTION,
@@ -135,7 +135,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2731",
+    id: "MU-5195",
     title:
       "WEB-13b R11 (revision 13): the enqueue transaction does not check the read an anchor change states (MU-1362's defect, judged by the anchor tests)",
     file: PLANS,
@@ -150,7 +150,7 @@ export const UNIT_13B_R13 = [
       ),
   },
   {
-    id: "MU-2732",
+    id: "MU-5196",
     title:
       "WEB-13b R11 (revision 13): the supersede transaction does not check the read Review's replacement states (MU-1363's defect, judged by the anchor tests)",
     file: PLANS,

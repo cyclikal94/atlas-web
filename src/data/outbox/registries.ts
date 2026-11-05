@@ -44,6 +44,21 @@ export interface CommandSpec {
     related?: readonly CacheRow[],
   ): EnqueueRequest | null;
   /**
+   * What the generic dialog shows of a draft of this kind and whether it may be resent from there (WEB-11a review 2 of 22 October 2026,
+   * finding 1): `retained` and `current` are one line each of the retained change's CONTENT and of the current state's (the slice knows
+   * its shape; null: nothing to add); `blocked` says why "Resend"/"save as new" is not offered here (the change's audience moved since the
+   * person saved it, and only the slice's own screen shows the audience now), or null. It sees the draft's body, and `current` as
+   * `rebuild` does. A resend after it is bound to the body the person saw (`saveAsNew`'s reviewed digest).
+   */
+  review?(
+    draft: DraftWithCommand,
+    current: CacheRow | null,
+  ): {
+    retained: string | null;
+    current: string | null;
+    blocked: string | null;
+  };
+  /**
    * The command needs a connection and is never queued (enrolment, rota consent, a sharing or policy change): the dialog shows the
    * online-only variant, with nothing to compare or resend.
    */
@@ -122,6 +137,12 @@ export interface CommandRegistry {
     related?: readonly CacheRow[],
   ): EnqueueRequest | null;
   onlineOnly(draft: Pick<DraftRow, "kind">): boolean;
+  /** Whether the draft's kind registered `review` (the dialog then reads the draft's body). */
+  canReview(draft: Pick<DraftRow, "kind">): boolean;
+  review(
+    draft: DraftWithCommand,
+    current: CacheRow | null,
+  ): ReturnType<NonNullable<CommandSpec["review"]>> | null;
   /** The kind's authorised current-state read (R7); `failed`/`unavailable` when it registered none, `failed`/`error` if it threw. */
   readCurrent(draft: DraftWithCommand, io: CurrentReadIo): Promise<CurrentRead>;
   /** What the draft's commands need of the person's access (`CommandSpec.admission`); `{}` when its kind registered none. */
@@ -149,6 +170,10 @@ export function createCommandRegistry(): CommandRegistry {
     rebuild: (draft, current, related) =>
       specs.get(commandKind(draft))?.rebuild?.(draft, current, related) ?? null,
     onlineOnly: (draft) => specs.get(commandKind(draft))?.onlineOnly === true,
+    canReview: (draft) =>
+      typeof specs.get(commandKind(draft))?.review === "function",
+    review: (draft, current) =>
+      specs.get(commandKind(draft))?.review?.(draft, current) ?? null,
     admission: (draft) =>
       specs.get(commandKind(draft))?.admission?.(draft) ?? {},
     async readCurrent(draft, io) {

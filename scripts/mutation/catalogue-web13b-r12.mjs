@@ -7,7 +7,7 @@
 // Considered and not selected (recorded for the reviewer): dropping the loading branch leaves no reading to draw from (`view.value` is
 // undefined while loading), so the card throws while rendering, a crash and never a catch; the conflict an acknowledgement replaces
 // (`conflictId`) has no other source (a list row carries only a count of waiting changes), so it cannot be taken "from another observation"
-// without inventing one; dropping the observation from the request is MU-2458's, whose `expect` already names the revision 12 refusals
+// without inventing one; dropping the observation from the request is MU-5022's, whose `expect` already names the revision 12 refusals
 // ("refused as changed") as well as the original one.
 import { sub } from "./data-catalogue.mjs";
 
@@ -49,7 +49,7 @@ export const UNIT_13B_R12 = [
       ),
   },
   {
-    id: "MU-2719",
+    id: "MU-5183",
     title:
       "WEB-13b R8 (revision 12): the card's reason and privacy come from the list's copy (a review that became private still names its task)",
     file: PANEL,
@@ -63,7 +63,7 @@ export const UNIT_13B_R12 = [
       ),
   },
   {
-    id: "MU-2720",
+    id: "MU-5184",
     title:
       "WEB-13b R8 (revision 12): the card's occurrence (its task, Open task, Review this move…) comes from the list's copy (a moved review links to its old occurrence)",
     file: PANEL,
@@ -77,7 +77,7 @@ export const UNIT_13B_R12 = [
       ),
   },
   {
-    id: "MU-2721",
+    id: "MU-5185",
     title:
       "WEB-13b R8 (revision 12): a review the card's reading no longer finds falls back to the list's older copy (still offered, still linked)",
     file: PANEL,
@@ -103,7 +103,7 @@ export const UNIT_13B_R12 = [
       ),
   },
   {
-    id: "MU-2722",
+    id: "MU-5186",
     title:
       "WEB-13b R8 (revision 12): a review the card's reading saw published resolved stays on the screen until the list says so",
     file: PANEL,

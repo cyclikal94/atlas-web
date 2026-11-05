@@ -23,6 +23,7 @@ import {
   onLocalWriteSuccess,
 } from "../model/retry";
 import type { StagingRow } from "../model/schema";
+import { stageOf } from "../model/segmented-sync";
 import {
   atFloor,
   type DeviceSignals,
@@ -195,6 +196,9 @@ export type RecoveryCapture =
       steppedDown: boolean;
       /** The bytes already staged by this attempt: the activation admits them with its final page (the swap rewrites them). */
       stagingBytes: number;
+      /** WEB-09c (catch-up only): a segmented delta revision is staged at this position, and the ladder's stepped-down `max_changes`. */
+      deltaStaged: boolean;
+      steppedChanges: number | null;
     }
   | {
       kind: "gated";
@@ -275,7 +279,12 @@ export const captureRecoveryRequest = singletonPlan<
       if (sizing.attempt.id === input.endedAttempt)
         sizing = { ...sizing, attempt: null };
       else {
-        sizing = nextSizing(sizing, { kind: "crashed_attempt" }).state;
+        sizing = nextSizing(
+          sizing,
+          { kind: "crashed_attempt" },
+          DATA_CONFIG,
+          sizing.attempt.max_changes ?? null,
+        ).state;
         steppedDown = true;
       }
     }
@@ -365,6 +374,8 @@ export const captureRecoveryRequest = singletonPlan<
         whileBlocked: blocked,
         steppedDown,
         stagingBytes: begins ? 0 : fields.staging_bytes,
+        deltaStaged: !snapshot && stageOf(sync) !== null,
+        steppedChanges: sizing.max_changes ?? null,
       },
     };
   },
@@ -587,6 +598,7 @@ export const activateSnapshot = guardedPlan<
   scope: [
     "cache",
     "cache_staging",
+    "delta_staging",
     "pending_effects",
     "drafts",
     "draft_commands",
@@ -599,9 +611,11 @@ export const activateSnapshot = guardedPlan<
     if (admitted.kind !== "ok") return { result: admitted };
     const pageSeq = sync.page_seq + 1;
     return {
-      writes: [w.clear("cache")],
+      // WEB-09c: a delta revision staged in segments belongs to the position this snapshot replaces.
+      writes: [w.clear("cache"), w.clear("delta_staging")],
       sync: {
         ...sync,
+        delta_stage: null,
         ...afterSuccess(
           { ...sync, ...withoutAttemptStreaks(sync) },
           [
@@ -871,7 +885,7 @@ export const recordRecoveryOutcome = guardedPlan<
     guards: ["INC", "CLS", "GEN", "OWN", "EPO"],
     quota: null,
   },
-  scope: ["cache_staging"],
+  scope: ["cache_staging", "delta_staging"],
   durability: "strict",
   read: async () => null,
   decide: ({ sync, input }) => {
@@ -908,10 +922,14 @@ export const recordRecoveryOutcome = guardedPlan<
               cache_invalidation_seq: nextInvalidation(sync),
             }
           : {}),
+        delta_stage: null,
       };
     }
     return {
-      writes: step.abandon ? [w.clear("cache_staging")] : [],
+      // WEB-09c: an abandonment drops a delta revision staged in segments with the rest of the attempt.
+      writes: step.abandon
+        ? [w.clear("cache_staging"), w.clear("delta_staging")]
+        : [],
       sync: next,
       result: {
         syncErrorStreak: step.sync_error_streak,

@@ -5,12 +5,13 @@
 // correction; `expect` names the tests written for it, so only an assertion of those tests catches it.
 //
 // Considered and not selected (recorded for the reviewer): the fallback predicate of DA-N3's `recordStop` alone (`authorised` back to
-// `() => service.live`) is equivalent while the check just before it stands (nothing runs between them), so MU-2685 restores both, as the
+// `() => service.live`) is equivalent while the check just before it stands (nothing runs between them), so MU-5158 restores both, as the
 // pre-correction code had neither; the observer's notification of an unchanged value is equivalent (every judgement reads the newest
-// value); `COMPOSITION_VERSION` is a name for the unchanged version 3 (its value is asserted by the adapted schema test); the dialog's
+// value); `COMPOSITION_VERSION` was a name for the unchanged version 3 (the base merge of 5 November 2026 adopted the accepted base's name
+// `COMPOSITION_BARRIER_VERSION` for it; its value is asserted by the schema test); the dialog's
 // press-time check of `importStatus` (removed, a waiting session's Import is still refused) is a second layer behind its waiting state's
 // disabled Import, and no schedule makes a shown session wait without its dialog rendering again (a session waits only when it is shown
-// again, which mounts a new dialog), so that mutant is equivalent and MU-2677 is the observer's streak instead.
+// again, which mounts a new dialog), so that mutant is equivalent and MU-5150 is the observer's streak instead.
 import { sub } from "./data-catalogue.mjs";
 
 const KEPT = "src/features/calendars/import-kept.ts";
@@ -30,7 +31,7 @@ const T_BIND = "tests/data/engine-binding-authority.test.ts";
 export const UNIT_13B_R8 = [
   // ---- R7b: the durable invalidation witness -------------------------------------------------------------------------------------
   {
-    id: "MU-2669",
+    id: "MU-5142",
     title:
       "WEB-13b R7b (revision 8): W18 invalidates without moving the invalidation witness",
     file: SYNC_WRITERS,
@@ -40,7 +41,7 @@ export const UNIT_13B_R8 = [
       sub(t, "        cache_invalidation_seq: nextInvalidation(sync),\n", ""),
   },
   {
-    id: "MU-2670",
+    id: "MU-5143",
     title:
       "WEB-13b R7b (revision 8): W24 abandons a valid cache without moving the invalidation witness",
     file: RECOVERY_WRITERS,
@@ -54,7 +55,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2671",
+    id: "MU-5144",
     title:
       "WEB-13b R7b (revision 8): W24 counts every abandonment as an invalidation (an empty attempt's restart ends a first fill's kept import)",
     file: RECOVERY_WRITERS,
@@ -68,7 +69,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2672",
+    id: "MU-5145",
     title:
       "WEB-13b R7b (revision 8): the activation (W23) resets the invalidation witness (the history before a refill is forgotten)",
     file: RECOVERY_WRITERS,
@@ -82,23 +83,25 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2673",
+    id: "MU-5146",
     title:
-      "WEB-13b R7b (revision 8): the account schema stays at version 3 (an older build that invalidates without the witness may still write)",
+      "WEB-13b R7b (revision 8): the account schema stays at the version before the witness barrier (an older build that invalidates without the witness may still write)",
     file: SCHEMA,
     tests: [T_SCHEMA],
+    // Re-anchored at the base merge of 5 November 2026 (same defect): the barrier is version 5, after the accepted base's version 4
+    // (WEB-09c's `delta_staging`), so "stays at the version before it" is 4 now (it was 3 when the barrier was 4).
     expect:
-      /version 4 \(WEB-13b revision 8\) is the invalidation-witness barrier/,
+      /version 5 \(WEB-13b revision 8\) is the invalidation-witness barrier/,
     patch: (t) =>
       sub(
         t,
+        "export const SCHEMA_VERSION = 5;\n",
         "export const SCHEMA_VERSION = 4;\n",
-        "export const SCHEMA_VERSION = 3;\n",
       ),
   },
   // ---- R7b: the kept session's basis -------------------------------------------------------------------------------------------
   {
-    id: "MU-2674",
+    id: "MU-5147",
     title:
       "WEB-13b R7b (revision 8): a HIDDEN session follows the cache like a shown one (revision 7's first-valid adoption: a later invalidation is adopted)",
     file: KEPT,
@@ -113,7 +116,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2678",
+    id: "MU-5151",
     title:
       "WEB-13b R7b (revision 8): the read made when the session opened is not its basis (a session hidden before any reading adopts a later one)",
     file: KEPT,
@@ -128,7 +131,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2679",
+    id: "MU-5152",
     title:
       "WEB-13b R7b (revision 8): the kept session does not observe the page runtime's service (nothing observes the cache while no controller is mounted)",
     file: KEPT,
@@ -144,7 +147,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2681",
+    id: "MU-5154",
     title:
       "WEB-13b R7a (revision 8, re-expressed in revision 9): what an ended service read still stands for its database (a stale reading verifies a waiting session; since R7c, when no publication verifies, it ENDS a session shown through the refresh it no longer describes)",
     file: OBSERVER,
@@ -157,7 +160,7 @@ export const UNIT_13B_R8 = [
   },
   // ---- R7a: the waiting session --------------------------------------------------------------------------------------------------
   {
-    id: "MU-2675",
+    id: "MU-5148",
     title:
       "WEB-13b R7a (revision 8): the drop zone's Browse while its kept session waits opens a fresh picker",
     file: KEPT,
@@ -171,7 +174,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2676",
+    id: "MU-5149",
     title:
       "WEB-13b R7a (revision 8): a read made at an earlier showing verifies a later one",
     file: KEPT,
@@ -187,7 +190,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2677",
+    id: "MU-5150",
     title:
       "WEB-13b R7b (revision 8): the page runtime's observation ignores an admitted invalidation's durable streak (only the status is read)",
     file: OBSERVER,
@@ -202,7 +205,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2680",
+    id: "MU-5153",
     title:
       "WEB-13b R7a (revision 8): an unverified cache under a cached source is the E9 refresh (the open dialog closes and discards)",
     file: DIALOG,
@@ -216,7 +219,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2686",
+    id: "MU-5159",
     title:
       "WEB-13b R7a (revision 8): a session ended for an invalidation while it waited leaves its dialog open (a dead session shown)",
     file: DIALOG,
@@ -230,7 +233,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2687",
+    id: "MU-5160",
     title:
       "WEB-13b R7a (revision 8): a waiting session's dialog presents its source and offers Import (unverified permission shown)",
     file: DIALOG,
@@ -245,7 +248,7 @@ export const UNIT_13B_R8 = [
   },
   // ---- DA-N2 / DA-N3 ------------------------------------------------------------------------------------------------------------
   {
-    id: "MU-2682",
+    id: "MU-5155",
     title:
       "WEB-13b DA-N2 (revision 8): the quota stop is published after the sizing wait whatever run stands now",
     file: ENGINE,
@@ -260,7 +263,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2683",
+    id: "MU-5156",
     title:
       "WEB-13b DA-N3 (revision 8): the recovery job admits a fresh failure count after its binding ended",
     file: JOB,
@@ -275,7 +278,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2684",
+    id: "MU-5157",
     title:
       "WEB-13b DA-N3 (revision 8): a count admitted while the binding stood, delivered after it ended, still stops the ended binding",
     file: JOB,
@@ -289,7 +292,7 @@ export const UNIT_13B_R8 = [
       ),
   },
   {
-    id: "MU-2685",
+    id: "MU-5158",
     title:
       "WEB-13b DA-N3 (revision 8): a counter that failed after the binding ended creates the fallback stop (marker or memory) for the next owner",
     file: JOB,

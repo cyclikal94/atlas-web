@@ -372,12 +372,15 @@ export const UNIT_WEB10B = [
   {
     id: "MU-2521",
     title:
-      "WEB-10b L4: readArchiveCurrent ends at the task read's 404 (a list's archive is never read)",
+      "WEB-10b L4: the shared archive registry ends at the task read's 404 (a list's archive is never read)",
     file: REGISTER,
-    tests: [REGISTER_TEST],
-    expect: /found in the ARCHIVED collection|restore \(expects archived\)/,
-    patch: (t) =>
-      sub(t, "  if (status === 404) return readListCurrent(draft, io);\n", ""),
+    tests: [
+      REGISTER_TEST,
+      "tests/features/content/archive-registration.test.ts",
+    ],
+    expect:
+      /found in the ARCHIVED collection|restore \(expects archived\)|reads the authorised list|restoring a list/,
+    patch: (t) => sub(t, "  registerArchiveReader(listArchiveReader);\n", ""),
   },
   {
     id: "MU-2522",
@@ -397,7 +400,10 @@ export const UNIT_WEB10B = [
     id: "MU-2523",
     title: "WEB-10b L4 (re-expressed): rebuildArchive refuses a list row",
     file: REGISTER,
-    tests: [REGISTER_TEST],
+    tests: [
+      REGISTER_TEST,
+      "tests/features/content/archive-registration.test.ts",
+    ],
     expect: /archive of a list: rebuilt on the list/,
     patch: (t) =>
       sub(

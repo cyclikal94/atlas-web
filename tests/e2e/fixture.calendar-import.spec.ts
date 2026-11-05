@@ -116,7 +116,7 @@ test.describe("E-IMP1: an import into a pending source (case 2)", () => {
   // case had it, and again with the UI still online (navigator native): the composition cannot depend on either signal alone.
   for (const ui of ["offline", "online"] as const)
     native(
-      // The title keeps "composed offline against this device's pending create": MU-2466 selects this case by it.
+      // The title keeps "composed offline against this device's pending create": MU-5030 selects this case by it.
       `composed offline against this device's pending create (HTTP transport lost, UI ${ui}); sent only after the create's receipt, to the source's address, byte-identical`,
       async ({ transportLane }) => {
         test.setTimeout(90_000);

@@ -291,7 +291,7 @@ describe("R7: what goes on while the import is kept (I5, I8-I11)", () => {
     await toSyncAndBack(w, dialog);
     const again = await openRow(w);
     // Revision 7: `queryByText` so that a missing message fails this ASSERTION (a throwing `getByText` is an error, which the merged
-    // mutation runner rejects beside the expected catch: MU-2637/MU-2638 were invalid). The same requirement: the message is shown.
+    // mutation runner rejects beside the expected catch: MU-5110/MU-5111 were invalid). The same requirement: the message is shown.
     expect(within(again).queryByText(words.READING)).toBeInTheDocument();
     fireEvent.submit(present(again.querySelector("form")));
     await w.settle();
@@ -1242,7 +1242,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
   // T5 (design assessment): evidence that ONLY a mounted controller has. An admitted invalidation whose failure counter could not be
   // written leaves its fallback marker, which the facts do not carry: neither the page runtime's service nor the witness can tell, and the
   // controller that opened the session is gone. The page's cache lifetime (whichever controller is mounted) is what ends it; the marker
-  // retired again before the session is shown, nothing durable remains to compare (MU-2656, MU-2661).
+  // retired again before the session is shown, nothing durable remains to compare (MU-5129, MU-5134).
   for (const failed of [true, false])
     test(`L5 (revision 8): after a remount, an admitted invalidation known only by its fallback marker ${failed ? "at the cache's position ends" : "of ANOTHER position (control) keeps"} the kept import, though the marker is gone when it is shown again`, async () => {
       const w = await calendarWorld({

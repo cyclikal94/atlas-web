@@ -1,4 +1,4 @@
-// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85).
+// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-5065..MU-5109 (+85).
 // Historical reports keep their original IDs; mutation patches, selectors and assertions are unchanged.
 // WEB-13b revision 3's mutants (review 3, R3c; the design assessment's sensitivity list), in the form and under the rules of
 // `data-catalogue.mjs`, which spreads them into its `UNIT` list after `catalogue-web13b-r2.mjs`. Each removes ONE part of the detail
@@ -18,8 +18,8 @@ const LATE =
   /an ordinary 403 forbidden|a 422 answered under the same interruption|a receipt under the same interruption|while the display stays closed/;
 
 /**
- * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the owner alone), MU-2602, MU-2603 and
- * MU-2605..MU-2607. Withdrawn as equivalent after an exploratory run (no test of either layer can tell them apart; recorded in the revision
+ * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the owner alone), MU-5081, MU-5082 and
+ * MU-5083..MU-5085. Withdrawn as equivalent after an exploratory run (no test of either layer can tell them apart; recorded in the revision
  * report with that run's evidence), their ids never reused: MU-2604 (the visit taken without checking that the person is at the section's
  * address: in every schedule the router, its history and the document reach, the visit asked for is the task's), MU-2608 (no re-check as
  * a panel opens: the route's own re-check always comes first in the component tests; the open-time one is the guard for a browser's
@@ -28,7 +28,7 @@ const LATE =
  */
 export const UNIT_13B_R3 = [
   {
-    id: "MU-2602",
+    id: "MU-5081",
     title:
       "WEB-13b R3c: the section keeps the visit it was first shown on (a panel opened after a departure and return the section outlived is the ended visit's, and its kept input is discarded)",
     file: SECTION,
@@ -43,7 +43,7 @@ export const UNIT_13B_R3 = [
       ),
   },
   {
-    id: "MU-2603",
+    id: "MU-5082",
     title:
       "WEB-13b R3c: the section follows the visit going on only when a panel opens (its binding stays the ended visit's read)",
     file: SECTION,
@@ -54,7 +54,7 @@ export const UNIT_13B_R3 = [
       sub(t, "    return onRouteMoved(() => {\n      rebind();\n    });\n", ""),
   },
   {
-    id: "MU-2605",
+    id: "MU-5083",
     title:
       "WEB-13b R3c: a panel opens on a visit that has ended (its session is kept by nothing, and its input lost at the next close)",
     file: KEPT,
@@ -63,7 +63,7 @@ export const UNIT_13B_R3 = [
     patch: (t) => sub(t, "  if (owner?.ended()) return null;\n", ""),
   },
   {
-    id: "MU-2606",
+    id: "MU-5084",
     title:
       "WEB-13b R3c: a panel shown when its visit ends stays open, showing input its ended session can no longer save",
     file: SECTION,
@@ -78,7 +78,7 @@ export const UNIT_13B_R3 = [
       ),
   },
   {
-    id: "MU-2607",
+    id: "MU-5085",
     title:
       "WEB-13b R3c: an unsent binding read a newer visit's read replaced is still sent while the person is at the task (two requests for one read)",
     file: BINDING,
@@ -96,7 +96,7 @@ export const UNIT_13B_R3 = [
   // leadership over the deterministic world). Withdrawn as equivalent after an exploratory run, its id never reused: MU-2613 (the answer of
   // an ENDED binding settled too: the commit's own guards, identity, epoch, incarnation and ownership, refuse it all the same, F-2).
   {
-    id: "MU-2611",
+    id: "MU-5086",
     title:
       "WEB-13b F-13b-1: an issued command's answer is dropped with the run the display's interim hold stopped (resent at once, as found)",
     file: DISPATCHER,
@@ -110,7 +110,7 @@ export const UNIT_13B_R3 = [
       ),
   },
   {
-    id: "MU-2612",
+    id: "MU-5087",
     title:
       "WEB-13b F-13b-1: the decoded answer of a stopped run is dropped before it is recorded",
     file: DISPATCHER,

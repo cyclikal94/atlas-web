@@ -10,6 +10,7 @@ import { axe } from "jest-axe";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { DataEnvProvider } from "../../../src/data";
+import { registerPeopleCommands } from "../../../src/features/people/register";
 import * as copy from "../../../src/features/sync/copy";
 import { ItemDetailDialog } from "../../../src/features/sync/ItemDetailDialog";
 import { NoticeList } from "../../../src/features/sync/NoticeBanners";
@@ -299,6 +300,128 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
     expect(
       await screen.findByText(copy.DETAIL_SAVE_NEW_FAILED),
     ).toBeInTheDocument();
+  });
+
+  describe("a People change (WEB-11a review 2, finding 1): the retained and current content, and never a resend under another audience", () => {
+    const P = "55555555-5555-4555-8555-555555555555";
+    const F = "66666666-6666-4666-8666-666666666666";
+    const retained = draftRow({
+      local_id: "4e219b0a-0000-4000-8000-000000000002",
+      status: "version_conflict",
+      kind: "put_field",
+      endpoint: "/task-commands",
+      target_resource_ids: [F],
+      command_digest: "reviewed-body",
+      created_at: "2026-10-01T08:04:00",
+      command: {
+        command: {
+          kind: "put_field",
+          id: F,
+          parent_id: P,
+          expected_version: 3,
+          expected_policy_version: 6,
+          label: "Note",
+          value: { kind: "text", text: "Confidential" },
+        },
+      },
+    });
+    /** The authorised read answers `server`; the draft's body is read from the store (`data.readDraftWithCommand`). */
+    const people = (server: ReturnType<typeof cacheRow>) => {
+      const env = withRead(stubEnv(), loaded(server));
+      const ready = (value: unknown) => {
+        const snapshot = { status: "ready", value };
+        return { get: () => snapshot, subscribe: () => () => undefined };
+      };
+      const merged = ready({
+        base: null,
+        effects: [],
+        creates: [],
+        createsTotal: 0,
+        createsNext: null,
+        merged: null,
+      });
+      const body = ready(retained);
+      const service = {
+        account: "a",
+        incarnationId: "i",
+        live: true,
+        store: {
+          watch: (plan: { name: string }) =>
+            plan.name === "data.readDraftWithCommand" ? body : merged,
+        },
+      };
+      Object.assign(env, {
+        service: () => service,
+        serviceStore: { get: () => service, subscribe: () => () => undefined },
+      });
+      registerPeopleCommands(env.commands);
+      mount(
+        env,
+        <ItemDetailDialog
+          draft={retained}
+          title="Field change"
+          variant="version_conflict"
+          open
+          onClose={() => {}}
+          onRemoved={() => {}}
+        />,
+      );
+      return env;
+    };
+
+    for (const widened of [false, true])
+      test(`${widened ? "the audience was WIDENED since the save (policy 6 → 7): no resend, and the reason is shown" : "control, the same audience: the content beside the current, and a resend bound to the body shown"}`, async () => {
+        const server = cacheRow({
+          id: F,
+          kind: "field",
+          parent_id: P,
+          label: "Note",
+          value: { kind: "text", text: "Someone else's" },
+          version: 4,
+          policy_version: widened ? 7 : 6,
+        });
+        const env = people(server);
+        const dialog = screen.getByRole("dialog");
+        await waitFor(() =>
+          expect(
+            dialog.querySelector('[data-compare="current"]'),
+          ).toHaveTextContent("Note: Someone else's"),
+        );
+        expect(
+          dialog.querySelector('[data-compare="retained"]'),
+        ).toHaveTextContent("Note: Confidential");
+        if (widened) {
+          await waitFor(() =>
+            expect(dialog).toHaveTextContent(/changed since/),
+          );
+          const resend = screen.getByRole("button", {
+            name: copy.DETAIL_RESEND,
+          });
+          expect(resend).toBeDisabled();
+          expect(dialog).toHaveTextContent(
+            "Who can see this field changed since you saved it. Review it on the person's page in People.",
+          );
+          fireEvent.click(resend);
+          expect(env.calls).toEqual([]);
+          return;
+        }
+        await waitFor(() =>
+          expect(
+            screen.getByRole("button", { name: copy.DETAIL_RESEND }),
+          ).toBeEnabled(),
+        );
+        fireEvent.click(
+          screen.getByRole("button", { name: copy.DETAIL_RESEND }),
+        );
+        await waitFor(() =>
+          expect(env.calls).toEqual([
+            {
+              action: "saveAsNew",
+              args: [retained.local_id, server, undefined, "reviewed-body"],
+            },
+          ]),
+        );
+      });
   });
 
   test("U-6b (WEB-10a revision 16, DA-A1) the other rows the read returned go with the reviewed value to the rebuild, for its checks", async () => {

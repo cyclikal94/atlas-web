@@ -1,4 +1,5 @@
-// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85).
+// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85). Base merge, 5 November 2026: those
+// that collided with WEB-11a's catalogue are now MU-5065..MU-5109 (`web13b-id-map-20261105.json`).
 // Historical reports keep their original IDs; mutation patches, selectors and assertions are unchanged.
 // WEB-13b revision 4's mutants (review 4, F-13b-1a; the design assessment's sensitivity list, Q4), in the form and under the rules of
 // `data-catalogue.mjs`, which spreads them into its `UNIT` list after `catalogue-web13b-r3.mjs`. Each removes ONE part of the dispatcher's
@@ -20,7 +21,7 @@ const T_FORBIDDEN = "tests/data/leader-forbidden.test.ts";
  * Unit mutants (layer L1b, the production dispatcher and facade over the IndexedDB double; the leader's composition for T_FORBIDDEN). */
 export const UNIT_13B_R4 = [
   {
-    id: "MU-2614",
+    id: "MU-5088",
     title:
       "WEB-13b F-13b-1a: a stopped run's failed record of an issued answer is not counted (no streak, no pause, no stop: the draft is resent at once, as review 4 found)",
     file: DISPATCHER,
@@ -35,7 +36,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2615",
+    id: "MU-5089",
     title:
       "WEB-13b F-13b-1a: a run that starts for the same binding does not take over the pause a stopped run's failed record owes",
     file: DISPATCHER,
@@ -50,7 +51,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2616",
+    id: "MU-5090",
     title:
       "WEB-13b F-13b-1a: a below-bound failure to record an answer owes no pause (the run of the binding that stands sends the draft again at once)",
     file: DISPATCHER,
@@ -65,7 +66,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2617",
+    id: "MU-5091",
     title:
       "WEB-13b F-13b-1a: every start forgets what the binding is owed (a restart lifts the hold of a full disk and the pause of a failed record)",
     file: DISPATCHER,
@@ -81,7 +82,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2618",
+    id: "MU-5092",
     title:
       "WEB-13b F-13b-1a: a full disk met recording an answer holds nothing (a wake or a restart sends the draft again)",
     file: DISPATCHER,
@@ -96,7 +97,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2619",
+    id: "MU-5093",
     title:
       "WEB-13b F-13b-1a: `online` lifts what the binding is owed (a draft paced after a failed record is sent early)",
     file: DISPATCHER,
@@ -112,7 +113,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2620",
+    id: "MU-5094",
     title:
       "WEB-13b F-13b-1a: the person's retry does not lift the hold of a full disk (a restart before the retry is acted on puts it back)",
     file: DISPATCHER,
@@ -123,7 +124,7 @@ export const UNIT_13B_R4 = [
       sub(t, "    if (owedSeen !== null) retireOwed(owedSeen);\n", ""),
   },
   {
-    id: "MU-2621",
+    id: "MU-5095",
     title:
       "WEB-13b F-13b-1a: a failed record delivered after the binding ENDED is counted for it all the same",
     file: DISPATCHER,
@@ -142,7 +143,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2622",
+    id: "MU-5096",
     title:
       "WEB-13b F-13b-1a: a step that finds only a paced draft sets no wake (the draft waits for some other event)",
     file: DISPATCHER,
@@ -157,7 +158,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2623",
+    id: "MU-5097",
     title:
       "WEB-13b F-13b-1a: a run of the binding that finds only a draft held for a full disk shows nothing stopped",
     file: DISPATCHER,
@@ -172,7 +173,7 @@ export const UNIT_13B_R4 = [
       ),
   },
   {
-    id: "MU-2624",
+    id: "MU-5098",
     title:
       "WEB-13b F-13b-1a: a stopped run's commit that could not be verified owes no pause (the draft is resent at once)",
     file: DISPATCHER,

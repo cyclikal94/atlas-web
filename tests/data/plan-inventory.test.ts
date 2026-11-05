@@ -8,6 +8,7 @@ import "../../src/data/plans/fence";
 import "../../src/data/plans/commit-page";
 import "../../src/data/plans/defaults";
 import "../../src/data/plans/form-recovery";
+import "../../src/data/plans/form-operations";
 import "../../src/data/plans/outbox";
 import "../../src/data/plans/pending-reads";
 import "../../src/data/plans/profile";
@@ -126,6 +127,12 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
     guards: ["INC", "CLS", "OWN", "EPO"],
     durability: "default",
   },
+  // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): a non-final segment of a delta revision into `delta_staging`, guarded like W1.
+  W27: {
+    name: "stageDeltaSegment",
+    guards: ["INC", "CLS", "CAS", "GEN", "OWN", "EPO"],
+    durability: "default",
+  },
 };
 
 /**
@@ -158,6 +165,7 @@ const PRESENT_WRITERS: readonly string[] = [
   "W24",
   "W25",
   "W26",
+  "W27",
 ];
 
 describe("F-S7: the writer inventory", () => {
@@ -258,6 +266,28 @@ describe("F-S7: the writer inventory", () => {
     expect(by("data.editQueuedDraft")?.guards).toEqual(
       expect.arrayContaining(["INC", "FEN"]),
     );
+    // WEB-11a review 4: the hand-off also ends a form copy, so it carries that writer's guard (CLS) and its store.
+    expect(by("data.transferDraft")?.guards).toEqual(
+      expect.arrayContaining(["INC", "FEN", "CLS"]),
+    );
+    expect([...(by("data.transferDraft")?.scope ?? [])].sort()).toEqual(
+      [
+        "cache",
+        "draft_commands",
+        "drafts",
+        "form_recovery",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
+    expect(by("data.saveFormOperation")).toMatchObject({
+      writer: "W9",
+      durability: "strict",
+    });
+    expect([...(by("data.saveFormOperation")?.scope ?? [])].sort()).toEqual([
+      "form_recovery",
+      "sync_state",
+    ]);
     expect(by("data.supersedeDraft")?.guards).toEqual(
       expect.arrayContaining(["INC", "FEN"]),
     );
@@ -291,11 +321,17 @@ describe("F-S7: the writer inventory", () => {
       "data.commitStagingPage",
       "data.activateSnapshot",
       "data.enqueueDraft",
+      // WEB-11a review 4: a held change's hand-off (the draft and its copy's end, one transaction), admitted like an enqueue.
+      "data.transferDraft",
       "data.editQueuedDraft",
       "data.supersedeDraft",
       "data.saveFormRecovery",
+      // WEB-11a review 4: several conditional copies in one transaction (a hold and its field's head), admitted by the conditional port.
+      "data.saveFormOperation",
       // WEB-12a: the B5 sharing snapshot is server-sized (up to 32 households of 100 members), admitted as a cache write by the defaults source.
       "data.writeDefaults",
+      // WEB-09c: a staged segment is admitted like a delta page, by the engine (or the recovery job's catch-up) that commits it.
+      "data.stageDeltaSegment",
     ];
     // A fixed few hundred bytes, once per page context and form (the writer claim) or in place in the singleton `sync_state` row (the
     // verified name and the device id): no caller-sized growth, covered by the reserve's slack and the allowance each save carries.
@@ -311,9 +347,9 @@ describe("F-S7: the writer inventory", () => {
         .sort(),
     ).toEqual([...ADMITTED, ...FIXED_SIZE].sort());
   });
-  test("the table is exactly W1 to W26 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026)", () => {
+  test("the table is exactly W1 to W27 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026; W27 is WEB-09c's segmented delivery)", () => {
     expect(Object.keys(WRITER_TABLE)).toEqual(
-      Array.from({ length: 26 }, (_, i) => `W${i + 1}`),
+      Array.from({ length: 27 }, (_, i) => `W${i + 1}`),
     );
   });
 });

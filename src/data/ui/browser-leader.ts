@@ -3,6 +3,7 @@ import { createWebLocksPort, type Session, type Trace } from "../../session";
 import { createLeaderElection } from "../leader/election";
 import { createSyncLeader, type SyncLeader } from "../leader/leader";
 import { getPageDataHost } from "../leader/page-host";
+import type { DiagnosticSegmentation } from "../leader/start";
 import { DATA_CONFIG } from "../model/config";
 import { createKeyDerivers, createValueValidators } from "../scan/validate";
 import { getPageRegistry } from "../store/registry";
@@ -25,7 +26,7 @@ export interface BrowserLeader {
 
 export function startBrowserLeader(
   session: Session,
-  options: { trace?: Trace } = {},
+  options: { trace?: Trace; diagnostic?: DiagnosticSegmentation } = {},
 ): BrowserLeader {
   const host = getPageDataHost();
   const browser = createBrowserRuntime(session);
@@ -96,6 +97,19 @@ export function startBrowserLeader(
     publish: (attachment) => host.setLeader(attachment),
     elapsed: () => performance.now(),
     ...(options.trace ? { trace: options.trace } : {}),
+    // WEB-09c (R23-PAIR): DIAGNOSTIC ONLY, from the development-pair page; production passes none (`start.ts`).
+    ...(options.diagnostic
+      ? {
+          segmentedCapable: options.diagnostic.segmentedCapable,
+          ...(options.diagnostic.segmentedMaxChanges === undefined
+            ? {}
+            : {
+                config: {
+                  segmentedMaxChanges: options.diagnostic.segmentedMaxChanges,
+                },
+              }),
+        }
+      : {}),
   });
   leader.start();
   // The neutral state 3's "Try again" (the session's `actions.retry`) is the recovery job's act too (R2 of the review of 10 October

@@ -19,7 +19,7 @@ const T_KEPT = "tests/features/calendars/import-kept.test.ts";
 
 export const UNIT_13B_R6 = [
   {
-    id: "MU-2637",
+    id: "MU-5110",
     title:
       "WEB-13b R7: the import dialog discards its session whenever it unmounts (the in-dialog sync control loses the file and the window)",
     file: DIALOG,
@@ -29,7 +29,7 @@ export const UNIT_13B_R6 = [
       sub(t, "      hideImport(editor);\n", "      discardImport(editor);\n"),
   },
   {
-    id: "MU-2638",
+    id: "MU-5111",
     title:
       "WEB-13b R7: opening Import events again always starts a new session (the kept one is never shown again)",
     file: KEPT,
@@ -40,7 +40,7 @@ export const UNIT_13B_R6 = [
       sub(t, "    sameEntry(which.entry, entry) &&\n", "    false &&\n"),
   },
   {
-    id: "MU-2639",
+    id: "MU-5112",
     title:
       "WEB-13b R7: a file read settles only while a dialog shows the session (a read finished while away is lost, the session stuck reading)",
     file: EDITOR,
@@ -54,7 +54,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2640",
+    id: "MU-5113",
     title:
       "WEB-13b R7/R1: a read settles whichever choice it was for (an older file's late read replaces the newer choice)",
     file: EDITOR,
@@ -68,7 +68,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2641",
+    id: "MU-5114",
     title:
       "WEB-13b R7/R3b: an ended session's save settles it (Cancel's old save changes, consumes or announces into an ended session)",
     file: EDITOR,
@@ -78,7 +78,7 @@ export const UNIT_13B_R6 = [
     patch: (t) => sub(t, "    if (over) {\n", "    if (false) {\n"),
   },
   {
-    id: "MU-2642",
+    id: "MU-5115",
     title:
       "WEB-13b R7/R2: every press is a new operation (a refused or uncertain save pressed again gets a new identity)",
     file: EDITOR,
@@ -93,7 +93,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2643",
+    id: "MU-5116",
     title:
       "WEB-13b R7: a kept session does not observe the identity (A→B→A gives A's old input back)",
     file: KEPT,
@@ -107,7 +107,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2644",
+    id: "MU-5117",
     title:
       "WEB-13b R7: the import's visit does not end at an ordinary departure (input outlives leaving the screen and the sync screens)",
     file: KEPT,
@@ -122,7 +122,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2645",
+    id: "MU-5118",
     title:
       "WEB-13b R7: the database a session was composed against is not compared (another incarnation shows or saves the old input)",
     file: KEPT,
@@ -137,7 +137,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2646",
+    id: "MU-5119",
     title:
       "WEB-13b R7: a kept session does not observe the cache being brought up to date (the open dialog's E9 rule skipped while away)",
     file: KEPT,
@@ -153,7 +153,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2647",
+    id: "MU-5120",
     title:
       "WEB-13b R7: a revoked session's stored save is still announced (the previous identity's feedback on the next one's screen)",
     file: EDITOR,
@@ -168,7 +168,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2648",
+    id: "MU-5121",
     title:
       "WEB-13b R7: the in-dialog sync control saves the import (retention queues an unconsented import)",
     file: DIALOG,
@@ -182,7 +182,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2649",
+    id: "MU-5122",
     title:
       "WEB-13b R7: the chooser's shown source is not kept with its session (a different first source is offered on return)",
     file: DIALOG,
@@ -196,7 +196,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2650",
+    id: "MU-5123",
     title:
       "WEB-13b R7: the drop zone's Browse never shows its kept import (it asks for another file)",
     file: DROP_ZONE,
@@ -210,7 +210,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2651",
+    id: "MU-5124",
     title:
       "WEB-13b R7: a kept row import is shown for ANY row (another source's Import events borrows its input)",
     file: KEPT,
@@ -225,7 +225,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2652",
+    id: "MU-5125",
     title: "WEB-13b R7: Cancel keeps the session (it is shown again)",
     file: DIALOG,
     tests: [T_RET],
@@ -238,7 +238,7 @@ export const UNIT_13B_R6 = [
       ),
   },
   {
-    id: "MU-2653",
+    id: "MU-5126",
     title:
       "WEB-13b R7: Escape and the close icon keep the session (they must discard, as Cancel does)",
     file: DIALOG,
@@ -247,7 +247,7 @@ export const UNIT_13B_R6 = [
     patch: (t) => sub(t, "      onDiscard={discard}\n", ""),
   },
   {
-    id: "MU-2654",
+    id: "MU-5127",
     title:
       "WEB-13b R7: a file dropped while the drop zone's import is kept is not chosen in it",
     file: SOURCES,
@@ -257,7 +257,7 @@ export const UNIT_13B_R6 = [
       sub(t, "        if (file !== undefined) editor.choose(file);\n", ""),
   },
   {
-    id: "MU-2655",
+    id: "MU-5128",
     title:
       "WEB-13b R7: Import does not ask whether the session is still the displayed database's (saved into another incarnation)",
     file: DIALOG,

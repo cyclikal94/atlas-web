@@ -27,6 +27,7 @@ import {
   type Session,
   SessionProvider,
   type Trace,
+  type VersionRange,
 } from "../session";
 import { CompatibilityScreen } from "./CompatibilityScreen";
 import {
@@ -35,7 +36,11 @@ import {
   checkCapabilities,
   probeCapabilities,
 } from "./capabilities";
-import { type DataLeaderHandle, dataLeader } from "./data-leader";
+import {
+  type DataLeaderHandle,
+  type DiagnosticSegmentation,
+  dataLeader,
+} from "./data-leader";
 
 /**
  * The boot sequence (plan 5.4), shared by the production entry (`main.tsx`) and the fixture-only session harness
@@ -71,6 +76,24 @@ export interface BootOptions {
    * own test leader and the evidence recorded with it keep their meaning (two engines must never issue `/sync` on one page).
    */
   dataLeader?: boolean;
+  /**
+   * WEB-09c (R23-PAIR): DIAGNOSTIC ONLY. The development-pair page tells the production leader its server segments. `main.tsx` never passes
+   * it (a static test asserts it); only the fixture session harness does, and only when the page asks (`?segmented=`).
+   */
+  dataLeaderDiagnostic?: DiagnosticSegmentation;
+  /**
+   * WEB-09c (R38-DIAG): DIAGNOSTIC ONLY. The session's supported API range for a development-pair page whose verified diagnostic selection
+   * names exactly one backend API version (`exactVersionRange`). It replaces the released pin's range for THIS document only; the session
+   * still asks the real `/health` and every reader (the dispatcher's gate, the screens) reads that one verdict. `main.tsx` never passes it (a
+   * static test asserts it); only the fixture session harness does, and only when the page names the selection and the production leader.
+   */
+  diagnosticCompatibility?: DiagnosticCompatibility;
+}
+/** The diagnostic compatibility policy of one development-pair document (R38-DIAG). */
+export interface DiagnosticCompatibility {
+  /** The verified diagnostic selection's identity (SHA-256), recorded by the page; it grants nothing by itself. */
+  selection: string;
+  supportedRange: VersionRange;
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
@@ -165,7 +188,9 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
       deletion: createDataDeletionPorts(),
     }),
     {
-      supportedRange: rangeFromPin(contractVersion),
+      supportedRange:
+        options.diagnosticCompatibility?.supportedRange ??
+        rangeFromPin(contractVersion),
       onSignIn: () => signInRequest.request(),
       onReload: options.onReload ?? (() => location.reload()),
       onReviewDevice: () => lifecycle.reviewDevice(session),
@@ -186,7 +211,9 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     </SessionProvider>,
   );
   await session.start({ beforeStart: options.beforeStart });
-  const leader = leads ? dataLeader.start(session, options.trace) : null;
+  const leader = leads
+    ? dataLeader.start(session, options.trace, options.dataLeaderDiagnostic)
+    : null;
   // The OIDC landing continues only now: the durable record decides (epoch and phase), never the order things happened in.
   if (handoff.oidc) void completeLanding(session, handoff.oidc);
   return { session, store: opened, leader };

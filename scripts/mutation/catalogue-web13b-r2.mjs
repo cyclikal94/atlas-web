@@ -1,4 +1,5 @@
-// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85).
+// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85). Base merge, 5 November 2026: those
+// that collided with WEB-11a's catalogue are now MU-5065..MU-5109 (`web13b-id-map-20261105.json`).
 // Historical reports keep their original IDs; mutation patches, selectors and assertions are unchanged.
 // WEB-13b revision 2's mutants (review 2, R3a/R3b; the design assessment's sensitivity list), in the form and under the rules of
 // `data-catalogue.mjs`, which spreads them into its `UNIT` list after `catalogue-web13b-r1.mjs`. Each removes ONE guard of the anchor
@@ -14,13 +15,13 @@ const T_EDITOR = "tests/features/calendars/anchor-editor.test.ts";
 const T_SECTION = "tests/features/tasks/anchor-section.test.tsx";
 
 /**
- * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the session alone), MU-2590..MU-2601. Not kept,
+ * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the session alone), MU-5069..MU-5080. Not kept,
  * as equivalent (recorded in the revision report): the panel closing on a session that ended before it mounted (no panel is ever shown for
  * an ended session) and the section's "only the panel shown closes" check on its own `onClose` (an unmounted panel has no subscription).
  */
 export const UNIT_13B_R2 = [
   {
-    id: "MU-2590",
+    id: "MU-5069",
     title:
       "WEB-13b R3a: a kept session shown again is copied into a NEW session (the save being made settles on a session no panel shows)",
     file: KEPT,
@@ -35,7 +36,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2591",
+    id: "MU-5070",
     title:
       "WEB-13b R3b: an ended (cancelled) session's late completion still settles, and its consumption removes the session the task has now",
     file: EDITOR,
@@ -49,7 +50,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2592",
+    id: "MU-5071",
     title:
       "WEB-13b R3a: a session admits a second save while one is still being made (a panel shown again saves twice)",
     file: EDITOR,
@@ -64,7 +65,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2593",
+    id: "MU-5072",
     title:
       "WEB-13b R3a: a save being made is not shown as such (a panel shown again offers Save while the session cannot take it)",
     file: EDITOR,
@@ -79,7 +80,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2594",
+    id: "MU-5073",
     title:
       "WEB-13b R3b: a refused save is settled as a done one (the refused input is consumed)",
     file: EDITOR,
@@ -94,7 +95,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2595",
+    id: "MU-5074",
     title:
       "WEB-13b R2/R3: a change's identity is the section mount's, not the visit's (retried after a hand-off, a change that may be stored is stored twice)",
     file: KEPT,
@@ -109,7 +110,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2596",
+    id: "MU-5075",
     title:
       "WEB-13b R3a: showing a kept session again takes it from its visit (kept again by the sync control, it is lost)",
     file: KEPT,
@@ -123,7 +124,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2597",
+    id: "MU-5076",
     title:
       "WEB-13b R3: a panel that left without Cancel while its visit goes on leaves nothing (its input is lost)",
     file: KEPT,
@@ -137,7 +138,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2598",
+    id: "MU-5077",
     title:
       "WEB-13b R3b: Cancel does not end the session it showed (the next panel resumes the cancelled input)",
     file: SECTION,
@@ -152,7 +153,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2599",
+    id: "MU-5078",
     title:
       "WEB-13b R3: a session consumed by its own save does not close the panel showing it",
     file: ANCHOR_DIALOG,
@@ -163,7 +164,7 @@ export const UNIT_13B_R2 = [
       sub(t, '      if (event === "consumed") close.current();\n', ""),
   },
   {
-    id: "MU-2600",
+    id: "MU-5079",
     title:
       "WEB-13b R3 (changed refusal): told that the task changed, saving again is checked against what the panel was opened from (refused for ever)",
     file: SECTION,
@@ -177,7 +178,7 @@ export const UNIT_13B_R2 = [
       ),
   },
   {
-    id: "MU-2601",
+    id: "MU-5080",
     title:
       "WEB-13b R3 (changed refusal): a refusal's renewed context is ignored by the session",
     file: EDITOR,

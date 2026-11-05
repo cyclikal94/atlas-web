@@ -223,15 +223,44 @@ export class FakeIdb {
    */
   autoDrive = false;
   private pumping = false;
+  /** The run of the pump in progress (it never rejects: its failure is kept in `pumpFailures`), for `pumpIdle`. */
+  private pumpRun: Promise<void> | null = null;
+  /**
+   * Every failure of an automatic drive (WEB-09c R41-MUT, revision 41), kept so that a test's teardown can report it. Observation only: the
+   * pump still lets the failure surface as before (an unhandled rejection of the run), so no consumer's behaviour changes.
+   */
+  readonly pumpFailures: unknown[] = [];
 
   /** @internal */
   pump(): void {
     if (!this.autoDrive || this.pumping) return;
     this.pumping = true;
-    void this.world.runUntilIdle().finally(() => {
+    const run = this.world.runUntilIdle();
+    this.pumpRun = run.then(
+      () => undefined,
+      (error: unknown) => {
+        this.pumpFailures.push(error);
+      },
+    );
+    void run.finally(() => {
       this.pumping = false;
       if (this.world.pendingCount() > 0) this.pump();
     });
+  }
+
+  /** Whether an automatic drive is running now. */
+  get pumpActive(): boolean {
+    return this.pumping;
+  }
+
+  /**
+   * JOINS the automatic drive (WEB-09c R41-MUT): resolves once no run of the pump is in progress, including a run it restarted itself,
+   * within `rounds` successive runs; false when one was still running after them. `stop(); await settled()` of an engine does not join
+   * it (it is the world's, not the engine's), so a teardown that must prove quiescence awaits this.
+   */
+  async pumpIdle(rounds = 1_000): Promise<boolean> {
+    for (let i = 0; i < rounds && this.pumping; i += 1) await this.pumpRun;
+    return !this.pumping;
   }
 
   constructor(readonly world: World) {}

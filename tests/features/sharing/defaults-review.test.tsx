@@ -711,6 +711,11 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     );
     expect(confirmButton()).toBeDisabled();
     expect(
+      within(screen.getByRole("dialog")).getByText(copy.REVIEW_NOW_FAILED),
+    ).toBeVisible();
+    // Base merge of 5 November 2026: accepted main's dialog-scoped assertion above and WEB-13b's review-panel scope (reviews 17/18/20,
+    // below) are both kept; each avoids the announcer's second copy of the sentence.
+    expect(
       within(reviewNowPanel()).queryByText(copy.REVIEW_NOW_FAILED),
     ).not.toBeNull();
     const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
@@ -752,6 +757,16 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     await waitFor(() =>
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
+    // The same error is announced outside the dialogue on the next frame. Exercise both copies, then assert the visible one.
+    await waitFor(() =>
+      expect(
+        document.querySelector('[aria-live="assertive"]'),
+      ).toHaveTextContent(copy.REVIEW_NOW_FAILED),
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByText(copy.REVIEW_NOW_FAILED),
+    ).toBeVisible();
+    // Base merge of 5 November 2026: WEB-13b's review-panel scope (review 18) is kept beside accepted main's assertions.
     expect(
       within(reviewNowPanel()).queryByText(copy.REVIEW_NOW_FAILED),
     ).not.toBeNull();

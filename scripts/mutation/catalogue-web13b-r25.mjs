@@ -5,7 +5,7 @@
 // unavailable feedback the guard must keep; `expect` names the tests written for it, so only an assertion of those tests catches it.
 //
 // Considered and not selected (recorded for the reviewer):
-// - "a card that is only loading is remembered" and "every FETCHED row is remembered": MU-2767 and MU-2763 (revision 23) already restore
+// - "a card that is only loading is remembered" and "every FETCHED row is remembered": MU-5231 and MU-5227 (revision 23) already restore
 //   them, with their original oracles; with this revision's guard they also reach the card's own branch.
 // - "the departed review asks `shown` too": a departed slot exists only for an id in the current page's history, so the extra check is
 //   equivalent; it was not added to the product.
@@ -18,7 +18,7 @@ const GUARDED = "    return memory.shown(id) ? <GoneItem id={id} /> : null;\n";
 
 export const UNIT_13B_R25 = [
   {
-    id: "MU-2783",
+    id: "MU-5247",
     title:
       "WEB-13b F29-1 (revision 25): the original defect — a card whose reading finds no row is 'no longer available' whether or not its page showed it",
     file: PANEL,
@@ -28,7 +28,7 @@ export const UNIT_13B_R25 = [
     patch: (t) => sub(t, GUARDED, "    return <GoneItem id={id} />;\n"),
   },
   {
-    id: "MU-2784",
+    id: "MU-5248",
     title:
       "WEB-13b F29-1 (revision 25): a card whose reading finds no row never says 'no longer available', even of a review its page showed",
     file: PANEL,
@@ -39,7 +39,7 @@ export const UNIT_13B_R25 = [
       sub(t, GUARDED, "    return false ? <GoneItem id={id} /> : null;\n"),
   },
   {
-    id: "MU-2785",
+    id: "MU-5249",
     title:
       "WEB-13b F29-1 (revision 25): `shown` answers from EVERY page's history, so a review shown on another page is gone on this one",
     file: PANEL,

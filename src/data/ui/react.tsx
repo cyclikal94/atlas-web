@@ -39,6 +39,8 @@ import {
   type ResourcePage,
   readMerged,
   readResourceList,
+  readVisibleChildren,
+  type VisibleChildren,
 } from "../plans/outbox";
 import {
   type Outstanding,
@@ -48,7 +50,7 @@ import {
   readPendingCreates,
   readResourceView,
 } from "../plans/pending-reads";
-import type { Loadable, Watchable } from "../store/port";
+import type { Loadable, Plan, Watchable } from "../store/port";
 import { publishCacheLifetime } from "./cache-lifetime";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import {
@@ -507,22 +509,54 @@ export function useResourceList(options: {
   after?: string | null;
   limit?: number;
 }): Loadable<ResourcePage> {
+  return useListRead(readResourceList, options);
+}
+
+/**
+ * The children of one parent (a person's fields) only while the cache holds that parent as a `parentKind` (PPL-5): null otherwise,
+ * whatever children are still cached. Parent and page are ONE read (`readVisibleChildren`), so a removal of the parent alone answers again
+ * and an answer never pairs an earlier parent with later children. A new parent or kind is a new read that starts `loading`.
+ */
+export function useVisibleChildren(options: {
+  parentId: string;
+  parentKind: ResourceKind;
+  kind: ResourceKind;
+}): Loadable<VisibleChildren> {
+  return useListRead(readVisibleChildren, options);
+}
+
+/** One live list read of `plan` with the caller's options; a new plan, kind, parent or page is a new read. */
+function useListRead<
+  P extends {
+    kind: ResourceKind;
+    parentId?: string;
+    parentKind?: ResourceKind;
+    after?: string | null;
+    limit?: number;
+  },
+  O,
+>(
+  plan: Plan<P & { incarnationId: string }, unknown, O>,
+  options: P,
+): Loadable<O> {
   return useWatch(
     (env) => {
       const service = env.service();
       return service
-        ? service.store.watch(readResourceList, {
+        ? service.store.watch(plan, {
             incarnationId: service.incarnationId,
-            kind: options.kind,
-            ...(options.parentId === undefined
-              ? {}
-              : { parentId: options.parentId }),
-            ...(options.after === undefined ? {} : { after: options.after }),
-            ...(options.limit === undefined ? {} : { limit: options.limit }),
+            ...options,
           })
         : null;
     },
-    [options.kind, options.parentId, options.after, options.limit],
+    [
+      plan,
+      options.kind,
+      options.parentId,
+      options.parentKind,
+      options.after,
+      options.limit,
+    ],
   );
 }
 

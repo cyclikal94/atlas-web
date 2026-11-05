@@ -10,6 +10,11 @@ import type {
   TargetNeeds,
 } from "../../data";
 import {
+  registerArchiveKind,
+  registerArchiveReader,
+  registerArchiveRebuilder,
+} from "../content/archive-registration";
+import {
   archiveResource,
   canonicalDefinition,
   commandOf,
@@ -143,6 +148,23 @@ const failedFor = (status: number): CurrentRead =>
     ? { kind: "failed", reason: "inaccessible" }
     : { kind: "failed", reason: "error" };
 
+/** A missing task may be another slice's archive target, so let its reader answer. */
+async function taskArchiveReader(
+  id: string,
+  io: CurrentReadIo,
+): Promise<CurrentRead | null> {
+  const { status, body } = await readJson(
+    io,
+    `/tasks/${encodeURIComponent(id)}`,
+  );
+  if (status === 404) return null;
+  if (status !== 200) return failedFor(status);
+  const detail = parseTaskDetail(body);
+  return detail?.task.id !== id
+    ? { kind: "indeterminate" }
+    : taskReadResult(detail);
+}
+
 /** Task-level kinds: the task's projection from `GET /tasks/{id}`. */
 async function readTaskCurrent(
   draft: DraftWithCommand,
@@ -179,6 +201,12 @@ async function readArchiveCurrent(
 function taskRead(status: number, body: unknown): CurrentRead {
   if (status !== 200) return failedFor(status);
   const detail = parseTaskDetail(body);
+  return taskReadResult(detail);
+}
+
+function taskReadResult(
+  detail: ReturnType<typeof parseTaskDetail>,
+): CurrentRead {
   // The task's details come back with it and are kept beside it (DA-A1): a revision needs write access to both, and only this read says
   // whether the person still has it. The task is the reviewed value and the only base.
   return detail === null
@@ -307,6 +335,21 @@ async function readListCurrent(
     command.kind === "archive" && typeof command.archived === "boolean"
       ? !command.archived
       : false;
+  return (
+    (await readListTarget(listId, first, io)) ?? {
+      kind: "failed",
+      reason: "inaccessible",
+    }
+  );
+}
+
+/** A complete absence can fall through to another slice's archive reader; a refused or failed read cannot. */
+async function readListTarget(
+  listId: string,
+  first: boolean,
+  io: CurrentReadIo,
+): Promise<CurrentRead | null> {
+  const ended: CurrentRead = { kind: "failed", reason: "unavailable" };
   for (const archived of [first, !first]) {
     let after: string | null = null;
     for (;;) {
@@ -332,7 +375,19 @@ async function readListCurrent(
       after = page.next_after;
     }
   }
-  return { kind: "failed", reason: "inaccessible" };
+  return null;
+}
+
+/** Preserve the archive's expected collection order when the shared registry asks for a list. */
+async function listArchiveReader(
+  id: string,
+  io: CurrentReadIo,
+  draft: DraftWithCommand,
+): Promise<CurrentRead | null> {
+  const command = commandOf(draft);
+  if (command?.kind !== "archive" || typeof command.archived !== "boolean")
+    return { kind: "indeterminate" };
+  return readListTarget(id, !command.archived, io);
 }
 
 /**
@@ -695,5 +750,10 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   if (registered.has(registry)) return;
   registered.add(registry);
   for (const [kind, spec] of Object.entries(taskCommandSpecs()))
-    registry.register(kind, spec);
+    if (kind !== "archive") registry.register(kind, spec);
+  registerArchiveReader(taskArchiveReader);
+  registerArchiveReader(listArchiveReader);
+  registerArchiveRebuilder("task", rebuildArchive);
+  registerArchiveRebuilder("list", rebuildArchive);
+  registerArchiveKind(registry);
 }

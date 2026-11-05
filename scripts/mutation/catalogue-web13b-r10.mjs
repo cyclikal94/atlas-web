@@ -5,7 +5,7 @@
 //
 // Considered and not selected (recorded for the reviewer): comparing an old read's witness with `>` instead of `!==` against the basis it
 // was asked for is equivalent (a read is made after the basis it is asked for was fixed, and one database's witness only grows, so it never
-// reads less); the delivery's `which.ticket === ticket` reset of `verifying` is MU-2691's; `importStatus` deriving from `importAuthority`
+// reads less); the delivery's `which.ticket === ticket` reset of `verifying` is MU-5164's; `importStatus` deriving from `importAuthority`
 // is one function, so a mutant of either is one of the mutants below.
 //
 // Retired after it ran (its survival preserved in `.agtx/evidence/WEB-13b/revision-10/mutants-new-1`): MU-2713, the press-time check
@@ -24,7 +24,7 @@ const T_COMMANDS = "tests/features/calendars/commands.test.ts";
 export const UNIT_13B_R10 = [
   // ---- R7d: a read is judged against the basis it was asked for --------------------------------------------------------------------
   {
-    id: "MU-2708",
+    id: "MU-5181",
     title:
       "WEB-13b R7d (revision 10): a showing's read is judged against the basis as it is when it lands (an earlier showing's read of the old witness expires a later, verified showing that followed a refresh)",
     file: KEPT,
@@ -39,7 +39,7 @@ export const UNIT_13B_R10 = [
       ),
   },
   {
-    id: "MU-2709",
+    id: "MU-5182",
     title:
       "WEB-13b R7d (revision 10): a read asked for an earlier showing is discarded whatever it says (genuine evidence of that showing's interval lost)",
     file: KEPT,

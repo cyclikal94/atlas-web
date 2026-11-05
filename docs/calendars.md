@@ -194,7 +194,7 @@ field always repeats annually; a task that repeats on its own schedule cannot be
 (no projected first occurrence: the server makes none from the schedule). An existing task's "Calendar anchor" section (task detail,
 after the day) reads the binding ONLINE once per visit and identity (`tasks/detail/anchor-binding.ts`; a refusal is kept when it arrives;
 offline it says "Binding details need a connection." and the rest of the task stays as the cache shows it) and queues `set_anchor` on the
-task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states. A refused change is explained ONLY by what its refusal recorded (revision 22, review 26 F26-1): a `422` names no rule, so it gets the generic reason whatever binding, task or reference the page has read since (the server keeps the old binding when it refuses a change, and a reference can change before the change is handled); a `403`/`404` says something the change needs is not available, which may be the task itself (a refused removal included). The recurrence and seconds rules are explained in the panel, before saving, from the person's own input. Evidence: `anchor-section.test.tsx` "revision 22", E-ANC3's revision-22 case, MU-2755 to MU-2761. A change pressed
+task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states. A refused change is explained ONLY by what its refusal recorded (revision 22, review 26 F26-1): a `422` names no rule, so it gets the generic reason whatever binding, task or reference the page has read since (the server keeps the old binding when it refuses a change, and a reference can change before the change is handled); a `403`/`404` says something the change needs is not available, which may be the task itself (a refused removal included). The recurrence and seconds rules are explained in the panel, before saving, from the person's own input. Evidence: `anchor-section.test.tsx` "revision 22", E-ANC3's revision-22 case, MU-5219 to MU-5225. A change pressed
 again after a refusal (or a failure that may have stored it) keeps its identity; a STORED change's identity is retired, so A, B, then A
 again is three changes (R2). The panel PRESENTS one editing session (`anchor-editor.ts`, revision 2, R3a/R3b): the session, not the panel's mount,
 owns the input, the save being made (one at a time) and what it said; a save settles on its own session (never numbers re-used, so a
@@ -206,7 +206,7 @@ readable: that press writes nothing ("This task's details are still loading — 
 conflict being replaced, and makes the next press a deliberate save of the task as it is then. A read arriving never saves by itself.
 Evidence: `anchor-section.test.tsx` "revision 13" (the subscribed read held and released, another device's change before the write, Save,
 Remove, Review's replacement, renewal after a done save and after a changed refusal, a kept session shown by a new mount, Enter), the
-pending create's detail in `task-form-anchor.test.tsx`, and mutants MU-2723 to MU-2732. The in-dialog sync control keeps the session for the next panel opened while the task's
+pending create's detail in `task-form-anchor.test.tsx`, and mutants MU-5187 to MU-5196. The in-dialog sync control keeps the session for the next panel opened while the task's
 visit goes on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts`, owned by the visit, for the task detail; a panel that left without Cancel
 leaves its input there too; the panel belongs to the visit going on when it opens, even in a section React kept mounted through a departure
 and return, revision 3 R3c; the form's own session for the new-task form).
@@ -269,8 +269,8 @@ before and after the later showing's, with and without a visible refresh, and R7
 and 1, then one press with and without W18 before W2, the chooser's entry absent until the cache gate opens; `tests/data/outbox-continuity.test.ts` for W2),
 `import-editor.test.ts`, `import-kept.test.ts`, E-IMP7 and E-IMP8 (a 403 remount then 410/W18/W23, row and chooser, with controls; two pages
 with the follower's cross-tab wakes delivered or held; revision 8: E-IMP9, a pending source on an empty cache, first fill alone versus fill,
-410 and refill, the follower's wakes held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-2637 to MU-2655, MU-2656 to MU-2668
-(revision 8: re-anchored, MU-2666 re-expressed), MU-2669 to MU-2687, MU-2688 to MU-2707 (revision 9) and MU-2708 to MU-2714 (revision 10;
+410 and refill, the follower's wakes held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-5110 to MU-5128, MU-5129 to MU-5141
+(revision 8: re-anchored, MU-5139 re-expressed), MU-5142 to MU-5160, MU-5161 to MU-5180 (revision 9) and MU-5181, MU-5182 and MU-2710 to MU-2714 (revision 10;
 MU-2713 retired as equivalent after it ran). WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
@@ -283,7 +283,7 @@ review it is. The list and the card's read are published separately, so a card d
 one Acknowledge resolved. Until its read arrives the card says it is loading and offers nothing; a review the read no longer finds is "no
 longer available", and one it sees resolved goes, before the list says so. `tests/features/calendars/review-panel.test.tsx` (revision 12:
 both publication orders for Acknowledge, Acknowledge (keep current timing) and Acknowledge again, a change inside the replacement's write,
-privacy, navigation, permission, gone, resolved and loading, through the production `DataProvider`), mutants MU-2717 to MU-2722; "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
+privacy, navigation, permission, gone, resolved and loading, through the production `DataProvider`), mutants MU-2717, MU-2718 and MU-5183 to MU-5186; "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
 which the task screen reads strictly and consumes once to fill a NEW correction session (it never resolves the review); a
 `context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available". The panel
 reads a page (100) at a time; "Show more reviews" shows 20 more and then the next page, and "Show previous reviews" goes back a page,
@@ -295,7 +295,7 @@ page is asked for by its own id (one id per read, so nothing is clipped to a wor
 makes it "no longer available"; a review it still holds shows nothing there (it is on its own page, open and actionable); one whose
 PUBLISHED base is resolved is forgotten (a local acknowledgement waiting to be sent or confirmed is not a resolution); while the answer is
 not known nothing is claimed. A new panel (a remount, or the cache gate closing and reopening) remembers nothing. Evidence:
-`review-panel.test.tsx` "revision 23", the revision-23 case of `fixture.calendar-reviews.spec.ts`, MU-2762 to MU-2770.
+`review-panel.test.tsx` "revision 23", the revision-23 case of `fixture.calendar-reviews.spec.ts`, MU-5226 to MU-5234.
 **Revision 24 (review 28 F28-1):** one review can have been shown on several pages (shown on page one, moved on to page two and shown
 there). A published resolution seen by any of the panel's readings (a page's list, a card's own read, a departed review's id read) retires
 it from EVERY page that showed it, so no page later says it is "no longer available". The panel keeps, per account service, the newest
@@ -303,12 +303,12 @@ version of each review it saw and whether it was resolved then: an OLDER reading
 drawn nor remembered, and a card whose read then finds no row says nothing; a NEWER unresolved version (the server allows reopening) is
 shown and remembered again; an older resolved reading does not retire a review seen reopened since. A local acknowledgement is still not
 a resolution. Ids and versions only; nothing persists beyond the panel. Evidence: `review-panel.test.tsx` "revision 24", the revision-24
-case of `fixture.calendar-reviews.spec.ts`, MU-2771 to MU-2782.
+case of `fixture.calendar-reviews.spec.ts`, MU-5235 to MU-5246.
 **Revision 25 (review 29 F29-1):** the page's list and a card's own read are published separately, so a card can still be listed when its
 read finds no row. It says "no longer available" only when the current page's history holds the review (a card on that page drew it),
 the same rule a departed review follows. A review whose card was only ever loading (inserted, then deleted before its first read arrived)
 was never shown, so it simply goes; another page's history, or an earlier panel's, does not count. Evidence: `review-panel.test.tsx`
-"revision 25", MU-2783 to MU-2785.
+"revision 25", MU-5247 to MU-5249.
 
 **Historical finding (F-13b-1; as recorded on 25 October 2026 at the first Running checkpoint `bfe4118`, pre-existing at `b9fd602`, not
 fixed in that checkpoint; kept as it was written):** an ordinary `403` to ANY queued command sent by the production
@@ -337,7 +337,7 @@ WEB-13b: `tests/features/calendars/{import-model,anchor-model}.test.ts`, `{impor
 `tests/features/tasks/{anchor-section,task-form-anchor}.test.tsx`, `tests/data/{outbox-calendar-extension,outbox-answers,pending-reads,plan-inventory}.test.ts`
 (the answers, the seam, E6 and the header read); native `tests/e2e/fixture.calendar-{import,anchors,reviews}.spec.ts` (E-IMP1–6, E-ANC1–4,
 E-REV1–3; helpers in `calendar-13b-helpers.ts`); released backend I-CAL-IMP1–4, I-CAL-ANC1 and I-CAL-REV1 in the calendar integration spec; mutants
-MU-2437..MU-2469 (`scripts/mutation/catalogue-web13b.mjs`; revisions 1–3 in `catalogue-web13b-r{1,2,3}.mjs`, revision 3's owner alone in
+MU-5001..MU-5033 (`scripts/mutation/catalogue-web13b.mjs`; revisions 1–3 in `catalogue-web13b-r{1,2,3}.mjs`, revision 3's owner alone in
 `tests/features/tasks/anchor-kept.test.ts`).
 
 Offline composition with a native file (WEB-13b revision 18): E-IMP1, the E-IMP3 dependency case and I-CAL-IMP1 lose HTTP on the opt-in

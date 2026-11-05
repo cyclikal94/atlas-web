@@ -181,9 +181,12 @@ export function useSharingLoad<T>(
       run();
     }
   }, [options.enabled, run, ...options.target]);
+  // Unmounted: nothing asked may land, and a mount that follows (development's replay of every effect) reads again, or it would wait for
+  // an answer that was just dropped (WEB-11a review 23).
   useEffect(
     () => () => {
       generation.current += 1;
+      started.current = null;
     },
     [],
   );

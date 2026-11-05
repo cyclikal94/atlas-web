@@ -142,6 +142,65 @@ const gated = (page: Page) =>
   });
 
 /**
+ * WEB-11a revision 27 (review 28, R28.1): what the ENGINE does with the resume gate, not only its `open` state. The gate's `<dialog>`
+ * stays in the document after `close()`. An author rule that lays it out regardless of `open` kept the closed gate on screen, over
+ * everything, taking every click, while `open`, `:modal`, `inert` and focus all said it had lifted. This reads layout (`display`,
+ * client rects), coverage and hit testing at the centre of `target`, where the next pointer action will go.
+ */
+const rendering = (page: Page, target: string) =>
+  page.evaluate((selector) => {
+    const gate = document.getElementById(
+      "resume-gate",
+    ) as HTMLDialogElement | null;
+    const control = document.querySelector<HTMLElement>(selector);
+    if (!gate || !control)
+      throw new Error(`missing ${gate ? selector : "#resume-gate"}`);
+    const box = control.getBoundingClientRect();
+    const x = Math.round(box.x + box.width / 2);
+    const y = Math.round(box.y + box.height / 2);
+    const top = document.elementFromPoint(x, y);
+    const rect = gate.getBoundingClientRect();
+    const view = document.documentElement;
+    return {
+      gates: document.querySelectorAll("dialog.neutral-gate").length,
+      gateOpen: gate.open,
+      gateModal: gate.matches(":modal"),
+      display: getComputedStyle(gate).display,
+      laidOut: gate.getClientRects().length > 0,
+      covers:
+        rect.width >= view.clientWidth && rect.height >= view.clientHeight,
+      reachesControl: top !== null && control.contains(top),
+      gateTakesPoint: top?.closest("#resume-gate") != null,
+      point: { x, y },
+    };
+  }, target);
+
+const OPEN_GATE = {
+  gates: 1,
+  gateOpen: true,
+  gateModal: true,
+  display: "flex",
+  laidOut: true,
+  covers: true,
+  reachesControl: false,
+  gateTakesPoint: true,
+};
+const CLOSED_GATE = {
+  gates: 1,
+  gateOpen: false,
+  gateModal: false,
+  display: "none",
+  laidOut: false,
+  covers: false,
+  reachesControl: true,
+  gateTakesPoint: false,
+};
+const withoutPoint = ({
+  point: _point,
+  ...rest
+}: Awaited<ReturnType<typeof rendering>>) => rest;
+
+/**
  * WEB-08c revision 3 (R8, HF-13): DIAGNOSTIC ONLY, no assertion depends on it. Every programmatic `focus()`/`blur()` (with its stack), every
  * focus change and every open/close of a dialog is recorded in the page from before the application boots, so a failed focus assertion
  * names the writer that moved focus (the campaign-7 trace could not: Playwright's DOM snapshots carry no focus).
@@ -577,5 +636,155 @@ test.describe("S-GATE: exposure and the resume gate with real inert and the real
     await page.keyboard.press("Escape");
     expect((await gated(page)).gateOpen).toBe(true);
     await expect(gate.getByRole("status")).toHaveCount(1);
+  });
+
+  /*
+   * WEB-11a revision 27 (review 28, R28.1): a CLOSED gate is absent from layout and hit testing, and an OPEN one covers everything,
+   * in every cycle. Each step reads the engine's own rendering (`rendering` above) and then makes a real pointer click at the control's
+   * centre (`page.mouse.click`: no actionability wait, no force), so the click goes wherever the engine's hit testing sends it. The
+   * click made while the gate is open is the paired control: it must reach nothing.
+   */
+  const lifted = () =>
+    !document.getElementById("protected-root")?.hasAttribute("inert") &&
+    (document.getElementById("resume-gate") as HTMLDialogElement | null)
+      ?.open === false;
+  const TASKS = 'nav[aria-label="Primary"] a[href="/tasks"]';
+  const TODAY = 'nav[aria-label="Primary"] a[href="/today"]';
+
+  test("R28.1: after every lift the closed gate has no box and takes no click; the next real click reaches the control (two cycles: visibility, then pagehide/pageshow/focus)", async ({
+    context,
+  }) => {
+    await stub(context);
+    await seed(context, settled("acct-a", 1, "s1"));
+    const page = await open(context);
+    expect(new URL(page.url()).pathname).toBe("/today");
+
+    // Cycle 1: visibility only.
+    await setVisibility(page, "hidden");
+    const up1 = await rendering(page, TASKS);
+    expect(withoutPoint(up1), "cycle 1, hidden: the gate covers").toEqual(
+      OPEN_GATE,
+    );
+    await page.mouse.click(up1.point.x, up1.point.y);
+    await setVisibility(page, "visible");
+    await page.waitForFunction(lifted);
+    expect(
+      new URL(page.url()).pathname,
+      "control: the click under the open gate reached nothing",
+    ).toBe("/today");
+    const down1 = await rendering(page, TASKS);
+    expect(withoutPoint(down1), "cycle 1, lifted: the gate is absent").toEqual(
+      CLOSED_GATE,
+    );
+    await page.mouse.click(down1.point.x, down1.point.y);
+    await expect(page).toHaveURL(/\/tasks$/);
+    await expect(page.locator(TASKS)).toHaveAttribute("aria-current", "page");
+
+    // Cycle 2: the same gate opened again by pagehide and lifted through pageshow and focus.
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(
+        new PageTransitionEvent("pagehide", { persisted: true }),
+      );
+    });
+    const up2 = await rendering(page, TODAY);
+    expect(
+      withoutPoint(up2),
+      "cycle 2, hidden: the same one gate covers again",
+    ).toEqual(OPEN_GATE);
+    await page.mouse.click(up2.point.x, up2.point.y);
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new PageTransitionEvent("pageshow", { persisted: true }),
+      );
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await page.waitForFunction(lifted);
+    expect(
+      new URL(page.url()).pathname,
+      "control: the click under the reopened gate reached nothing",
+    ).toBe("/tasks");
+    const down2 = await rendering(page, TODAY);
+    expect(withoutPoint(down2), "cycle 2, lifted: the gate is absent").toEqual(
+      CLOSED_GATE,
+    );
+    await page.mouse.click(down2.point.x, down2.point.y);
+    await expect(page).toHaveURL(/\/today$/);
+    await expect(page.locator(TODAY)).toHaveAttribute("aria-current", "page");
+  });
+
+  test("R28.1: a fence found on return closes the gate onto the reconnect card; the card's button takes the real click (level 1)", async ({
+    context,
+  }) => {
+    await stub(context);
+    await seed(context, settled("acct-a", 1, "s1"));
+    const page = await open(context);
+    await setVisibility(page, "hidden");
+    expect(withoutPoint(await rendering(page, TASKS))).toEqual(OPEN_GATE);
+    await seed(context, withInvalidSession(settled("acct-a", 1, "s1")));
+    await setVisibility(page, "visible");
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Reconnect to keep going" }),
+    ).toBeVisible();
+    const card = await rendering(page, "[data-neutral-state] button");
+    expect(
+      withoutPoint(card),
+      "the closed gate is absent over the neutral card",
+    ).toEqual(CLOSED_GATE);
+    await page.mouse.click(card.point.x, card.point.y);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Sign in again" }),
+    ).toBeVisible();
+    expect(
+      await page.locator("#protected-root").evaluate((root) => root.innerHTML),
+    ).toBe("");
+  });
+
+  test("R28.1: the auth store fails while hidden: the gate closes onto the read-failure card, whose Reload takes the real click (level 1)", async ({
+    context,
+  }) => {
+    await stub(context);
+    await seed(context, settled("acct-a", 1, "s1"));
+    const page = await open(context);
+    await setVisibility(page, "hidden");
+    expect(withoutPoint(await rendering(page, TASKS))).toEqual(OPEN_GATE);
+    await page.evaluate(() => {
+      const booted = window.__atlasFixture?.session?.booted;
+      if (!booted) throw new Error("the session is not booted");
+      booted.store.close();
+      (window as unknown as { __beforeReload?: true }).__beforeReload = true;
+    });
+    await setVisibility(page, "visible");
+    await expect(
+      page.getByRole("heading", {
+        level: 1,
+        name: "We couldn't check your account",
+      }),
+    ).toBeVisible();
+    const card = await rendering(page, "[data-neutral-state] button");
+    expect(
+      withoutPoint(card),
+      "the closed gate is absent over the neutral card",
+    ).toEqual(CLOSED_GATE);
+    const loaded = page.waitForEvent("load");
+    await page.mouse.click(card.point.x, card.point.y);
+    await loaded;
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __beforeReload?: true }).__beforeReload ??
+          null,
+      ),
+      "Reload made a new document",
+    ).toBeNull();
   });
 });

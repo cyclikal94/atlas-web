@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import type { BrowserContext, Page, Route } from "@playwright/test";
 import {
   ACCOUNT,
@@ -8,11 +8,14 @@ import {
 } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
 import {
+  beginCollection,
+  endCollection,
   engineOf,
   PROFILE_OUT,
   record,
   recordValue,
   sleep,
+  writeEvidence,
 } from "./profile-helpers";
 
 /**
@@ -33,14 +36,17 @@ test.skip(
   "not run: measurements are taken by `pnpm profile:contention`",
 );
 test.describe.configure({ mode: "serial" });
+// Each test's collection window (review finding R1): every row carries it, and the collection log records how the test ended.
+test.beforeEach(({ browserName: _browserName }, info) => beginCollection(info));
+test.afterEach(({ browserName: _browserName }, info) => endCollection(info));
 
 const QUICK = Number(process.env.ATLAS_PROFILE_SAMPLES ?? 0);
 const N = (full: number): number => (QUICK > 0 ? Math.min(full, QUICK) : full);
 const OUT = `${PROFILE_OUT}/contention`;
-const write = (name: string, data: unknown): void => {
-  mkdirSync(OUT, { recursive: true });
-  writeFileSync(`${OUT}/${name}`, `${JSON.stringify(data, null, 2)}\n`);
-};
+// A file of the programme item, written once and stamped with its stage, invocation and collection window (the evidence contract judges
+// it over its enclosing test's window and refuses a second write).
+const write = (name: string, data: Record<string, unknown>): void =>
+  writeEvidence(`contention/${name}`, data);
 const append = (name: string, row: unknown): void => {
   mkdirSync(OUT, { recursive: true });
   appendFileSync(`${OUT}/${name}`, `${JSON.stringify(row)}\n`);
@@ -309,6 +315,12 @@ test("P-7 and P-8: the wait for another page's activity against a back-to-back s
   const leaderPage = await sessionPage(context);
   const probe = await sessionPage(context);
   const results: Record<string, unknown>[] = [];
+  // The trace events every counter below is counted from, kept per condition (revision 3, review 3 R2: the counts can be recounted).
+  const support: Record<string, unknown>[] = [];
+  const counted = (entries: TraceEntry[], events: string[]) =>
+    entries
+      .filter((entry) => events.includes(entry.event))
+      .map((entry) => ({ event: entry.event, at: entry.at }));
   for (const condition of CONDITIONS) {
     if (condition.leader) {
       server.catchingUp = true;
@@ -346,9 +358,25 @@ test("P-7 and P-8: the wait for another page's activity against a back-to-back s
         ms: samples.ms,
       });
     }
+    support.push({
+      condition: condition.name,
+      leader: counted(leaderTrace, [
+        "cover.committed",
+        "request.issued",
+        "lease.retired",
+        "activity.cancel",
+      ]),
+      probe: counted(probeTrace, [
+        "activity.cancel",
+        "lease.retired",
+        "lease.retire_failed",
+        "closing.gave_up",
+      ]),
+    });
     results.push({
       condition: condition.name,
       leader_pages: pages,
+      elapsed_s: elapsed,
       leader_pages_per_second: +(pages / elapsed).toFixed(1),
       leader_cover_commits: countOf(leaderTrace, "cover.committed"),
       leader_requests_issued: countOf(leaderTrace, "request.issued"),
@@ -405,6 +433,13 @@ test("P-7 and P-8: the wait for another page's activity against a back-to-back s
     label:
       "counted from the kernel's own trace in each page (activity.cancel, lease.retired, lease.retire_failed); the cost of one retirement is one small write",
     conditions: results,
+  });
+  write(`retirements-trace.${engine}.json`, {
+    id: "P-8 trace support",
+    engine,
+    label:
+      "the trace events each P-8 counter counts, per condition and page (leader: cover.committed, request.issued, lease.retired, activity.cancel; probe: activity.cancel, lease.retired, lease.retire_failed, closing.gave_up)",
+    conditions: support,
   });
   recordValue("P-8 retirements", engine, { conditions: results });
   expect(results.length).toBe(CONDITIONS.length);
@@ -940,4 +975,368 @@ test("P-9: the yield between pages (none, macrotask, scheduler.yield, idle): its
     rows,
   });
   expect(rows.length).toBe(POLICIES.length);
+});
+
+// ---- P-13: what a HEALTHY follower reads because of `atlas-sync` hints (R60; WEB-09c plan 4.4) -------------------------------------------------------
+declare global {
+  interface Window {
+    __p13?: {
+      hints: Array<{ at: number; stores: string }>;
+      tx: Array<{
+        at: number;
+        stores: string;
+        mode: string;
+        done: number | null;
+      }>;
+      posted: number;
+    };
+  }
+}
+/**
+ * TEST-SIDE instrumentation only (no production or harness source changes): an observer of `atlas-sync` in the follower page (a channel
+ * of its own receives what every other channel of the origin posts), the page's own posts counted apart, and every IndexedDB transaction
+ * the page starts, tagged with its stores, its mode and when it ended.
+ */
+const instrumentFollower = (): void => {
+  const record: NonNullable<Window["__p13"]> = { hints: [], tx: [], posted: 0 };
+  window.__p13 = record;
+  const observer = new BroadcastChannel("atlas-sync");
+  observer.onmessage = (event: MessageEvent) => {
+    const data = event.data as { type?: string; stores?: string[] };
+    if (data?.type === "data_changed")
+      record.hints.push({
+        at: performance.now(),
+        stores: [...(data.stores ?? [])].sort().join(","),
+      });
+  };
+  const post = BroadcastChannel.prototype.postMessage;
+  BroadcastChannel.prototype.postMessage = function (
+    this: BroadcastChannel,
+    message: unknown,
+  ) {
+    if (this !== observer) record.posted += 1;
+    return post.call(this, message);
+  };
+  const transaction = IDBDatabase.prototype.transaction;
+  IDBDatabase.prototype.transaction = function (
+    this: IDBDatabase,
+    names: string | string[],
+    mode?: IDBTransactionMode,
+    options?: IDBTransactionOptions,
+  ) {
+    const tx = transaction.call(this, names, mode, options);
+    const entry = {
+      at: performance.now(),
+      stores: (typeof names === "string" ? [names] : [...names])
+        .sort()
+        .join(","),
+      mode: mode ?? "readonly",
+      done: null as number | null,
+    };
+    record.tx.push(entry);
+    const end = (): void => {
+      entry.done = performance.now();
+    };
+    tx.addEventListener("complete", end);
+    tx.addEventListener("abort", end);
+    tx.addEventListener("error", end);
+    return tx;
+  } as typeof IDBDatabase.prototype.transaction;
+};
+
+const resetFollower = (page: Page) =>
+  page.evaluate(() => {
+    const r = window.__p13;
+    if (!r) throw new Error("the follower is not instrumented");
+    r.hints = [];
+    r.tx = [];
+    r.posted = 0;
+    return window.__atlasData?.gateFactsReads() ?? null;
+  });
+
+/** What the follower heard and read since `resetFollower`, with the controller's own reads (as E-C8 counts them: what it STARTS). */
+async function followerReads(
+  page: Page,
+  gateBefore: { starts: number; emissions: number; calls: number } | null,
+) {
+  const { hints, tx, posted, gateAfter } = await page.evaluate(() => {
+    const r = window.__p13;
+    if (!r) throw new Error("the follower is not instrumented");
+    return {
+      hints: r.hints,
+      tx: r.tx,
+      posted: r.posted,
+      gateAfter: window.__atlasData?.gateFactsReads() ?? null,
+    };
+  });
+  const byHintKind: Record<string, number> = {};
+  for (const h of hints) byHintKind[h.stores] = (byHintKind[h.stores] ?? 0) + 1;
+  const byStores: Record<string, number> = {};
+  for (const t of tx) byStores[t.stores] = (byStores[t.stores] ?? 0) + 1;
+  // Read time per hint: the transactions the page started from the hint until the next one, ended how long after the hint.
+  const readMs: number[] = [];
+  let hintsWithReads = 0;
+  for (const [i, h] of hints.entries()) {
+    const until = hints[i + 1]?.at ?? Number.POSITIVE_INFINITY;
+    const started = tx.filter((t) => t.at >= h.at && t.at < until);
+    if (started.length === 0) continue;
+    hintsWithReads += 1;
+    const ends = started.map((t) => t.done ?? t.at);
+    readMs.push(Math.max(...ends) - h.at);
+  }
+  const syncStateTx = tx.filter((t) =>
+    t.stores.split(",").includes("sync_state"),
+  ).length;
+  return {
+    hints: hints.length,
+    hints_by_kind: byHintKind,
+    own_posts: posted,
+    transactions: tx.length,
+    transactions_by_stores: byStores,
+    sync_state_transactions: syncStateTx,
+    transactions_per_hint: hints.length
+      ? +(tx.length / hints.length).toFixed(3)
+      : null,
+    hints_followed_by_reads: hintsWithReads,
+    controller_reads:
+      gateBefore && gateAfter
+        ? {
+            starts: gateAfter.starts - gateBefore.starts,
+            emissions: gateAfter.emissions - gateBefore.emissions,
+            calls: gateAfter.calls - gateBefore.calls,
+          }
+        : null,
+    read_ms: readMs,
+    // What every figure above is derived from (revision 3, review 3 R2): the hints and transactions themselves, kept as support.
+    observed: { hints, tx },
+  };
+}
+
+test("P-13: a healthy follower's reads on `atlas-sync` hints (a back-to-back leader's pages, receipts, stop-record hints, none), and the leader's catch-up with 0, 1 and 2 followers", async ({
+  context,
+}, info) => {
+  test.setTimeout(30 * 60_000);
+  const engine = engineOf(info);
+  const server = await serve(context);
+  await reseed(context);
+  // Every page is booted BEFORE anything starts (a page boot remounts the other pages' trees; see data-sync-helpers `twoPages`).
+  const leaderPage = await sessionPage(context);
+  const follower = await sessionPage(context, { init: instrumentFollower });
+  const second = await sessionPage(context, { init: instrumentFollower });
+  server.catchingUp = false;
+  server.budget = 0;
+  server.syncDelayMs = 5;
+  await startLeader(leaderPage, ACCOUNT, "cursor-0");
+  await expect
+    .poll(() =>
+      leaderPage.evaluate(() => window.__atlasData?.engineState()?.kind),
+    )
+    .toBe("idle");
+  for (const page of [follower, second]) {
+    await page.evaluate((a) => window.__atlasData?.startGate(a), ACCOUNT);
+    await expect
+      .poll(() => page.evaluate(() => window.__atlasData?.gateCache()), {
+        timeout: 15_000,
+      })
+      .not.toBe("unverified");
+  }
+  const cacheShown = await follower.evaluate(() =>
+    window.__atlasData?.gateCache(),
+  );
+
+  /** One bounded catch-up of `pages` pages, back to back (5 ms server latency); pages per second. */
+  const catchUp = async (pages: number) => {
+    server.catchingUp = false;
+    server.budget = pages;
+    const before = server.syncPages;
+    const started = Date.now();
+    await leaderPage.evaluate(() => window.__atlasData?.stopSync());
+    await leaderPage.evaluate(
+      (a) => window.__atlasData?.startSync(a, { seedCursor: "cursor-0" }),
+      ACCOUNT,
+    );
+    await expect
+      .poll(() => server.syncPages - before, { timeout: 120_000 })
+      .toBeGreaterThanOrEqual(pages);
+    await expect
+      .poll(() =>
+        leaderPage.evaluate(() => window.__atlasData?.engineState()?.kind),
+      )
+      .toBe("idle");
+    return ((server.syncPages - before) / (Date.now() - started)) * 1000;
+  };
+
+  const conditions: Array<Record<string, unknown>> = [];
+  const observed: Array<Record<string, unknown>> = [];
+  const measure = async (
+    name: string,
+    label: string,
+    act: () => Promise<void>,
+  ) => {
+    const gateBefore = await resetFollower(follower);
+    await resetFollower(second);
+    const started = Date.now();
+    await act();
+    // The last hint's reads are let finish before they are read.
+    await sleep(500);
+    const reads = await followerReads(follower, gateBefore);
+    const elapsed = Date.now() - started;
+    if (reads.read_ms.length)
+      record(`P-13 ${name}: follower read_ms per hint`, engine, reads.read_ms, {
+        condition: name,
+        hints: reads.hints,
+        method:
+          "for each hint the follower page received, the IndexedDB transactions it started before the next hint, ended this long after the hint (overlapping reads under back-to-back hints are attributed to the hint they followed)",
+      });
+    const { read_ms: _samples, observed: raw, ...summary } = reads;
+    observed.push({ condition: name, ...raw });
+    conditions.push({
+      condition: name,
+      label,
+      elapsed_ms: elapsed,
+      ...summary,
+    });
+    return reads;
+  };
+
+  // (d) The control: no hints at all (the leader stopped, nothing written), five seconds.
+  await leaderPage.evaluate(() => window.__atlasData?.stopSync());
+  const control = await measure(
+    "none (control)",
+    "no page writes and no engine runs for 5 s: the follower's own background reads",
+    async () => sleep(5_000),
+  );
+  // (a) The leader catching up, pages back to back: every committed page is a hint naming `cache` and `sync_state`.
+  const pagesHint = N(200);
+  let throughputTwo = 0;
+  const leaderPages = await measure(
+    "leader pages",
+    `a back-to-back FIXTURE leader committing ${pagesHint} pages (5 ms synthetic server latency): each commit posts data_changed [cache, sync_state]`,
+    async () => {
+      throughputTwo = await catchUp(pagesHint);
+    },
+  );
+  // (c) Stop-record hints alone: `data_changed [sync_state]`, as a writer posts when it records or ends a durable stop. SYNTHETIC: a
+  // test-side channel posts the hint and no record changed, so this is the follower's reaction cost, not a writer's.
+  const stopHints = await measure(
+    "stop-record hints (synthetic)",
+    `${N(200)} data_changed [sync_state] hints posted 5 ms apart by a test-side channel in another page; the record itself is unchanged`,
+    async () => {
+      await second.evaluate(
+        async ({ account, n }) => {
+          const channel = new BroadcastChannel("atlas-sync");
+          for (let i = 0; i < n; i += 1) {
+            channel.postMessage({
+              type: "data_changed",
+              account,
+              stores: ["sync_state"],
+            });
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          channel.close();
+        },
+        { account: ACCOUNT, n: N(200) },
+      );
+    },
+  );
+  // (b) Receipts: the leader's outbox takes 200 drafts and drains them against the stub (each enqueue and each answer is a hint).
+  const receipts = await measure(
+    "drafts and receipts",
+    `${N(200)} drafts enqueued on the leader page, then drained at maxInFlight 1 against the stub: each enqueue and each answer posts data_changed [drafts, pending_effects/resource_versions]`,
+    async () => {
+      await leaderPage.evaluate(
+        async ({ account, n }) => {
+          const data = window.__atlasData;
+          if (!data) throw new Error("no harness");
+          await data.startOutbox(account, { start: false });
+          for (let i = 0; i < n; i += 1) {
+            const id = crypto.randomUUID();
+            await data.enqueue({
+              endpoint: "/commands",
+              targets: [
+                {
+                  resourceId: id,
+                  role: "primary",
+                  basis: "resource",
+                  versionChecked: false,
+                  seedIfUntracked: 1,
+                },
+              ],
+              command: {
+                commands: [{ kind: "create_person", id, name: `P-13 ${i}` }],
+              },
+            });
+          }
+          data.beginOutbox();
+        },
+        { account: ACCOUNT, n: N(200) },
+      );
+      await expect
+        .poll(
+          () =>
+            leaderPage.evaluate(
+              async (a) =>
+                (await window.__atlasData?.queue(a))?.every(
+                  (d) => d.status === "acknowledged",
+                ),
+              ACCOUNT,
+            ),
+          { timeout: 120_000, intervals: [25, 50, 100] },
+        )
+        .toBe(true);
+      await leaderPage.evaluate(() => window.__atlasData?.stopOutbox());
+    },
+  );
+
+  // The leader's catch-up throughput with two, one and no followers (the followers' pages are closed, never booted again).
+  const throughput: Record<string, number[]> = { "2": [throughputTwo] };
+  for (let run = 1; run < N(3); run += 1)
+    throughput["2"]?.push(await catchUp(N(200)));
+  await second.close();
+  throughput["1"] = [];
+  for (let run = 0; run < N(3); run += 1)
+    throughput["1"].push(await catchUp(N(200)));
+  await follower.close();
+  throughput["0"] = [];
+  for (let run = 0; run < N(3); run += 1)
+    throughput["0"].push(await catchUp(N(200)));
+  for (const [followers, samples] of Object.entries(throughput))
+    record(
+      `P-13 leader catch-up throughput (pages/s, ${N(200)} pages), ${followers} follower(s)`,
+      engine,
+      samples,
+      {
+        followers: Number(followers),
+        method:
+          "a bounded catch-up of the FIXTURE leader, 5 ms synthetic server latency; each follower page runs the production tree and the production controller (startGate) with its outbox facade",
+      },
+    );
+  write(`follower-reads.${engine}.json`, {
+    id: "P-13",
+    engine,
+    status: "measured",
+    label:
+      "a FIXTURE leader and healthy followers of one context (desktop); hints of a real leader's pages and a real outbox's drafts and answers, and SYNTHETIC stop-record hints; counted by test-side instrumentation in the follower page (BroadcastChannel observer, IDBDatabase.prototype.transaction: every reader of the page, the production tree's controller and outbox facade included) and by the harness gate controller's own counter (gateFactsReads, as E-C8: what that controller STARTS; 0 means it started no read for these hints)",
+    follower_cache_state_at_start: cacheShown,
+    conditions,
+    leader_throughput_pages_per_second: throughput,
+  });
+  write(`follower-reads-raw.${engine}.json`, {
+    id: "P-13 observed hints and transactions",
+    engine,
+    label:
+      "per condition, every atlas-sync hint the follower received (when, which stores) and every IndexedDB transaction it started (when, stores, mode, when it ended): the support each P-13 figure is recomputed from",
+    conditions: observed,
+  });
+  recordValue("P-13 follower reads", engine, {
+    conditions,
+    leader_throughput_pages_per_second: throughput,
+  });
+  // The measurement happened, and the instrumentation sees what it claims: the control heard nothing, the leader's pages reached the
+  // follower and made it read `sync_state`, and the stop-record hints reached it too.
+  expect(control.hints).toBe(0);
+  expect(leaderPages.hints).toBeGreaterThanOrEqual(pagesHint);
+  expect(leaderPages.sync_state_transactions).toBeGreaterThan(0);
+  expect(stopHints.hints).toBeGreaterThanOrEqual(N(200));
+  expect(receipts.hints).toBeGreaterThan(0);
 });

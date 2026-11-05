@@ -5,7 +5,7 @@
 //
 // Considered and not selected (recorded for the reviewer): `importContinuity` returning a basis while the session waits is equivalent (a
 // waiting session's press stores nothing before the token is read, and its Import is disabled); the park's microtask setting `parked`
-// at once (synchronously) is MU-2697's defect seen from the other side, so one is kept; the delivery's `held !== which` check is the
+// at once (synchronously) is MU-5170's defect seen from the other side, so one is kept; the delivery's `held !== which` check is the
 // session's own end (a released session's editor is ended, checked beside it), so removing one alone is equivalent.
 import { sub } from "./data-catalogue.mjs";
 
@@ -20,7 +20,7 @@ const T_CONT = "tests/data/outbox-continuity.test.ts";
 export const UNIT_13B_R9 = [
   // ---- R7c: only a read made for the showing verifies it -------------------------------------------------------------------------
   {
-    id: "MU-2688",
+    id: "MU-5161",
     title:
       "WEB-13b R7c (revision 9): a publication that agrees with the basis verifies a waiting session (the old shortcut restored)",
     file: KEPT,
@@ -35,7 +35,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2689",
+    id: "MU-5162",
     title:
       "WEB-13b R7c (revision 9): with no basis, any witness the showing's read finds verifies it (a later history adopted)",
     file: KEPT,
@@ -51,7 +51,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2690",
+    id: "MU-5163",
     title:
       "WEB-13b R7c (revision 9): a read whose service ended before it landed verifies the showing",
     file: KEPT,
@@ -65,7 +65,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2691",
+    id: "MU-5164",
     title:
       "WEB-13b R7c (revision 9): a read that failed is never asked again (the session waits for good)",
     file: KEPT,
@@ -75,7 +75,7 @@ export const UNIT_13B_R9 = [
       sub(t, "    if (which.ticket === ticket) which.verifying = false;\n", ""),
   },
   {
-    id: "MU-2692",
+    id: "MU-5165",
     title:
       "WEB-13b R7c (revision 9): the showing's read that finds the cache known invalid does not end it (its witness alone compared)",
     file: KEPT,
@@ -89,7 +89,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2693",
+    id: "MU-5166",
     title:
       "WEB-13b R7c (revision 9): the showing's read accepts a witness below its basis (another history taken for the same)",
     file: KEPT,
@@ -103,7 +103,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2694",
+    id: "MU-5167",
     title:
       "WEB-13b R7c (revision 9): the read delivered while the session is hidden again verifies it (its showing is over)",
     file: KEPT,
@@ -117,7 +117,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2695",
+    id: "MU-5168",
     title:
       "WEB-13b R7c (revision 9): its dialog remounted after it was really hidden shows it ready (no read for the showing)",
     file: KEPT,
@@ -131,7 +131,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2696",
+    id: "MU-5169",
     title:
       "WEB-13b R7c (revision 9): Strict Mode's hide and show in one turn is a hiding (every dialog waits at its own mount)",
     file: KEPT,
@@ -140,7 +140,7 @@ export const UNIT_13B_R9 = [
     patch: (t) => sub(t, "  if (!which.parked) return;\n", ""),
   },
   {
-    id: "MU-2697",
+    id: "MU-5170",
     title:
       "WEB-13b R7c (revision 9, C3): a session whose observed service ended never observes the page's next service of its database",
     file: KEPT,
@@ -150,7 +150,7 @@ export const UNIT_13B_R9 = [
     patch: (t) => sub(t, "  rebind(which, context.service ?? null);\n", ""),
   },
   {
-    id: "MU-2698",
+    id: "MU-5171",
     title:
       "WEB-13b R7c (revision 9, C3): the opening read of an observation begun after the hiding is taken as its basis",
     file: KEPT,
@@ -165,7 +165,7 @@ export const UNIT_13B_R9 = [
   },
   // ---- C2: the enqueue's own transaction compares the history ---------------------------------------------------------------------
   {
-    id: "MU-2699",
+    id: "MU-5172",
     title:
       "WEB-13b C2 (revision 9): W2 does not compare the history a request states (a peer's invalidation before the enqueue is missed)",
     file: PLANS,
@@ -180,7 +180,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2700",
+    id: "MU-5173",
     title:
       "WEB-13b C2 (revision 9): W2 compares the history before recognising a duplicate (an admitted save's retry refused)",
     file: PLANS,
@@ -198,7 +198,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2701",
+    id: "MU-5174",
     title:
       "WEB-13b C2 (revision 9): the history compares only the witness (another incarnation's equal number passes)",
     file: PLANS,
@@ -212,7 +212,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2702",
+    id: "MU-5175",
     title:
       "WEB-13b C2 (revision 9): a witness the singleton cannot establish is taken for the stated one",
     file: PLANS,
@@ -226,7 +226,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2703",
+    id: "MU-5176",
     title:
       "WEB-13b C2 (revision 9): the request's snapshot drops the history (no attempt compares it)",
     file: MODEL,
@@ -241,7 +241,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2704",
+    id: "MU-5177",
     title:
       "WEB-13b C2 (revision 9): the request's snapshot shares the caller's history object (a later change of it is compared)",
     file: MODEL,
@@ -256,7 +256,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2705",
+    id: "MU-5178",
     title:
       "WEB-13b C2 (revision 9): a malformed history is accepted as the caller's (validateRequest does not check it)",
     file: MODEL,
@@ -270,7 +270,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2706",
+    id: "MU-5179",
     title:
       "WEB-13b C2 (revision 9): Import does not state the history its session was verified against",
     file: DIALOG,
@@ -285,7 +285,7 @@ export const UNIT_13B_R9 = [
       ),
   },
   {
-    id: "MU-2707",
+    id: "MU-5180",
     title:
       "WEB-13b C2 (revision 9): an `expired` refusal leaves the session and its dialog open (a dead session's input offered again)",
     file: DIALOG,

@@ -13,7 +13,7 @@
 //   tree, so in the component world every service change also unmounts it (a new panel remembers nothing either way); no reachable schedule
 //   distinguishes the patch. The per-service key stays as defence in depth.
 //
-// Revision 24 (review 28 F28-1) re-anchored MU-2763, MU-2765, MU-2766, MU-2767, MU-2768 and MU-2769 at the corrected code: `remember`,
+// Revision 24 (review 28 F28-1) re-anchored MU-5227, MU-5229, MU-5230, MU-5231, MU-5232 and MU-5233 at the corrected code: `remember`,
 // `forget`, `drawn` and `settled` became `memory.remember`/`retire`, `drawnAt`/`settledAt`, and the per-service history became
 // `seen.byPage`. Each restores the SAME defect as before and keeps its title and oracle (`expect`).
 import { sub } from "./data-catalogue.mjs";
@@ -26,7 +26,7 @@ const DEPARTED_RETURN =
 
 export const UNIT_13B_R23 = [
   {
-    id: "MU-2762",
+    id: "MU-5226",
     title:
       "WEB-13b F27-1 (revision 23): the original defect — a remembered review missing from the current page is said to be gone without asking the cache for it",
     file: PANEL,
@@ -36,7 +36,7 @@ export const UNIT_13B_R23 = [
     patch: (t) => sub(t, DEPARTED_RETURN, "  return <GoneItem id={id} />;\n"),
   },
   {
-    id: "MU-2763",
+    id: "MU-5227",
     title:
       "WEB-13b F27-1 (revision 23): the original defect's other half — every FETCHED unresolved review is remembered, shown or not",
     file: PANEL,
@@ -50,7 +50,7 @@ export const UNIT_13B_R23 = [
       ),
   },
   {
-    id: "MU-2764",
+    id: "MU-5228",
     title:
       "WEB-13b F27-1 (revision 23): an unanswered membership read (loading, held, no service) is taken as 'the cache holds none'",
     file: PANEL,
@@ -64,7 +64,7 @@ export const UNIT_13B_R23 = [
       ),
   },
   {
-    id: "MU-2765",
+    id: "MU-5229",
     title:
       "WEB-13b F27-1 (revision 23): a remembered review published resolved off its page is not forgotten (a later deletion says it is gone)",
     file: PANEL,
@@ -78,7 +78,7 @@ export const UNIT_13B_R23 = [
       ),
   },
   {
-    id: "MU-2766",
+    id: "MU-5230",
     title:
       "WEB-13b F27-1 (revision 23): a LOCAL acknowledgement (the merged overlay) is taken as the published resolution and forgets the review",
     file: PANEL,
@@ -92,7 +92,7 @@ export const UNIT_13B_R23 = [
       ),
   },
   {
-    id: "MU-2767",
+    id: "MU-5231",
     title:
       "WEB-13b F27-1 (revision 23): a card is remembered before it draws its own reading (shown only as loading)",
     file: PANEL,
@@ -106,7 +106,7 @@ export const UNIT_13B_R23 = [
       ),
   },
   {
-    id: "MU-2768",
+    id: "MU-5232",
     title:
       "WEB-13b F27-1 (revision 23): a card whose own reading sees the published resolution does not forget it (the list's later removal says gone)",
     file: PANEL,
@@ -120,7 +120,7 @@ export const UNIT_13B_R23 = [
       ),
   },
   {
-    id: "MU-2769",
+    id: "MU-5233",
     title:
       "WEB-13b F27-1 (revision 23): what the panel showed is remembered for every page as one (not by the page's cursor)",
     file: PANEL,
@@ -137,12 +137,12 @@ export const UNIT_13B_R23 = [
 
 /**
  * Real-engine mutant (one isolated whole-mutant job, all three browsers, its own unmutated control): the original F27-1 defect again (the
- * same patch as MU-2762), judged by the revision-23 case of `fixture.calendar-reviews.spec.ts`, where a sync page publishes a review whose
+ * same patch as MU-5226), judged by the revision-23 case of `fixture.calendar-reviews.spec.ts`, where a sync page publishes a review whose
  * id sorts first and the 100th shown review moves to page two.
  */
 export const ENGINE_13B_R23 = [
   {
-    id: "MU-2770",
+    id: "MU-5234",
     title:
       "WEB-13b F27-1 (revision 23): (REAL ENGINE) the original defect — a remembered review missing from the current page is said to be gone",
     file: PANEL,

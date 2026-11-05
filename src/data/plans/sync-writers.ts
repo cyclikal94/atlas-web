@@ -5,6 +5,7 @@ import {
   invalidateOperation,
   onLocalWriteSuccess,
 } from "../model/retry";
+import { stageOf } from "../model/segmented-sync";
 import {
   atFloor,
   type DeviceSignals,
@@ -85,6 +86,10 @@ export type CaptureResult =
       limit: number;
       /** True when the previous attempt never finished (the crash-loop marker was found) and the ladder stepped down. */
       steppedDown: boolean;
+      /** WEB-09c: a segmented revision is staged at this position (the cursor is its continuation). */
+      staged: boolean;
+      /** WEB-09c: the ladder's stepped-down `max_changes`, if any. */
+      steppedChanges: number | null;
     }
   | {
       kind: "gated";
@@ -171,7 +176,12 @@ export const captureRequest = singletonPlan<
         sizing = { ...sizing, attempt: null };
       } else {
         // A marker found here means the previous attempt did not finish: a tab killed for memory is the realistic failure.
-        sizing = nextSizing(sizing, { kind: "crashed_attempt" }).state;
+        sizing = nextSizing(
+          sizing,
+          { kind: "crashed_attempt" },
+          DATA_CONFIG,
+          sizing.attempt.max_changes ?? null,
+        ).state;
         steppedDown = true;
       }
     }
@@ -266,6 +276,8 @@ export const captureRequest = singletonPlan<
         recoveryGeneration: sync.recovery_generation,
         limit: Math.min(sizing.limit, DATA_CONFIG.syncLimitMax),
         steppedDown,
+        staged: stageOf(sync) !== null,
+        steppedChanges: sizing.max_changes ?? null,
       },
     };
   },
@@ -274,7 +286,14 @@ export const captureRequest = singletonPlan<
 // ---- W16 ----------------------------------------------------------------------------------------------------------------
 /** The crash-loop marker (decision D-09): written durably before a page of at least `markerMinBytes` is processed. */
 export const recordSizingAttempt = singletonPlan<
-  { incarnationId: string; id: string; limit: number; startedAt: number },
+  {
+    incarnationId: string;
+    id: string;
+    limit: number;
+    startedAt: number;
+    /** WEB-09c: the request's `max_changes`, when it carried one. */
+    maxChanges?: number | null;
+  },
   null,
   { written: boolean }
 >({
@@ -294,6 +313,9 @@ export const recordSizingAttempt = singletonPlan<
             id: input.id,
             limit: input.limit,
             started_at: input.startedAt,
+            ...(input.maxChanges == null
+              ? {}
+              : { max_changes: input.maxChanges }),
           },
         },
       },
@@ -335,7 +357,12 @@ export const retireSizingAttempt = singletonPlan<
  * (`retireSizingAttempt`), and an outcome recorded by a continuation that has been overtaken must not erase a newer attempt's.
  */
 export const recordSizingOutcome = singletonPlan<
-  { incarnationId: string; outcome: SizingOutcome },
+  {
+    incarnationId: string;
+    outcome: SizingOutcome;
+    /** WEB-09c: the failed request's `max_changes`, when it carried one (the ladder continues on it below `limit = 1`). */
+    segmented?: number | null;
+  },
   null,
   { action: SizingAction; sizing: SizingState } | { action: "none" }
 >({
@@ -346,7 +373,12 @@ export const recordSizingOutcome = singletonPlan<
   read: async () => null,
   decide: ({ sync, input }) => {
     if (sync === undefined) return { result: { action: "none" } };
-    const out = nextSizing(sync.sizing, input.outcome);
+    const out = nextSizing(
+      sync.sizing,
+      input.outcome,
+      DATA_CONFIG,
+      input.segmented ?? null,
+    );
     const sizing: SizingState = { ...out.state, attempt: sync.sizing.attempt };
     return {
       sync: { ...sync, sizing },
@@ -410,18 +442,20 @@ export const invalidateRecoveryPosition = guardedPlan<
     guards: ["INC", "CLS", "CAS", "GEN", "EPO"],
     quota: null,
   },
-  scope: ["cache_staging", "pending_effects"],
+  scope: ["cache_staging", "delta_staging", "pending_effects"],
   durability: "strict",
   // No read: the effects are walked in windows by `apply`, never prefetched.
   read: async () => null,
   decide: ({ sync, input }) => {
     const generation = sync.recovery_generation + 1;
     return {
-      writes: [w.clear("cache_staging")],
+      // WEB-09c: a revision being received in segments belongs to the abandoned position, so its staged words go with it.
+      writes: [w.clear("cache_staging"), w.clear("delta_staging")],
       sync: {
         ...sync,
         cache_status: "invalid",
         cursor: null,
+        delta_stage: null,
         recovery_generation: generation,
         // The invalidation witness (WEB-13b revision 8, R7b): committed with the invalidation it records, or not at all.
         cache_invalidation_seq: nextInvalidation(sync),

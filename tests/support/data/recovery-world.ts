@@ -1,4 +1,7 @@
-import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
+import {
+  createQuotaGuard,
+  type QuotaGuard,
+} from "../../../src/data/engine/quota-guard";
 import {
   createRecoveryJob,
   type RecoveryJob,
@@ -91,6 +94,8 @@ export interface RecoveryWorld extends PageWorld {
   markers: WriteFailureMarkers;
   markerStorage: FakeMarkerStorage;
   freeBytes: number | null;
+  /** The job's quota guard (R21-QUOTA, WEB-09c): a test can hold another writer's reservation against it while a response is in flight. */
+  quota: QuotaGuard;
   /** Called at each read of the free space (inside the quota check, before the issue check): a test can move a fact there. */
   beforeEstimate?: () => void;
   token: string;
@@ -131,6 +136,10 @@ export async function recoveryWorld(
     cacheStatus?: "valid" | "invalid" | "empty";
     displayed?: boolean;
     config?: RecoveryJobDeps["config"];
+    /** The device signals the job classifies (default: none, as in Firefox and WebKit). */
+    signals?: RecoveryJobDeps["signals"];
+    /** WEB-09c: whether the server is known to segment (`RecoveryJobDeps.segmentedCapable`); absent, as in production, it is not. */
+    segmentedCapable?: () => boolean;
   } = {},
 ): Promise<RecoveryWorld> {
   const base = await pageWorld({
@@ -209,6 +218,7 @@ export async function recoveryWorld(
     },
     now: () => EPOCH_BASE + world.time,
   });
+  out.quota = quota;
   const deps: RecoveryJobDeps = {
     identity: base.identity,
     view: {
@@ -351,7 +361,7 @@ export async function recoveryWorld(
       derivers: createKeyDerivers(),
     },
     quota,
-    signals: { hasStorageEstimate: true },
+    signals: options.signals ?? { hasStorageEstimate: true },
     channel: {
       post: (message) => {
         out.posted.push(message);
@@ -368,6 +378,9 @@ export async function recoveryWorld(
       },
     } as RecoveryJobDeps["trace"],
     elapsed: () => world.time,
+    ...(options.segmentedCapable
+      ? { segmentedCapable: options.segmentedCapable }
+      : {}),
     ...(options.config ? { config: options.config } : {}),
   };
   out.job = createRecoveryJob(deps);

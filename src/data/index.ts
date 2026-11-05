@@ -23,13 +23,18 @@ export type {
 export type { LeaderRole } from "./leader/election";
 export { getPageDataHost, type PageDataHost } from "./leader/page-host";
 export { markLeaderStarted } from "./leader/presence";
-export { type DataLeaderHandle, startDataLeader } from "./leader/start";
+export {
+  type DataLeaderHandle,
+  type DiagnosticSegmentation,
+  startDataLeader,
+} from "./leader/start";
 export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
   Continuity,
   EnqueueRequest,
+  ExpectedPredecessor,
   TargetNeeds,
   TargetSpec,
 } from "./model/outbox";
@@ -89,6 +94,7 @@ export type {
   DraftStatus,
   DraftWithCommand,
   Epoch,
+  FormRecoveryRow,
   JsonObject,
   LocalId,
   ProjectionPatch,
@@ -100,6 +106,7 @@ export type {
   DiscardOutcome,
   EditOutcome,
   EnqueueOutcome,
+  HandOff,
   Outbox,
   SupersedeOutcome,
 } from "./outbox/outbox";
@@ -115,17 +122,25 @@ export {
   createCommandRegistry,
   createConflictHandlerRegistry,
 } from "./outbox/registries";
+export type { FormCopiesPage, FormCopyCursor } from "./plans/form-copies";
+// A resource read with its parent (WEB-11a review 16): the shared policy editor's, so in a module of its own.
+export type { MergedUnder } from "./plans/merged-under";
 export type {
   ConflictPage,
   ListedResource,
   QueuePage,
   ResourcePage,
+  VisibleChildren,
 } from "./plans/outbox";
 // ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
 export type {
   CachePosition,
+  ChildPage,
+  FormCopiesUnder,
+  Inventory,
   LocalBasis,
   OutstandingByKindPage,
+  OutstandingCreatesPage,
   OutstandingCursor,
   OutstandingForResource,
   OutstandingPage,
@@ -136,10 +151,22 @@ export type {
   PendingCreatesPage,
   ResourceView,
 } from "./plans/pending-reads";
+// The conditional port of WEB-11a's held changes (form copies that are operations): only lazy screens import it.
+export {
+  type ConditionalApply,
+  type ConditionalEnd,
+  type ConditionalFormPort,
+  type ConditionalOperation,
+  type ConditionalPut,
+  createConditionalFormPort,
+  type FormRowRead,
+} from "./ports/conditional-form";
 export {
   createDataDeletionPorts,
   type DeletionPortsOptions,
 } from "./ports/deletion-ports";
+// A port over the account database's form copies: only lazy screens import it.
+export { createFormRecoveryPort } from "./ports/form-recovery";
 export type { Loadable } from "./store/port";
 // ---- the retained-account directory (WEB-08c, WF-SWITCH-01): only the switcher's lazy chunk imports it ---------------------------
 export {
@@ -147,11 +174,14 @@ export {
   type RetainedAccount,
   type RetainedListing,
 } from "./store/retained-accounts";
+// The applied server revision (WEB-11a's summary invalidation): only lazy screens import it.
+export { useAppliedRevision } from "./ui/applied-revision";
 export {
   type CacheLifetime,
   type CacheLifetimes,
   pageCacheLifetime,
 } from "./ui/cache-lifetime";
+export { useDraftWithCommand } from "./ui/draft-body";
 export {
   type DraftEvidence,
   readResourceViewNow,
@@ -163,15 +193,20 @@ export {
   type DataEnv,
   type DataEnvDeps,
 } from "./ui/env";
+export { useFormCopies } from "./ui/form-copies";
+export { useMergedUnder } from "./ui/merged-under";
 export {
   useAllOutstanding,
   useAllOutstandingByKind,
   useCachedResources,
   useCachePosition,
+  useChildPage,
   useDraftHeaders,
-  useDraftWithCommand,
+  useFormCopiesUnder,
+  useInventory,
   useOutstanding as useOutstandingResources,
   useOutstandingByKind,
+  useOutstandingCreates,
 } from "./ui/outstanding";
 // WEB-13b revision 8 (R7b): only the kept import (the calendars chunk) observes the page's cache itself.
 export {
@@ -204,6 +239,7 @@ export {
   useSharingDefaults,
   useStatusInputs,
   useSyncStatusModel,
+  useVisibleChildren,
 } from "./ui/react";
 export {
   type LocalRead,

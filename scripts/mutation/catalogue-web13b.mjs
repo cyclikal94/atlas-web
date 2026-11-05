@@ -37,10 +37,10 @@ const readEveryMount = (t) =>
     "  if (!live()) return;\n",
   );
 
-/** Unit mutants (layers L1a pure, L1b the production composition over the IndexedDB double), MU-2437..MU-2465 and MU-2470. */
+/** Unit mutants (layers L1a pure, L1b the production composition over the IndexedDB double), MU-5001..MU-5029 and MU-5034. */
 export const UNIT_13B = [
   {
-    id: "MU-2437",
+    id: "MU-5001",
     title:
       "WEB-13b §4.1: lines are counted with a trailing newline's empty segment (Rust `str::lines` drops it)",
     file: IMPORT_MODEL,
@@ -54,7 +54,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2438",
+    id: "MU-5002",
     title:
       "WEB-13b §4.1: the size is measured in characters, not UTF-8 bytes (a multibyte file under 1 MiB of characters passes)",
     file: IMPORT_MODEL,
@@ -68,7 +68,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2439",
+    id: "MU-5003",
     title:
       "WEB-13b §4.1: VEVENT lines are matched case-sensitively (a lower-case component is not counted)",
     file: IMPORT_MODEL,
@@ -84,7 +84,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2440",
+    id: "MU-5004",
     title:
       "WEB-13b §4.1: a 730-day window is refused (`>=` for `>`): coverage is inclusive",
     file: IMPORT_MODEL,
@@ -98,7 +98,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2441",
+    id: "MU-5005",
     title:
       "WEB-13b §4.1: a reversed window is accepted (the server answers `422 calendar_limit`)",
     file: IMPORT_MODEL,
@@ -112,7 +112,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2442",
+    id: "MU-5006",
     title:
       "WEB-13b §4.1: the envelope is measured as the text alone (JSON escaping can take a 1 MiB file over the 2 MiB route limit)",
     file: IMPORT_MODEL,
@@ -121,7 +121,7 @@ export const UNIT_13B = [
     patch: (t) => sub(t, "    JSON.stringify({", "    String({"),
   },
   {
-    id: "MU-2443",
+    id: "MU-5007",
     title:
       "WEB-13b §5.2: the import's terminal answers reclassify EVERY draft (a settings change's 502 fetch_failed is rejected)",
     file: ANSWERS,
@@ -131,7 +131,7 @@ export const UNIT_13B = [
       sub(t, "      draft.endpoint === IMPORT_ENDPOINT\n", "      true\n"),
   },
   {
-    id: "MU-2444",
+    id: "MU-5008",
     title:
       "WEB-13b §5.2: `409 stale_refresh` is not registered (an import that did not commit is retried under the same key for ever)",
     file: ANSWERS,
@@ -140,7 +140,7 @@ export const UNIT_13B = [
     patch: staleRetried,
   },
   {
-    id: "MU-2445",
+    id: "MU-5009",
     title:
       "WEB-13b §5.2 (the seam): any reclassification of an Atlas-coded retried answer is honoured as terminal (`retry`, `version_conflict`)",
     file: DISPATCHER,
@@ -154,7 +154,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2446",
+    id: "MU-5010",
     title:
       "WEB-13b §5.2 (the seam): the generic retry never consults a handler (an import's 502 fetch_failed is retried)",
     file: DISPATCHER,
@@ -169,7 +169,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2447",
+    id: "MU-5011",
     title:
       "WEB-13b §4.2: the import recipe does not require edit access (a known view-only source is imported into)",
     file: "src/features/calendars/model/commands.ts",
@@ -183,7 +183,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2448",
+    id: "MU-5012",
     title:
       "WEB-13b E6: a row asking for its settings change loads a newer import's body (1 MiB) again",
     file: PENDING_READS,
@@ -197,7 +197,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2449",
+    id: "MU-5013",
     title:
       "WEB-13b §4.2: the Imports list's header read keeps superseded drafts",
     file: PENDING_READS,
@@ -211,7 +211,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2450",
+    id: "MU-5014",
     title:
       "WEB-13b R15: `create_task` sends `anchor: null` when there is none (an absent field is omitted, never null)",
     file: "src/features/tasks/model/commands.ts",
@@ -225,7 +225,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2451",
+    id: "MU-5015",
     title:
       "WEB-13b R15: an anchored create projects a first occurrence from its schedule (the server makes none)",
     file: TASK_FORM,
@@ -239,7 +239,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2452",
+    id: "MU-5016",
     title:
       "WEB-13b PRODUCT-DECISIONS: a repeating save still sends the kept anchor (the server answers 422)",
     file: TASK_FORM,
@@ -253,7 +253,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2453",
+    id: "MU-5017",
     title:
       "WEB-13b §4.3: title-contains is sent for a person date (the hidden value is not omitted on save)",
     file: ANCHOR_MODEL,
@@ -267,7 +267,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2454",
+    id: "MU-5018",
     title:
       "WEB-13b §4.3: a seconds offset is allowed for an untimed (all-day) event (the whole command fails at reconcile)",
     file: ANCHOR_MODEL,
@@ -281,7 +281,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2455",
+    id: "MU-5019",
     title:
       "WEB-13b §4.3: a year-less date field may be saved as not annual (the server answers 422)",
     file: ANCHOR_MODEL,
@@ -295,7 +295,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2456",
+    id: "MU-5020",
     title:
       "WEB-13b §4.3: the offset's time is sent as typed (`HH:MM`; the contract requires `HH:MM:SS`)",
     file: ANCHOR_MODEL,
@@ -310,7 +310,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2457",
+    id: "MU-5021",
     title:
       "WEB-13b §4.5: resolve_review is sent on version 1 instead of the review's own base",
     file: REVIEW_MODEL,
@@ -324,7 +324,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2458",
+    id: "MU-5022",
     title:
       "WEB-13b D-13b-10: Acknowledge is enqueued without the card's observation (a review that changed between showing and pressing is acknowledged blindly)",
     file: "src/features/calendars/ReviewPanel.tsx",
@@ -334,7 +334,7 @@ export const UNIT_13B = [
       sub(t, "      view.value.observation,\n", "      undefined,\n"),
   },
   {
-    id: "MU-2459",
+    id: "MU-5023",
     title:
       "WEB-13b D-13b-12: the private generic review looks its task up and names it",
     file: "src/features/calendars/ReviewPanel.tsx",
@@ -358,7 +358,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2460",
+    id: "MU-5024",
     title:
       "WEB-13b D-13b-11: the seed from a review overrides a correction session that already holds input",
     file: "src/features/tasks/detail/CorrectionDialog.tsx",
@@ -372,7 +372,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2461",
+    id: "MU-5025",
     title:
       "WEB-13b §4.5: `?move=` is left in the address once the correction has opened (Back or a reload opens it again)",
     file: "src/features/tasks/detail/TaskDetail.tsx",
@@ -386,7 +386,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2462",
+    id: "MU-5026",
     title:
       "WEB-13b D-13b-9: the binding is read again on every mount (a 403's remount reads again)",
     file: "src/features/tasks/detail/anchor-binding.ts",
@@ -395,7 +395,7 @@ export const UNIT_13B = [
     patch: readEveryMount,
   },
   {
-    id: "MU-2463",
+    id: "MU-5027",
     title:
       "WEB-13b §4.2: Import events is offered on a view-only source (the server answers 403)",
     file: "src/features/calendars/import-action.tsx",
@@ -410,7 +410,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2464",
+    id: "MU-5028",
     title:
       "WEB-13b §4.2: the import dialog has no synchronous latch (a double press stores two imports)",
     // Revision 6 (R7): re-expressed in the editing session, which now holds the one-save-at-a-time latch (same defect).
@@ -425,7 +425,7 @@ export const UNIT_13B = [
       ),
   },
   {
-    id: "MU-2465",
+    id: "MU-5029",
     title:
       "WEB-13b §4.3: the anchor panel's submission reaches the new-task form around it (Save anchor saves the task)",
     file: "src/features/calendars/AnchorDialog.tsx",
@@ -434,7 +434,7 @@ export const UNIT_13B = [
     patch: (t) => sub(t, "            event.stopPropagation();\n", ""),
   },
   {
-    id: "MU-2470",
+    id: "MU-5034",
     title:
       "WEB-13b (I-ANC1 finding): the binding is read for a task the server does not have yet (the 404 is kept for the visit)",
     file: "src/features/tasks/detail/AnchorSection.tsx",
@@ -450,10 +450,10 @@ export const UNIT_13B = [
   },
 ];
 
-/** Real-engine mutants (one isolated whole-mutant job each, all three browsers, its own unmutated control), MU-2466..MU-2469. */
+/** Real-engine mutants (one isolated whole-mutant job each, all three browsers, its own unmutated control), MU-5030..MU-5033. */
 export const ENGINE_13B = [
   {
-    id: "MU-2466",
+    id: "MU-5030",
     title:
       "WEB-13b case 2: (REAL ENGINE) the import does not wait for its source's pending create (it is sent before the create's receipt)",
     file: "src/features/calendars/model/commands.ts",
@@ -468,7 +468,7 @@ export const ENGINE_13B = [
       ),
   },
   {
-    id: "MU-2467",
+    id: "MU-5031",
     title:
       "WEB-13b §5.2: (REAL ENGINE) `409 stale_refresh` of an import is retried (the harness and page host registries both lose it)",
     file: ANSWERS,
@@ -478,7 +478,7 @@ export const ENGINE_13B = [
     patch: staleRetried,
   },
   {
-    id: "MU-2468",
+    id: "MU-5032",
     title:
       "WEB-13b D-13b-4: (REAL ENGINE) the PAGE HOST does not register the import's terminal answers (the production leader retries them)",
     file: "src/app/commands.ts",
@@ -488,14 +488,14 @@ export const ENGINE_13B = [
     patch: (t) => sub(t, "    registerImportAnswers(host.conflicts);\n", ""),
   },
   {
-    id: "MU-2469",
+    id: "MU-5033",
     title:
       "WEB-13b D-13b-9: (REAL ENGINE) the binding is read again after the session's 403 re-check remounts the tree (neither the visit's read nor the refusal is kept)",
     file: "src/features/tasks/detail/anchor-binding.ts",
     spec: "tests/e2e/fixture.calendar-anchors.spec.ts",
     grep: "E-ANC2: .*a 403 on the read",
     expect: /E-ANC2:/,
-    // Two independent guards stop a re-read after a 403 (the visit's read, the refusal noted on arrival): the unit MU-2462 removes the
+    // Two independent guards stop a re-read after a 403 (the visit's read, the refusal noted on arrival): the unit MU-5026 removes the
     // first with a successful read; natively a 403's remount needs both gone (one alone was equivalent: run 2 of the author's driver).
     patch: (t) =>
       sub(

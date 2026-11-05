@@ -5,13 +5,14 @@ import { Dialog } from "../../components/ui/dialog";
 import {
   type Policy,
   type ResourceId,
-  useCachedResource,
   useDraftQueue,
+  useMergedUnder,
 } from "../../data";
 import { AudienceSummary } from "./AudienceSummary";
 import {
   type DirectoryEntry,
   type ManagementCommand,
+  type PolicyState,
   type SharingFailure,
   type SharingResult,
   untilSent,
@@ -58,6 +59,11 @@ export interface ResourcePolicyEditorProps {
   onOpenChange(open: boolean): void;
   /** After a confirmed save: the receipt's revision. The editor closes itself unless this returns `false`. */
   onSaved?(result: { revision: number }): boolean | undefined;
+  /**
+   * Each read of the policy that answered: the policy and version the server holds (never the draft being edited, never a receipt's
+   * revision). A host that shows the resource's audience itself learns it here (WEB-11a review 23, R23.1).
+   */
+  onPolicyRead?(read: PolicyState): void;
 }
 
 export function ResourcePolicyEditor(props: ResourcePolicyEditorProps) {
@@ -104,17 +110,23 @@ function PolicyEditorDialog({
   resourceId,
   onOpenChange,
   onSaved,
+  onPolicyRead,
 }: ResourcePolicyEditorProps) {
   const env = useSharingEnv();
   const announcer = useAnnouncer();
-  const cached = useCachedResource(resourceId);
-  const merged = cached.status === "ready" ? cached.value.merged : null;
-  const parentId = merged?.parent_id ?? null;
-  const parent = useCachedResource(parentId ?? "");
-  const parentLabel =
-    parentId !== null && parent.status === "ready"
-      ? (parent.value.merged?.label ?? null)
+  // The resource and the parent it names as ONE read saw them (WEB-11a review 16, DA16-S1). A resource under a parent (a person's field)
+  // is shown only while that same read holds the parent: a parent read separately may answer for an earlier commit than the resource,
+  // and PPL-5 hides a field whose person is not visible. Until then nothing of it is named, read or offered, here or at its deep link.
+  const cached = useMergedUnder(resourceId);
+  const read = cached.status === "ready" ? cached.value : null;
+  const resource = read?.resource.merged ?? null;
+  const parentId = resource?.parent_id ?? null;
+  const merged =
+    resource !== null && (parentId === null || read?.parent?.base)
+      ? resource
       : null;
+  const parentLabel =
+    parentId === null ? null : (read?.parent?.merged?.label ?? null);
   const queue = useDraftQueue();
   const waiting =
     queue.status === "ready"
@@ -155,18 +167,20 @@ function PolicyEditorDialog({
   const sending = useRef(false);
   const uncertain = useRef<Attempt | null>(null);
   const mounted = useRef(true);
-  useEffect(
-    () => () => {
+  // Set on every mount: development's replay of every effect runs this cleanup and then mounts again (WEB-11a review 23).
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   // A (re)read of the policy is the base of the edit: the draft starts from it, and a Reload discards the local edits. The FIRST read
   // after reopening shows a draft the sync control kept instead, at the version it was composed against (Save stays guarded by it).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the draft is reset only when a new read lands (a new load object)
   useEffect(() => {
     if (policyLoad.status !== "ready") return;
+    onPolicyRead?.(policyLoad.value);
     const kept = restore.current;
     restore.current = undefined;
     if (kept !== undefined) {

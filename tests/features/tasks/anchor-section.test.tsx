@@ -610,7 +610,7 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
     }),
   });
   async function openChange(t: Mounted) {
-    // Asserted present (revision 13): a panel left open hides the section, which must fail as an assertion, not a query error (MU-2500).
+    // Asserted present (revision 13): a panel left open hides the section, which must fail as an assertion, not a query error (MU-5064).
     fireEvent.click(
       present(
         within(section() as HTMLElement).queryByRole("button", {

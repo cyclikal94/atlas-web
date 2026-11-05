@@ -1786,7 +1786,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
     ctl.hold(`view:${rid(1099)}`);
     await publish(w, 1099, true, 2);
     // From the hold on, the card's reading answers with what it had (1099 unresolved, version 1) and its publications wait; the card
-    // goes with the list's news, so whether one was waiting by then is not asserted. MU-2775 removes the list's retirement.
+    // goes with the list's news, so whether one was waiting by then is not asserted. MU-5239 removes the list's retirement.
     // The page's list says resolved: the card goes (its own reading never said so).
     expect(item(1099)).toBeNull();
     await remove(w, 1099);

@@ -3,9 +3,12 @@ import { describe, expect, test } from "vitest";
 import { DATA_CONFIG, maxResponseBytesFor } from "../../src/data/model/config";
 import {
   accountDatabaseName,
-  COMPOSITION_VERSION,
+  COMPOSITION_BARRIER_VERSION,
   D_INDEX_NAMES,
+  DELTA_STAGING_VERSION,
   DEXIE_SCHEMA,
+  DEXIE_SCHEMA_V1,
+  DEXIE_SCHEMA_V3,
   KEY_PATHS,
   parseSchema,
   SCHEMA_VERSION,
@@ -19,10 +22,27 @@ import {
 
 describe("F-A1: the schema constants equal plan 5.0.1", () => {
   test("ten stores (the nine of version 1 and `draft_commands`), in version 2, and the database name is exactly atlas-<account>", () => {
+    // WEB-09c ADAPTATION (labelled, BOUNDED-SYNC-PAGINATION-20261027): version 4 adds ONE store, `delta_staging`. The original ten-store
+    // assertion is kept unchanged for the version 2-3 schema, and the current schema is asserted to be exactly those ten plus that one.
+    expect(Object.keys(DEXIE_SCHEMA_V3).sort()).toEqual(
+      [
+        "cache",
+        "cache_staging",
+        "draft_commands",
+        "drafts",
+        "form_recovery",
+        "materialise_sequences",
+        "pending_effects",
+        "reminder_firings",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
     expect([...STORE_NAMES].sort()).toEqual(
       [
         "cache",
         "cache_staging",
+        "delta_staging",
         "draft_commands",
         "drafts",
         "form_recovery",
@@ -40,21 +60,40 @@ describe("F-A1: the schema constants equal plan 5.0.1", () => {
     );
   });
 
-  // ADAPTED (WEB-13b revision 8, review 8 R7b): the current version was 3 (the composition generation's barrier); version 3 is now named
-  // `COMPOSITION_VERSION` and is still declared, and version 4 is the same barrier for the cache's invalidation witness. The original
-  // assertions on version 3 are kept on the constant that now holds it.
-  test("version 3 (WEB-10a revision 3) is the composition-generation barrier: it changes no store (adapted, WEB-13b revision 8)", () => {
-    expect(COMPOSITION_VERSION).toBe(3);
-    expect(SPLIT_BODIES_VERSION).toBeLessThan(COMPOSITION_VERSION);
+  test("version 3 (WEB-10a revision 3) is the composition-generation barrier: it changes no store", () => {
+    // WEB-09c ADAPTATION (labelled): the barrier is still version 3 and still changes no store (version 2 and 3 declare the same
+    // schema); the CURRENT version is 4, which adds `delta_staging` and nothing else (next test).
+    // BASE-MERGE NOTE (WEB-13b, 5 November 2026): unchanged; the current version is now 5 (below), still above the barrier.
+    expect(COMPOSITION_BARRIER_VERSION).toBe(3);
+    expect(SPLIT_BODIES_VERSION).toBeLessThan(COMPOSITION_BARRIER_VERSION);
+    expect(COMPOSITION_BARRIER_VERSION).toBeLessThan(SCHEMA_VERSION);
   });
 
-  test("version 4 (WEB-13b revision 8) is the invalidation-witness barrier: it changes no store, after the composition barrier", () => {
-    expect(SCHEMA_VERSION).toBe(4);
-    expect(COMPOSITION_VERSION).toBeLessThan(SCHEMA_VERSION);
+  test("version 4 (WEB-09c) adds exactly `delta_staging` (id, by revision) and changes no other store; version 1 never had it", () => {
+    // BASE-MERGE ADAPTATION (labelled, WEB-13b, 5 November 2026): `expect(SCHEMA_VERSION).toBe(4)` is false by design once WEB-13b's
+    // invalidation-witness barrier follows as version 5. Its intent, that version 4 is the version adding `delta_staging`, is kept on the
+    // constant that now names it; the adapter declares version 5 with the same stores (`DEXIE_SCHEMA`), and the native E-CG2 reads them.
+    expect(DELTA_STAGING_VERSION).toBe(4);
+    expect(COMPOSITION_BARRIER_VERSION).toBeLessThan(DELTA_STAGING_VERSION);
+    const { delta_staging, ...rest } = DEXIE_SCHEMA;
+    expect(delta_staging).toBe("id, revision");
+    expect(rest).toEqual(DEXIE_SCHEMA_V3);
+    expect(Object.keys(DEXIE_SCHEMA_V1)).not.toContain("delta_staging");
+    expect(KEY_PATHS.delta_staging).toBe("id");
+  });
+
+  // ADAPTED (WEB-13b revision 8, review 8 R7b; renumbered at the base merge of 5 November 2026): WEB-13b's branch numbered this barrier 4
+  // and asserted `expect(SCHEMA_VERSION).toBe(4)` with the composition barrier before it. The accepted base's version 4 is WEB-09c's
+  // `delta_staging`, so the witness barrier is version 5, after it; the original assertions are kept against the version now before it.
+  test("version 5 (WEB-13b revision 8) is the invalidation-witness barrier: it changes no store, after the composition barrier and delta staging", () => {
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(COMPOSITION_BARRIER_VERSION).toBeLessThan(SCHEMA_VERSION);
+    expect(DELTA_STAGING_VERSION).toBeLessThan(SCHEMA_VERSION);
   });
 
   test("the Dexie strings and the design's index names (table of 5.0.1)", () => {
-    expect(DEXIE_SCHEMA).toEqual({
+    // WEB-09c ADAPTATION (labelled): the table of 5.0.1 is the version 2-3 schema, unchanged; version 4's one addition is asserted above.
+    expect(DEXIE_SCHEMA_V3).toEqual({
       cache: "id, kind, parent_id, [kind+kind_date]",
       cache_staging:
         "id, kind, parent_id, [kind+kind_date], recovery_generation",

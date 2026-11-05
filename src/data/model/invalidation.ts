@@ -8,7 +8,7 @@ import type { SyncStateRow } from "./types";
  * the row). So two reads of one incarnation that give the same number saw no invalidation between them, whatever `recovery_generation`
  * did, which a first fill or a restart moves too.
  *
- * Absent: 0 (a database written before it existed; the account schema's version 4 is the barrier that keeps an older build, which
+ * Absent: 0 (a database written before it existed; the account schema's version 5 is the barrier that keeps an older build, which
  * invalidates without moving it, from writing beside a page that relies on it). Not a non-negative safe integer: unknown (null), never
  * guessed; a writer then starts again from 1, which no earlier reading could have agreed with. A database deleted and created again
  * restarts at 0 under a new `incarnation_id`, so a reader compares the pair, never the number alone.
