@@ -205,10 +205,26 @@ function invocation(
   let index = 0;
   while (index < words.length && RESERVED.has(words[index] ?? "")) index += 1;
   const assignments = new Map<string, string>();
-  for (; index < words.length; index += 1) {
-    const match = ASSIGNMENT.exec(words[index] ?? "");
-    if (!match) break;
-    assignments.set(match[1] ?? "", match[2] ?? "");
+  const assign = () => {
+    for (; index < words.length; index += 1) {
+      const match = ASSIGNMENT.exec(words[index] ?? "");
+      if (!match) break;
+      assignments.set(match[1] ?? "", match[2] ?? "");
+    }
+  };
+  assign();
+  // Pass-through runners (base merge of 5 November 2026: scripts/smoke-image.sh writes `run_child env NAME=value … pnpm exec playwright
+  // test …`): `run_child` is that script's own function running "$@" in a process group of its own, and `env NAME=value …` gives those
+  // assignments to the command it runs, as a prefix would. Any option of `env` (`-i`, `-u NAME`, …) changes that environment in a way
+  // this reader does not model, so it throws instead of guessing.
+  while (words[index] === "run_child" || words[index] === "env") {
+    const wrapper = words[index];
+    index += 1;
+    if (wrapper === "env") {
+      if ((words[index] ?? "").startsWith("-"))
+        throw new UnsupportedShell(`env option ${words[index]}`);
+      assign();
+    }
   }
   const argv = words.slice(index);
   const at = argv.findIndex(

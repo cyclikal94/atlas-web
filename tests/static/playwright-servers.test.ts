@@ -204,10 +204,12 @@ describe("the smoke scripts' browser runs need no build they do not have", () =>
 
   test("the image smoke's inventory and browser runs are both found, each with the composed origin and the same cases (R36)", () => {
     const image = invocations.filter(({ file }) => file === "smoke-image.sh");
-    expect(image.map(({ line, endLine }) => endLine > line)).toEqual([
-      true,
-      true,
-    ]);
+    // ADAPTATION (base merge of 5 November 2026, labelled for review): this assertion was `image.map(({line, endLine}) => endLine > line)`
+    // equal to `[true, true]`, because WEB-14a's script continued each run over several lines (the R36 layout the physical-line reader
+    // lost). Accepted main's script (WEB-09c F-PACK-COMPOSE) writes each run on one line as `run_child env ATLAS_PRODUCTION_URL="$ORIGIN"
+    // … pnpm exec playwright test …`. The intent kept: exactly the inventory and the run are found in the script as written, each supplied
+    // the composed origin through the shell layout actually used; the continued layout stays covered by the controls below.
+    expect(image).toHaveLength(2);
     const [inventory, run] = image;
     expect(inventory?.args).toContain("--list");
     expect(run?.args).not.toContain("--list");
@@ -337,6 +339,46 @@ describe("reading a script's Playwright runs (R36's controls)", () => {
         'ATLAS_PRODUCTION_URL="$ORIGIN" pnpm exec playwright test \\\n  --project=production-chromium --project=fixture-chromium',
       ),
     ).toEqual([{ supplied: ["production"], missing: ["fixture"] }]);
+  });
+
+  test("a pass-through runner keeps the environment it is given: `run_child` and `env NAME=value` (base merge of 5 November 2026)", () => {
+    const [inventory] = runs(
+      'run_child env ATLAS_PRODUCTION_URL="$ORIGIN" PLAYWRIGHT_JSON_OUTPUT_FILE="$inventory" pnpm exec playwright test --project=production-chromium --list > "$x" 2>&1 || fail "x"',
+    );
+    expect([...(inventory?.assignments.entries() ?? [])]).toEqual([
+      ["ATLAS_PRODUCTION_URL", "$ORIGIN"],
+      ["PLAYWRIGHT_JSON_OUTPUT_FILE", "$inventory"],
+    ]);
+    expect(inventory?.args).toEqual([
+      "--project=production-chromium",
+      "--list",
+    ]);
+    expect(
+      missing(
+        'if run_child env ATLAS_PRODUCTION_URL="$ORIGIN" pnpm exec playwright test --project=production-chromium; then ok; fi',
+      ),
+    ).toEqual([{ supplied: ["production"], missing: [] }]);
+    // A prefix before the runner is the command's environment too; a runner with no assignment supplies nothing.
+    expect(
+      missing(
+        'ATLAS_PRODUCTION_URL="$ORIGIN" run_child pnpm exec playwright test --project=production-chromium',
+      ),
+    ).toEqual([{ supplied: ["production"], missing: [] }]);
+    for (const source of [
+      "run_child pnpm exec playwright test --project=production-chromium",
+      "run_child env pnpm exec playwright test --project=production-chromium",
+      'run_child env PLAYWRIGHT_JSON_OUTPUT_FILE="$x" pnpm exec playwright test --project=production-chromium',
+      'run_child true ATLAS_PRODUCTION_URL="$ORIGIN"; pnpm exec playwright test --project=production-chromium',
+    ])
+      expect(missing(source), source).toEqual([
+        { supplied: [], missing: ["production"] },
+      ]);
+    // An option of env changes the environment in a way this reader does not model: refused, not guessed.
+    for (const source of [
+      'run_child env -i ATLAS_PRODUCTION_URL="$ORIGIN" pnpm exec playwright test --project=production-chromium',
+      'env -u HOME ATLAS_PRODUCTION_URL="$ORIGIN" pnpm exec playwright test --project=production-chromium',
+    ])
+      expect(() => runs(`true\n${source}`), source).toThrow(/^probe\.sh:2: /);
   });
 
   test("a mention it cannot attribute to a run is refused with its location, not guessed", () => {

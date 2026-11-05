@@ -216,9 +216,10 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
       <SessionRoot />
     </SessionProvider>,
   );
-  const started = session.start({ beforeStart: options.beforeStart });
   // WEB-14a: the service worker and the update coordinator, in the builds that ship a worker (production and the PWA test build), loaded
-  // lazily once the session has started so the initial chunk carries only this import. Never in development, Vitest or the fixture build.
+  // lazily as the session starts so the initial chunk carries only this import. Never in development, Vitest or the fixture build. The
+  // import is asked for here and resolves no earlier than a later turn, so `startBrowserAppUpdates` always runs after `session.start`
+  // below has been called (base merge of 5 November 2026: the start is awaited in place, as WEB-09c's `boot_leads_by_default` reads it).
   if (
     import.meta.env.MODE === "production" ||
     import.meta.env.MODE === "pwa-fixture"
@@ -226,7 +227,7 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     void import("../lib/pwa/start")
       .then(({ startBrowserAppUpdates }) => startBrowserAppUpdates(session))
       .catch(() => undefined);
-  await started;
+  await session.start({ beforeStart: options.beforeStart });
   const leader = leads
     ? dataLeader.start(session, options.trace, options.dataLeaderDiagnostic)
     : null;
