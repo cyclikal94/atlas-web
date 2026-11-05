@@ -132,7 +132,8 @@ let arrivals = 0;
  * The CURRENT restore grant (WEB-14a revision 52, F-R52-2; design assessment of 3 November 2026, C2, F1-F3): the restored request that
  * most recently took focus in this arrival, and the element focus actually landed on. A successful pre-emption replaces it, so it is never
  * the first request that once took focus. Completed requests stay as history (a prompt of the arrival stays suppressed, DA-F1) but never
- * arbitrate. A navigation ends it (so it is always of this arrival).
+ * arbitrate. A navigation ends it (so it is always of this arrival). Revision 55 (F-R54-1): it records WHY focus is there as well as where,
+ * by its request's kind: an automatic restore ("restored") or the person's applied choice ("chosen", never pre-empted while focus is on it).
  */
 let grant: { request: Request; element: HTMLElement } | null = null;
 /** The element this arbiter last focused for a restored form or a discard's return (focus it placed itself, not the person). */
@@ -190,11 +191,12 @@ const precedes = (a: Node, b: Node) =>
  * `target` comes first in the page: so any number of restores settle on the first in the page, whatever order they arrive in (C, then B,
  * then A ends on A). Focus the person (or anything else) moved elsewhere is never taken, even onto another restored form's field. When the
  * granted element itself went (its owner unmounted or replaced it) and focus is nowhere, a later restore may take it: that takes nobody's
- * focus.
+ * focus. Revision 55 (F-R54-1, F-5): a CHOSEN grant (the person's applied choice) is never pre-empted while its element is there, as focus
+ * the person moved by hand is not; only its "element went and focus is nowhere" case remains.
  */
 const mayTakeFocus = (target: HTMLElement): boolean =>
   !grant ||
-  (document.activeElement === grant.element
+  (grant.request.kind !== "chosen" && document.activeElement === grant.element
     ? precedes(target, grant.element)
     : !grant.element.isConnected && unplacedNow());
 
@@ -229,9 +231,14 @@ function attempt(request: Request): boolean {
     const target = request.target();
     if (!target || !eligible(target) || !focus(target)) return false;
     request.state = "done";
-    arbiterPlaced = target;
-    // The person's own choice supersedes an automatic restore still waiting for focus (as a failure of their act does, DA-F2).
-    if (request.kind === "chosen") cancel("restored");
+    if (request.kind === "chosen") {
+      // Revision 55 (Review 54, F-R54-1; design assessment of 5 November 2026, C-F1, F-5/F-6): a landed choice is the PERSON's placement,
+      // so it becomes the arrival's current grant, of its own kind, whichever form held the automatic grant before (the chosen form itself,
+      // or another whose restore is withdrawn later). It is not `arbiterPlaced`: a withdrawal never mistakes it for focus this arbiter put.
+      grant = { request, element: target };
+      // The person's own choice supersedes an automatic restore still waiting for focus (as a failure of their act does, DA-F2).
+      cancel("restored");
+    } else arbiterPlaced = target;
     return true;
   }
   if (request.kind !== "restored" && placed?.at === request.at) {
@@ -330,11 +337,14 @@ function request(
     // always did, when focus is nowhere (the granted field went with it) or where this arbiter put it (the granted field, a discard's
     // return): a later restore of the arrival is not held back by a form that is gone. Only when the person (or another surface) has
     // moved focus elsewhere does it stay, so a later restore still never takes that focus. It never falls back to an earlier grant.
+    // Revision 55 (F-R54-1, F-7): a CHOSEN grant is the person's placement: its request's withdrawal (a newer choice, the owner's unmount)
+    // ends it only when focus is nowhere (its field went), never while focus is on it, so no window opens for an automatic restore.
     if (
       grant?.request === made &&
       (unplacedNow() ||
-        document.activeElement === grant.element ||
-        document.activeElement === arbiterPlaced)
+        (made.kind !== "chosen" &&
+          (document.activeElement === grant.element ||
+            document.activeElement === arbiterPlaced)))
     )
       grant = null;
     reconcile();

@@ -560,8 +560,13 @@ export function useRecoverableForm(
       return Promise.resolve(false);
     if (current.recovery !== "unavailable") return Promise.resolve(true);
     setUnavailable(false);
-    return startLook(current, shown, offerOwed.current ? "offer" : "restore")
-      .done;
+    // Revision 55 (F-R54-2, C-L3): after a finished look (a failed check, or a resumed mount's offer look) Try again is an OFFER look, as in
+    // `model.ts`: a second restore look would read no claimed hand-off and offer its lineage on its own.
+    return startLook(
+      current,
+      shown,
+      offerOwed.current || current.look === "done" ? "offer" : "restore",
+    ).done;
   }, [startLook]);
   const retryRef = useRef(retry);
   retryRef.current = retry;

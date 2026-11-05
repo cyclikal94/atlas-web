@@ -1,16 +1,19 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
-import { createRef, type RefObject } from "react";
+import { createRef, type RefObject, useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { NeutralLiveRegion } from "../../src/components/ui/announcer";
 import { Dialog } from "../../src/components/ui/dialog";
+import type { RecoverySnapshot } from "../../src/lib/form-recovery/port";
 import { RecoveryBanner } from "../../src/lib/form-recovery/RecoveryBanner";
+import { RecoveryNotice } from "../../src/lib/form-recovery/RecoveryNotice";
 import { pageFormRegistry } from "../../src/lib/form-recovery/registry";
 import { noteNavigation } from "../../src/lib/pwa/navigation";
 import {
@@ -1062,5 +1065,66 @@ describe("revision 21: a pending request follows a CSS reveal of its target or a
     await act(async () => main().classList.remove("marked"));
     expect(title()).toHaveFocus();
     expect(attempts.length, "no attempt after fulfilment").toBe(before);
+  });
+});
+
+describe("revision 55 (F-R54-1, T-F8): DA-F1 and DA-F2 are unchanged when the arrival's grant is the person's applied choice", () => {
+  const ALT: RecoverySnapshot = {
+    formContext: "probe",
+    tabInstanceId: "tab-2",
+    values: { model: "other" },
+    savedAt: "2026-11-05T09:00:00.000Z",
+  };
+  /** A restored notice for Title offering one other copy; choosing it is applied at once (its row goes). */
+  function Chosen({ field }: { field: RefObject<HTMLInputElement | null> }) {
+    const [alternatives, setAlternatives] = useState<RecoverySnapshot[]>([ALT]);
+    return (
+      <UiProviders>
+        <RecoveryNotice
+          firstFieldRef={field}
+          recovery={{
+            view: {
+              restored: { ...ALT, tabInstanceId: "tab-1" },
+              alternatives,
+              unavailable: false,
+              ready: true,
+            },
+            locked: false,
+            discard: async () => "discarded",
+            retry: async () => true,
+            checkAgain: async () => false,
+            restoreAlternative: async () => {
+              setAlternatives([]);
+              return "restored";
+            },
+            discardAlternative: async () => "discarded",
+          }}
+        />
+      </UiProviders>
+    );
+  }
+
+  test("after a landed choice a state-1 prompt of the arrival stays suppressed (DA-F1); a save failure still takes focus (DA-F2)", async () => {
+    openForm();
+    const field = createRef<HTMLInputElement>();
+    render(<Shell field={field} />, { container: inProtected() });
+    render(<Chosen field={field} />, { container: inProtected() });
+    expect(title(), "the restore took focus").toHaveFocus();
+    const other = screen.getByRole("button", {
+      name: /^Restore the copy saved/,
+    });
+    other.focus();
+    await act(async () => fireEvent.click(other));
+    expect(other.isConnected).toBe(false);
+    expect(title(), "the choice landed (the arrival's grant)").toHaveFocus();
+    set({ kind: "available", dismissed: false });
+    expect(button("Save and reload")).toBeInTheDocument();
+    expect(title(), "DA-F1: the prompt does not take focus").toHaveFocus();
+    set({ kind: "save_failed", refused: false });
+    expect(
+      button("Retry save"),
+      "DA-F2: the failure's recovery action takes focus",
+    ).toHaveFocus();
+    expect(calls).toEqual(none());
   });
 });

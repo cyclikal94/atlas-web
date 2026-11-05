@@ -898,3 +898,309 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
     expect(await writes(generations), "nothing is submitted").toEqual([]);
   });
 });
+
+/**
+ * WEB-14a revision 55 (Review 54, F-R54-1 and F-R54-2; design assessment of 5 November 2026, native counterparts N-1 and N-3). The
+ * production household screen in the real protected tree, data layer, recovery identity and worker; fixture backend reads only (FIXTURE
+ * evidence of frontend composition, never released-backend acceptance).
+ *
+ *  - F-R54-1: the create form restores automatically (the arrival's grant) while the households read is HELD at the generation server, so
+ *    the invitation form, EARLIER in the page, mounts and restores later. An applied choice of the other household-name copy keeps focus
+ *    against that late restore; the control without a choice shows D2 (the earlier form takes the automatic grant). The hold is the
+ *    server's, so every engine (WebKit's controlled pages included) sees it.
+ *  - F-R54-2: the writer tab's next page restores its claimed update hand-off; the person chooses another tab's copy, so the hand-off goes
+ *    back to the offered copies; "Check saved copies again" then keeps the hand-off offered, and restoring it brings the pre-update input.
+ * Deliberately ordered (a held read, tabs closed in order): characterisation of the corrected rules, not a natural frequency result.
+ */
+test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a late earlier restore; a check keeps this page's claimed hand-off", () => {
+  const HOUSE = {
+    id: "66666666-6666-4666-8666-666666666655",
+    name: "R55 House",
+    version: 1,
+    role: "manager",
+    members: [
+      {
+        account_id: "11111111-1111-4111-8111-111111111111",
+        username: "me",
+        role: "manager",
+      },
+    ],
+  };
+  const HOUSEHOLDS = "/api/experimental/v1/households";
+  const CHECK = "Check saved copies again";
+  const WITHHELD =
+    "A saved copy of this form may still be open in another tab.";
+  const OFFERED = /^Restore the copy saved/;
+  const createName = (page: Page) =>
+    page.getByRole("textbox", { name: "Household name", exact: true });
+  const invitee = (page: Page) =>
+    page.getByRole("textbox", {
+      name: `Invite to “${HOUSE.name}” by exact username`,
+      exact: true,
+    });
+  const formOf = (page: Page, field: ReturnType<typeof createName>) =>
+    page.locator("form").filter({ has: field });
+  /** The account's update hand-off rows, read on a page of their own (as revision 53's household rows). */
+  async function handoffRows(
+    context: BrowserContext,
+    generations: Generations,
+  ): Promise<Array<{ form_context: string; saved_at: string }>> {
+    const page = await context.newPage();
+    try {
+      await navigate(page, `${generations.url}/__data`);
+      await page.waitForFunction(() => window.__atlasData !== undefined);
+      const rows = (await page.evaluate(async () => {
+        const data = window.__atlasData;
+        if (!data) throw new Error("no data harness");
+        data.setIdentity("acct-a");
+        await data.open("acct-a");
+        const all = await data.rows("acct-a", "form_recovery");
+        data.close("acct-a");
+        return all;
+      })) as Array<{ form_context: string; saved_at: string }>;
+      return rows.filter((row) =>
+        row.form_context.startsWith("atlas-update-handoff:"),
+      );
+    } finally {
+      await page.close();
+    }
+  }
+  /** Two rendering turns of the page: what a restore's commit and its focus effect do has been done. */
+  const settledFrames = (page: Page) =>
+    page.evaluate(
+      () =>
+        new Promise<void>((done) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => done())),
+        ),
+    );
+  async function world(
+    context: BrowserContext,
+    generations: Generations,
+    cache: string,
+  ) {
+    const empty = { template: null, version: 0 };
+    await generations.reads({
+      "/api/experimental/v1/defaults/templates": {
+        person: empty,
+        field: empty,
+        task: empty,
+        list: empty,
+        progress: empty,
+      },
+      [HOUSEHOLDS]: [HOUSE],
+      "/api/experimental/v1/invitations": [],
+    });
+    await seedAccount(context, generations, "acct-a", "s1", {
+      validCache: cache,
+    });
+  }
+  /** Peers of `acting` are flushed by its accepted update (each saves its forms under its own identifier); `acting` then shows build b. */
+  async function updateFrom(acting: Page, generations: Generations) {
+    await generations.serve("fixture-b");
+    await checkForUpdate(acting);
+    await expect(
+      updateRegion(acting).getByRole("button", { name: "Reload", exact: true }),
+    ).toBeVisible();
+    await quiet(acting);
+    const reload = await armReload(acting);
+    await updateRegion(acting)
+      .getByRole("button", { name: "Reload", exact: true })
+      .click();
+    await reload.loaded();
+    await displayed(acting);
+    expect(await build(acting)).toBe("b");
+  }
+
+  for (const choice of [true, false])
+    test(`F-R54-1 ${choice ? "an applied choice in the form that holds the automatic grant keeps focus when the invitation form (earlier in the page) restores late" : "CONTROL (D2): with no choice the invitation form's late restore takes the automatic grant"}; nothing sent`, async ({
+      context,
+      generations,
+    }) => {
+      await world(context, generations, `pwa-r55-focus-${choice}`);
+      const w1 = await openApp(context, generations, {
+        route: "/sharing",
+        form: false,
+      });
+      await workerActive(w1);
+      await reloadQuietly(w1);
+      const w2 = await openApp(context, generations, {
+        route: "/sharing",
+        form: false,
+      });
+      const acting = await openApp(context, generations, {
+        route: "/tasks",
+        form: false,
+      });
+      await expect(invitee(w1)).toBeVisible();
+      await expect(invitee(w2)).toBeVisible();
+      await createName(w1).fill("R55 first name");
+      await createName(w2).fill("R55 second name");
+      await invitee(w2).fill("r55-invitee");
+      await quiet(w1);
+      await quiet(w2);
+      await updateFrom(acting, generations);
+      for (const writer of [w1, w2])
+        await expect(
+          updateRegion(writer).getByText("Atlas updated in another tab."),
+        ).toBeVisible();
+      await w1.close();
+      await w2.close();
+      // The households read is held: the create form restores now, the invitation form (earlier in the page) only once it is answered.
+      expect(await generations.holdRead(HOUSEHOLDS, true)).toBe(0);
+      await navigate(acting, `${generations.url}/sharing`);
+      await displayed(acting);
+      const create = formOf(acting, createName(acting));
+      await expect(
+        create.locator('[data-recovery-state="restored"]'),
+      ).toHaveCount(1);
+      await expect(createName(acting), "D2: the only restore").toBeFocused();
+      await expect(
+        invitee(acting),
+        "the invitation form is not there yet",
+      ).toHaveCount(0);
+      const shown = await createName(acting).inputValue();
+      const other =
+        shown === "R55 first name" ? "R55 second name" : "R55 first name";
+      expect(["R55 first name", "R55 second name"]).toContain(shown);
+      if (choice) {
+        const offered = create.getByRole("button", { name: OFFERED });
+        await expect(offered).toHaveCount(1);
+        await offered.focus();
+        await acting.keyboard.press("Enter");
+        await expect(createName(acting)).toHaveValue(other);
+        await expect(
+          create.locator('[data-recovery-state="restored"]'),
+          "the banner stays shown",
+        ).toHaveCount(1);
+        await expect(
+          createName(acting),
+          "the applied choice focuses the create form's first field",
+        ).toBeFocused();
+      }
+      expect(
+        await generations.holdRead(HOUSEHOLDS, false),
+        "the held households read is answered",
+      ).toBeGreaterThan(0);
+      await expect(
+        invitee(acting),
+        "the invitation form restores late",
+      ).toHaveValue("r55-invitee");
+      await expect(
+        formOf(acting, invitee(acting)).locator(
+          '[data-recovery-state="restored"]',
+        ),
+      ).toHaveCount(1);
+      if (choice) {
+        await settledFrames(acting);
+        await expect(
+          createName(acting),
+          "F-R54-1: the late automatic restore does not take the person's applied choice",
+        ).toBeFocused();
+        await expect(createName(acting)).toHaveValue(other);
+      } else
+        await expect(
+          invitee(acting),
+          "D2: the earlier form's late restore takes the automatic grant",
+        ).toBeFocused();
+      expect(await writes(generations), "nothing is submitted").toEqual([]);
+    });
+
+  test("F-R54-2: the next page restores its claimed hand-off; another tab's copy chosen puts the hand-off back on offer; 'Check saved copies again' keeps it offered and restorable; nothing sent", async ({
+    context,
+    generations,
+  }) => {
+    await world(context, generations, "pwa-r55-handoff");
+    // L (live, stays open), G (closes later) and W (the writer) all type a household name.
+    const live = await openApp(context, generations, {
+      route: "/sharing",
+      form: false,
+    });
+    await workerActive(live);
+    await reloadQuietly(live);
+    const gone = await openApp(context, generations, {
+      route: "/sharing",
+      form: false,
+    });
+    const writer = await openApp(context, generations, {
+      route: "/sharing",
+      form: false,
+    });
+    for (const [page, text] of [
+      [live, "R55 live tab"],
+      [gone, "R55 other tab"],
+      [writer, "R55 before the update"],
+    ] as const) {
+      await expect(createName(page)).toBeVisible();
+      await createName(page).fill(text);
+      await quiet(page);
+    }
+    // The writer accepts the update with its form dirty: "Save and reload" saves it and leaves the update hand-off to its next page.
+    await generations.serve("fixture-b");
+    await checkForUpdate(writer);
+    const save = updateRegion(writer).getByRole("button", {
+      name: "Save and reload",
+    });
+    await expect(save).toBeVisible();
+    await quiet(writer);
+    const reload = await armReload(writer);
+    await save.click();
+    await reload.loaded();
+    await displayed(writer);
+    expect(await build(writer)).toBe("b");
+    for (const peer of [live, gone])
+      await expect(
+        updateRegion(peer).getByText("Atlas updated in another tab."),
+      ).toBeVisible();
+    const create = formOf(writer, createName(writer));
+    await expect(
+      createName(writer),
+      "the claimed hand-off is restored",
+    ).toHaveValue("R55 before the update");
+    await expect(
+      create.locator('[data-recovery-state="restored"]'),
+    ).toHaveCount(1);
+    // The other tab goes; the person checks again: its copy is OFFERED (the live tab's stays withheld).
+    await gone.close();
+    await create.getByRole("button", { name: CHECK }).click();
+    const offered = create.getByRole("button", { name: OFFERED });
+    await expect(offered, "the other tab's copy is offered").toHaveCount(1);
+    await offered.click();
+    await expect(createName(writer)).toHaveValue("R55 other tab");
+    await expect(
+      offered,
+      "the hand-off goes back to the offered copies",
+    ).toHaveCount(1);
+    // F-R54-2: the live tab goes too, and the person checks again. The check's end is visible (nothing is withheld any more), and the
+    // claimed, still-valid hand-off must stay offered beside the live tab's copy (before the correction the hand-off was dropped and the
+    // writer's ordinary copy its lineage names was offered on its own instead: Review 54 F-R54-2 with manifestation c).
+    await live.close();
+    await create.getByRole("button", { name: CHECK }).click();
+    await expect(
+      create.getByText(WITHHELD),
+      "the check finished: nothing is withheld now",
+    ).toHaveCount(0);
+    // The hand-off's row is the one with its own "Discard the copy saved …" (only hand-off copies carry it): the two copies may share a
+    // saved-at second, so their restore labels can be equal.
+    const handoffRow = create.locator("span").filter({
+      has: writer.getByRole("button", { name: /^Discard the copy saved/ }),
+    });
+    await expect(
+      handoffRow,
+      "F-R54-2: this page's claimed hand-off is still offered after the check",
+    ).toHaveCount(1);
+    await expect(
+      offered,
+      "beside it only the live tab's copy (the hand-off's lineage is not offered on its own)",
+    ).toHaveCount(2);
+    await expect(createName(writer), "the check restored nothing").toHaveValue(
+      "R55 other tab",
+    );
+    const [handoff] = (await handoffRows(context, generations)).filter((row) =>
+      row.form_context.endsWith("household-create"),
+    );
+    expect(handoff, "the hand-off is still in the store").toBeDefined();
+    await handoffRow.getByRole("button", { name: OFFERED }).click();
+    await expect(createName(writer)).toHaveValue("R55 before the update");
+    expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+});

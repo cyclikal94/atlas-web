@@ -33,6 +33,9 @@
 //                                 part of the match) answers 200 with that JSON body, `no-store`; every other backend path is still the
 //                                 backend's 404. Replaces the whole set. Only GET and HEAD, as everywhere: the canned reads never accept
 //                                 a write, so nothing a page submits can succeed through them.
+//   POST /reads/hold?path=<p>&on=1|0  WEB-14a revision 55: hold every GET or HEAD of the canned read <p> unanswered from now on, or answer
+//                                 every held one (with the canned body as it then stands) and stop holding it; answers {"path", "hold",
+//                                 "held"}. A server-side barrier, so every engine sees it (Playwright's WebKit routing misses controlled pages).
 //   GET  /log                     every request served so far: [{ "id", "method", "path", "at", "status", "end" }]
 //   POST /log/clear               empties /log only (the ledger below keeps every request)
 //   GET  /ledger?after=<id>       WEB-14a revision 43 (F-FRESH-2): the APPEND-ONLY ledger of every request the app port has received, in
@@ -103,6 +106,8 @@ let holdIdentity = false;
 /** WEB-14a revision 50: the canned reads (`POST /reads`), by exact path; empty: none (the backend's 404, as before). */
 let reads = new Map();
 const heldReads = [];
+/** WEB-14a revision 55: canned read paths held (`POST /reads/hold`), each with the answers waiting for its release. */
+const heldCanned = new Map();
 const log = [];
 /** WEB-14a revision 43: every request, never cleared (the `/log` view above is clearable). */
 const ledger = [];
@@ -248,12 +253,20 @@ const app = createServer((request, response) => {
       JSON.stringify({ items: [] }),
     );
   // WEB-14a revision 50: a canned read set from the control port (a seeded person's People reads), for the stub identity only.
-  if (identity !== null && reads.has(path))
-    return answer(
-      200,
-      { "content-type": "application/json", "Cache-Control": "no-store" },
-      JSON.stringify(reads.get(path)),
-    );
+  if (identity !== null && reads.has(path)) {
+    const canned = () =>
+      answer(
+        200,
+        { "content-type": "application/json", "Cache-Control": "no-store" },
+        JSON.stringify(reads.get(path)),
+      );
+    const waiting = heldCanned.get(path);
+    if (!waiting) return canned();
+    waiting.push(() => {
+      if (!response.destroyed) canned();
+    });
+    return;
+  }
   if (BACKEND.test(path))
     return answer(
       404,
@@ -346,6 +359,21 @@ const control = createServer((request, response) => {
         const held = heldReads.length;
         if (!holdIdentity) for (const release of heldReads.splice(0)) release();
         return done({ hold: holdIdentity, held });
+      }
+      case "/reads/hold": {
+        const held = url.searchParams.get("path") ?? "";
+        if (!BACKEND.test(held)) {
+          response.writeHead(400).end("path must be a backend path");
+          return;
+        }
+        const waiting = heldCanned.get(held) ?? [];
+        const count = waiting.length;
+        if (url.searchParams.get("on") === "1") heldCanned.set(held, waiting);
+        else {
+          heldCanned.delete(held);
+          for (const release of waiting.splice(0)) release();
+        }
+        return done({ path: held, hold: heldCanned.has(held), held: count });
       }
       case "/reads": {
         const given = body ? JSON.parse(body) : {};

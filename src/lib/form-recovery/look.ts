@@ -46,7 +46,8 @@ export interface Found {
 /**
  * Every read of a look through `through`, pinned by the caller when the look began; null when one could not be made (nothing is then known).
  * `restore`: the hand-off this tab's previous page left for the form comes first (its lock first, then the read; without the lock it is
- * neither read nor shown). `offer`: only the copies other tabs left.
+ * neither read nor shown). `offer`: the copies other tabs left, and (revision 55, F-R54-2) the hand-off this page already claims, read
+ * under that claim; never a new claim.
  */
 export async function readLeft(
   current: FormSession,
@@ -69,6 +70,18 @@ export async function readLeft(
       // Resolved already (its page submitted or discarded it): nothing to take over; the stale reference goes (this page holds it).
       else forgetHandoff(current.handoffs, left.id);
     }
+  } else if (current.claimed !== null && !current.claimedResolved) {
+    // Revision 55 (Review 54, F-R54-2; design assessment of 5 November 2026, C-L1, L-4/L-6): the hand-off THIS page claimed is read again,
+    // under the claim it already holds (its lock is this page's for its life: no lock request, no wait, no new claim), so an offer look
+    // (the person's check, Try again, a resumed mount) still offers it with its lineage. A read that cannot be made makes the look unknown;
+    // absent: nothing to offer (the claim stays). Not once this page resolved it (`claimedResolved`): R42 keeps it for later pages.
+    const found = await readCopy(
+      through,
+      handoffContext(context),
+      current.claimed,
+    );
+    if (found.kind === "unavailable") return null;
+    if (found.kind === "found") handed = found.copy;
   }
   const listed = await readCopies(through, context);
   if (listed.kind === "unavailable") return null;

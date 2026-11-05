@@ -11,6 +11,7 @@ import { HouseholdsMinimal } from "../../src/features/sharing/HouseholdsMinimal"
 import { encodePolicyDraft } from "../../src/features/sharing/model/recovery-fields";
 import { ResourcePolicyEditor } from "../../src/features/sharing/ResourcePolicyEditor";
 import { forgetAllRetained } from "../../src/features/sharing/retained";
+import { handoffContext } from "../../src/lib/form-recovery/handoff";
 import { UNAVAILABLE_WHILE_RELOADING } from "../../src/lib/form-recovery/RecoveryBanner";
 import {
   CHECK_AGAIN,
@@ -20,10 +21,12 @@ import {
   RESTORE_COPY,
   WITHHELD,
 } from "../../src/lib/form-recovery/RecoveryNotice";
+import { UNSCOPED } from "../../src/lib/form-recovery/session";
 import { recoveryLockName } from "../../src/lib/form-recovery/tab-identity";
 import { noteNavigation } from "../../src/lib/pwa/navigation";
 import { installMatchMedia } from "../helpers/match-media";
 import {
+  FLAT,
   HOME,
   household,
   PRIYA,
@@ -478,4 +481,264 @@ describe("D-R53-2 with D1's fallback: a resource's sharing policy", () => {
     );
     expect(grant()?.contains(document.activeElement)).toBe(true);
   });
+});
+
+/**
+ * WEB-14a revision 55 (Review 54, F-R54-1 and F-R54-2; design assessment of 5 November 2026, schedules T-F10 and T-L10) over the actual
+ * household screen: the invitation forms precede the create form in the page, so a held listing makes an EARLIER form restore LATE.
+ * Barriers are held reads (entered/released), never timers; nothing is ever sent.
+ */
+describe("revision 55: an applied choice keeps focus against a late earlier restore; a check keeps this page's claimed hand-off", () => {
+  afterEach(() => {
+    sessionStorage.clear();
+    noteNavigation();
+  });
+  /** Holds the recovery listing of `context` once read (entered/release barrier). */
+  function holdList(context: string) {
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let entered = false;
+    const list = store().list.bind(store());
+    vi.spyOn(store(), "list").mockImplementation(async (which) => {
+      const answer = await list(which);
+      if (which === context) {
+        entered = true;
+        await gate;
+      }
+      return answer;
+    });
+    return { entered: () => entered, release: () => open() };
+  }
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  test.each([true, false])(
+    "T-F10 (Review 54 F2): the create form holds the automatic grant; deliberate choice=%s; then the invitation form (earlier) restores late",
+    async (choice) => {
+      noteNavigation();
+      await left(INVITE, textCopy("delayed-invitee"), {
+        tab: "gone-invite",
+        savedAt: NEWER,
+      });
+      await left(CREATE, textCopy("Older name"), {
+        tab: "gone-create-old",
+        savedAt: OLDER,
+      });
+      await left(CREATE, textCopy("Newer name"), {
+        tab: "gone-create-new",
+        savedAt: NEWER,
+      });
+      const gate = holdList(INVITE);
+      const { api } = mountHouseholds();
+      await waitFor(() => expect(gate.entered()).toBe(true));
+      await waitFor(() => expect(createName().value).toBe("Newer name"));
+      await waitFor(() => expect(createName()).toHaveFocus());
+      expect(
+        (invitee().compareDocumentPosition(createName()) &
+          Node.DOCUMENT_POSITION_FOLLOWING) !==
+          0,
+        "premise: the invitation form precedes the create form",
+      ).toBe(true);
+      if (choice) {
+        const older = restoreIn(createForm(), OLDER) as HTMLElement;
+        older.focus();
+        fireEvent.click(older);
+        await waitFor(() => expect(createName().value).toBe("Older name"));
+        await waitFor(() => expect(createName()).toHaveFocus());
+        expect(older.isConnected).toBe(false);
+      }
+      await act(async () => gate.release());
+      await waitFor(() => expect(invitee().value).toBe("delayed-invitee"));
+      await settle();
+      expect(sent(api), "nothing is sent").toEqual([]);
+      expect(createName().value).toBe(choice ? "Older name" : "Newer name");
+      if (choice)
+        expect(
+          createName(),
+          "F-R54-1 (a): the applied choice keeps focus",
+        ).toHaveFocus();
+      else
+        expect(
+          invitee(),
+          "CONTROL (D2): the earlier form's late restore takes the automatic grant",
+        ).toHaveFocus();
+    },
+  );
+
+  test.each([true, false])(
+    "T-F10 (manifestation b): an invitation form holds the grant; deliberate choice=%s in the create form; that invitation's copy is discarded; a second invitation restores late",
+    async (choice) => {
+      noteNavigation();
+      const flat = household({
+        id: FLAT,
+        name: "Flat",
+        members: home.members,
+      });
+      const HOME_INVITE = `household-invite:${HOME}`;
+      const FLAT_INVITE = `household-invite:${FLAT}`;
+      await left(HOME_INVITE, textCopy("home-invitee"), {
+        tab: "gone-home",
+        savedAt: NEWER,
+      });
+      await left(FLAT_INVITE, textCopy("flat-invitee"), {
+        tab: "gone-flat",
+        savedAt: NEWER,
+      });
+      await left(CREATE, textCopy("Older name"), {
+        tab: "gone-create-old",
+        savedAt: OLDER,
+      });
+      await left(CREATE, textCopy("Newer name"), {
+        tab: "gone-create-new",
+        savedAt: NEWER,
+      });
+      const gate = holdList(FLAT_INVITE);
+      const api = fakeSharingApi();
+      api.defaults.households = ok([home, flat]);
+      mountSharing(<HouseholdsMinimal />, {
+        env: withRecovery(stubEnv()),
+        api,
+      });
+      const homeInvitee = () =>
+        screen.getByLabelText(
+          sharingCopy.INVITE_LABEL("Home"),
+        ) as HTMLInputElement;
+      const flatInvitee = () =>
+        screen.getByLabelText(
+          sharingCopy.INVITE_LABEL("Flat"),
+        ) as HTMLInputElement;
+      await waitFor(() => expect(gate.entered()).toBe(true));
+      await waitFor(() => expect(homeInvitee().value).toBe("home-invitee"));
+      await waitFor(() => expect(createName().value).toBe("Newer name"));
+      await waitFor(() => expect(homeInvitee()).toHaveFocus());
+      if (choice) {
+        const older = restoreIn(createForm(), OLDER) as HTMLElement;
+        older.focus();
+        fireEvent.click(older);
+        await waitFor(() => expect(createName().value).toBe("Older name"));
+        await waitFor(() => expect(createName()).toHaveFocus());
+      }
+      // The Home invitation's copy is discarded by pointer (the person's focus stays where it is): that form's restored banner goes.
+      const homeForm = homeInvitee().closest("form") as HTMLElement;
+      fireEvent.click(
+        within(homeForm).getByRole("button", { name: /Discard instead/ }),
+      );
+      await waitFor(() => expect(restoredIn(homeForm)).toBeNull());
+      await act(async () => gate.release());
+      await waitFor(() => expect(flatInvitee().value).toBe("flat-invitee"));
+      await settle();
+      expect(sent(api).filter((call) => call.op !== "discard")).toEqual([]);
+      if (choice)
+        expect(
+          createName(),
+          "F-R54-1 (b): the grant holder's withdrawal opens no window: the applied choice keeps focus",
+        ).toHaveFocus();
+      else
+        expect(
+          flatInvitee(),
+          "CONTROL (documented D2 withdrawal): with no choice the late restore takes nobody's focus",
+        ).toHaveFocus();
+    },
+  );
+
+  test.each(["none", "check", "try again"] as const)(
+    "T-L10 (Review 54 C3): the create form's claimed hand-off offered after early input survives an offer look by %s; restoring it works; nothing sent",
+    async (how) => {
+      const handed = "r55-handoff-1";
+      sessionStorage.setItem(
+        "atlas-update-handoff",
+        JSON.stringify([{ form: CREATE, scope: UNSCOPED, id: handed }]),
+      );
+      expect(
+        await store().save({
+          formContext: handoffContext(CREATE),
+          tabInstanceId: handed,
+          values: { model: textCopy("Before the update") },
+          savedAt: OLDER,
+          capture: handed,
+        }),
+      ).toBe("saved");
+      await left(CREATE, textCopy("Live draft"), {
+        tab: "live-tab",
+        savedAt: NEWER,
+      });
+      recoveryLocks().held.set(recoveryLockName("live-tab"), "LIVE");
+      // The hand-off's read is held so the person types before the look finishes.
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let entered = false;
+      const load = store().load.bind(store());
+      vi.spyOn(store(), "load").mockImplementation(async (context, id) => {
+        const answer = await load(context, id);
+        if (id === handed && !entered) {
+          entered = true;
+          await gate;
+        }
+        return answer;
+      });
+      const { api } = mountHouseholds();
+      await waitFor(() => expect(entered).toBe(true));
+      fireEvent.change(createName(), {
+        target: { value: "Typed while the look reads" },
+      });
+      await act(async () => open());
+      await waitFor(() => expect(checkIn(createForm())).not.toBeNull());
+      expect(createName().value).toBe("Typed while the look reads");
+      expect(
+        restoreIn(createForm(), OLDER),
+        "the hand-off is offered",
+      ).not.toBeNull();
+      if (how === "check") {
+        const button = checkIn(createForm()) as HTMLElement;
+        button.focus();
+        await act(async () => fireEvent.click(button));
+        await settle();
+      }
+      if (how === "try again") {
+        const list = store().list.bind(store());
+        let failed = false;
+        vi.spyOn(store(), "list").mockImplementation(async (which) => {
+          if (!failed && which === CREATE) {
+            failed = true;
+            throw new Error("the store could not be read");
+          }
+          return list(which);
+        });
+        await act(async () =>
+          fireEvent.click(checkIn(createForm()) as HTMLElement),
+        );
+        const retry = await within(createForm()).findByRole("button", {
+          name: "Try again",
+        });
+        expect(
+          restoreIn(createForm(), OLDER),
+          "nothing changed while unavailable",
+        ).not.toBeNull();
+        await act(async () => fireEvent.click(retry));
+        await waitFor(() =>
+          expect(
+            within(createForm()).queryByRole("button", { name: "Try again" }),
+          ).toBeNull(),
+        );
+        await settle();
+      }
+      expect(
+        (await store().load(handoffContext(CREATE), handed))?.values.model,
+        "the hand-off is still in the store",
+      ).toBe(textCopy("Before the update"));
+      expect(
+        restoreIn(createForm(), OLDER),
+        `F-R54-2 (${how}): the still-valid hand-off stays offered`,
+      ).not.toBeNull();
+      fireEvent.click(restoreIn(createForm(), OLDER) as HTMLElement);
+      await waitFor(() => expect(createName().value).toBe("Before the update"));
+      expect(sent(api)).toEqual([]);
+    },
+  );
 });

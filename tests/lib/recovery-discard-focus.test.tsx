@@ -817,3 +817,233 @@ describe("revision 53 (D-R53-2): an explicit choice while the restored banner st
     ).toHaveFocus();
   });
 });
+
+/**
+ * WEB-14a revision 55 (Review 54, F-R54-1; design assessment of 5 November 2026, RC-1, correction C-F1, invariants F-5 to F-8, schedules
+ * T-F1 to T-F7): a LANDED choice is the person's placement. It becomes the arrival's current grant with its own kind ("chosen"), so no
+ * automatic restore of the arrival takes it, whichever form held the automatic grant before (the chosen form itself, manifestation a, or
+ * another form whose restore is later withdrawn, manifestation b). It ends only at a navigation, or when focus is nowhere (its field went);
+ * another owner's withdrawal, or a newer choice still being read, never opens a window for an automatic restore. D1, D2 among automatic
+ * restores, DA-F1/DA-F2 and the discard return are unchanged. Owner A precedes the other owners and the chosen form in the page throughout.
+ */
+const ALT2: RecoverySnapshot = {
+  ...SNAPSHOT,
+  tabInstanceId: "tab-3",
+  savedAt: "2026-11-03T08:00:00.000Z",
+};
+interface HeldPick {
+  id: string;
+  resolve(result: "restored" | "refused"): void;
+}
+/** A restored owner offering two other copies; each choice is held until the test resolves it (applied: only its own row goes). */
+function TwoChoices({ picks }: { picks: HeldPick[] }) {
+  const [alternatives, setAlternatives] = useState<RecoverySnapshot[]>([
+    ALT,
+    ALT2,
+  ]);
+  const ref = useRef<HTMLInputElement>(null);
+  return (
+    <section>
+      <RecoveryNotice
+        firstFieldRef={ref}
+        recovery={{
+          view: {
+            restored: SNAPSHOT,
+            alternatives,
+            unavailable: false,
+            ready: true,
+          },
+          locked: false,
+          discard: async () => "discarded",
+          retry: async () => true,
+          checkAgain: async () => false,
+          restoreAlternative: (chosen) =>
+            new Promise((resolve) =>
+              picks.push({
+                id: chosen.tabInstanceId,
+                resolve: (result) => {
+                  if (result === "restored")
+                    setAlternatives((now) =>
+                      now.filter((copy) => copy !== chosen),
+                    );
+                  resolve(result);
+                },
+              }),
+            ),
+          discardAlternative: async () => "discarded",
+        }}
+      />
+      <input ref={ref} aria-label="Chosen" />
+    </section>
+  );
+}
+
+describe("revision 55 (F-R54-1): a landed choice is the person's placement, whichever form held the automatic grant", () => {
+  afterEach(() => {
+    noteNavigation();
+  });
+  /** The automatic owners (Owner A, Owner B, then Elsewhere) first in the page, then the chosen form. */
+  const scene = (autos: boolean[], choices: Choice[]) => {
+    noteNavigation();
+    const owners = render(many(autos));
+    const chosen = render(
+      <AnnouncerProvider>
+        <Chooser label="Chosen" choices={choices} />
+      </AnnouncerProvider>,
+    );
+    return { owners, chosen };
+  };
+  /** The person chooses the other copy from the keyboard; it is applied and its row goes. */
+  async function applyChoice(choices: Choice[]): Promise<void> {
+    const button = choose("Chosen");
+    button.focus();
+    fireEvent.click(button);
+    await act(async () => choices[0]?.resolve("restored"));
+    expect(button.isConnected, "the chosen copy's row went").toBe(false);
+    expect(field("Chosen"), "the choice landed").toHaveFocus();
+  }
+
+  test("T-F1 SAME GRANT (Review 54): the chosen form holds the automatic grant; an earlier form restored later never takes the applied choice", async () => {
+    const choices: Choice[] = [];
+    const { owners } = scene([false, false], choices);
+    expect(field("Chosen"), "the only restore holds the grant").toHaveFocus();
+    await applyChoice(choices);
+    owners.rerender(many([true, false]));
+    await flush();
+    expect(
+      field("Chosen"),
+      "F-R54-1 (a): a later automatic restore earlier in the page does not take the person's applied choice",
+    ).toHaveFocus();
+  });
+
+  test("T-F1 CONTROL (D2 unchanged): with no choice, the earlier form restored later takes focus from the automatic grant", async () => {
+    const choices: Choice[] = [];
+    const { owners } = scene([false, false], choices);
+    expect(field("Chosen")).toHaveFocus();
+    owners.rerender(many([true, false]));
+    await flush();
+    expect(field("Owner A"), "D2: first in the page").toHaveFocus();
+  });
+
+  test("T-F2 (manifestation b): another form held the grant; after the choice its copy is discarded, or it unmounts; an earlier form restored later never takes the choice", async () => {
+    for (const gone of ["discarded", "unmounted"] as const) {
+      const choices: Choice[] = [];
+      const { owners, chosen } = scene([false, true], choices);
+      expect(field("Owner B"), "Owner B holds the grant").toHaveFocus();
+      await applyChoice(choices);
+      owners.rerender(many(gone === "discarded" ? [false, false] : [false]));
+      await flush();
+      expect(field("Chosen"), `${gone}: the grant holder went`).toHaveFocus();
+      owners.rerender(many(gone === "discarded" ? [true, false] : [true]));
+      await flush();
+      expect(
+        field("Chosen"),
+        `F-R54-1 (b), ${gone}: Owner A does not take the person's applied choice`,
+      ).toHaveFocus();
+      owners.unmount();
+      chosen.unmount();
+      noteNavigation();
+    }
+  });
+
+  test("T-F2 CONTROLS: without a choice the documented withdrawal rule lets the earlier form take focus; focus the person put on the chosen form by hand is never taken", async () => {
+    // The documented D2 withdrawal: Owner B's copy is discarded while focus is still on its field, then Owner A restores.
+    noteNavigation();
+    const owners = render(many([false, true]));
+    expect(field("Owner B")).toHaveFocus();
+    owners.rerender(many([false, false]));
+    owners.rerender(many([true, false]));
+    await flush();
+    expect(field("Owner A"), "nobody's focus is taken").toHaveFocus();
+    owners.unmount();
+    // By hand: Owner B holds the grant, the person moves to the chosen form's field, Owner B's copy is discarded, Owner A restores.
+    const choices: Choice[] = [];
+    const again = scene([false, true], choices);
+    expect(field("Owner B")).toHaveFocus();
+    field("Chosen").focus();
+    again.owners.rerender(many([false, false]));
+    again.owners.rerender(many([true, false]));
+    await flush();
+    expect(field("Chosen"), "focus moved by hand is never taken").toHaveFocus();
+  });
+
+  test("T-F4: after a landed choice the person moves focus elsewhere; a later restore takes nothing", async () => {
+    const choices: Choice[] = [];
+    const { owners } = scene([false, false], choices);
+    await applyChoice(choices);
+    field("Elsewhere").focus();
+    owners.rerender(many([true, false]));
+    await flush();
+    expect(field("Elsewhere")).toHaveFocus();
+  });
+
+  test("T-F5: a navigation ends the person's placement; a restore of the NEW arrival takes focus", async () => {
+    const choices: Choice[] = [];
+    const { owners } = scene([false, false], choices);
+    await applyChoice(choices);
+    act(() => noteNavigation());
+    owners.rerender(many([true, false]));
+    await flush();
+    expect(field("Owner A"), "the new arrival's restore").toHaveFocus();
+  });
+
+  test("T-F6: the chosen owner unmounts with focus nowhere: a later restore takes nobody's focus; CONTROL: focus moved first is kept", async () => {
+    for (const moved of [false, true]) {
+      const choices: Choice[] = [];
+      const { owners, chosen } = scene([false, false], choices);
+      await applyChoice(choices);
+      if (moved) field("Elsewhere").focus();
+      chosen.unmount();
+      if (!moved) expect(document.activeElement).toBe(document.body);
+      owners.rerender(many([true, false]));
+      await flush();
+      if (moved)
+        expect(
+          field("Elsewhere"),
+          "moved before the unmount: kept",
+        ).toHaveFocus();
+      else
+        expect(
+          field("Owner A"),
+          "the chosen field went, focus nowhere: the restore takes nobody's focus",
+        ).toHaveFocus();
+      owners.unmount();
+      noteNavigation();
+    }
+  });
+
+  test("T-F7: a newer choice made by pointer while focus is on the chosen field, still being read, opens no window: a late automatic restore takes nothing; the newer choice then lands", async () => {
+    noteNavigation();
+    const owners = render(many([false, false]));
+    const picks: HeldPick[] = [];
+    render(
+      <AnnouncerProvider>
+        <TwoChoices picks={picks} />
+      </AnnouncerProvider>,
+    );
+    expect(field("Chosen"), "the only restore holds the grant").toHaveFocus();
+    const first = within(
+      field("Chosen").closest("section") as HTMLElement,
+    ).getAllByRole("button", { name: CHOOSE })[0] as HTMLElement;
+    first.focus();
+    fireEvent.click(first);
+    await act(async () => picks[0]?.resolve("restored"));
+    expect(field("Chosen"), "the first choice landed").toHaveFocus();
+    // The newer choice by pointer: the browser leaves focus on the chosen field (no button focus).
+    const second = within(
+      field("Chosen").closest("section") as HTMLElement,
+    ).getByRole("button", { name: CHOOSE });
+    fireEvent.click(second);
+    expect(field("Chosen")).toHaveFocus();
+    owners.rerender(many([true, false]));
+    await flush();
+    expect(
+      field("Chosen"),
+      "the older choice's withdrawal by the newer one left no window for Owner A",
+    ).toHaveFocus();
+    await act(async () => picks[1]?.resolve("restored"));
+    await flush();
+    expect(second.isConnected).toBe(false);
+    expect(field("Chosen"), "the newer choice lands").toHaveFocus();
+  });
+});

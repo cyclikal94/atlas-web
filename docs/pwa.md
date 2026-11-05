@@ -162,7 +162,7 @@ an unmount or another account's tree ends a pending one.
 ### A newer schema in another tab (declared-then-probe, WEB-03 5)
 
 The Dexie adapter opens an account database and reads the version the engine actually opened. Above this build's declared version
-(`DECLARED_IDB_VERSION`, IndexedDB 20 for schema 2) another tab's newer build upgraded it: the open fails `closed` before reading anything,
+(`DECLARED_IDB_VERSION`, IndexedDB `n * 10` for schema `n`: 40 for schema 4) another tab's newer build upgraded it: the open fails `closed` before reading anything,
 the account is latched `upgrade_pending`, `upgraded` is reported once, and every later open on the page is refused. An upgrading
 `versionchange` while the page holds the database does the same. The tab then shows "Atlas was updated in another tab and needs to reload here
 to keep working. [Reload here]" (PROPOSED). Dexie 4 alone would open the newer database silently (the real-engine spec and mutant MU-1817
@@ -359,9 +359,16 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   re-offer. A later check replaces one still reading; it reads nothing while an update reload is prepared (shown unavailable with its
   reason), before the first look has finished, while the look is unavailable (that is "Try again") or once retired; a database replaced
   meanwhile applies nothing. An offer look never offers the copy this session was restored from (shown, or discarded while the check
-  read). Once used, the action stays in that notice (focus stays on it) and each finished check is said politely (copies listed, none
+  read). Revision 55 (Review 54, F-R54-2; design assessment C-L1 to C-L3): every offer look (this check, "Try again" after a finished look
+  in both adapters, and the DOM adapter's resumed mount) also reads the update hand-off THIS page claimed, under the claim it already holds
+  (no lock request, no wait, no new claim), so a claimed, still-valid hand-off that was offered rather than restored (input before the look
+  finished, an owner whose opening is input, or a restored hand-off the person then replaced by another copy) stays offered and restorable,
+  and its lineage keeps the copies it names out of the offer. A claimed hand-off this page restored and then resolved by a terminal act (a
+  discard, an acknowledged submission) is not offered again by this page (`claimedResolved`); R42 keeps it in the store, and a later page
+  offers it as abandoned. A claimed hand-off that cannot be read makes the whole look unknown. Once used, the action stays in that notice (focus stays on it) and each finished check is said politely (copies listed, none
   found, or still withheld). The wording is PROPOSED, not accepted. Coverage: `tests/lib/recovery-check-again.test.tsx` (both adapters,
   an older build's exclusive probe modelled exactly, omitted-all/omitted-one, live owner, repeats, late reads, guards, hand-offs),
+  `tests/lib/recovery-claimed-handoff-offer.test.tsx` (revision 55: this page's claimed hand-off in every offer look, both adapters),
   `tests/features/recovery-check-again.test.tsx` (the household screen) and the native household journey in
   `tests/e2e/fixture.pwa-editors.spec.ts` (Chromium, Firefox, WebKit).
 - **What this does not cover.** Only the app-update reload is guarded. The sync-recovery "Reload" action (`SyncBlocked`, through the session's
@@ -610,7 +617,12 @@ first field on mount, and `RecoveryBanner`'s revision-19 "Discard instead" contr
   until the target can take focus and the used control has gone; ended without focusing once focus is placed anywhere other than where it
   was at the choice (a browser that does not focus a clicked button keeps focus where it was), by a navigation, a newer choice or the
   owner's unmount. A choice not applied (refused, gone, unreadable) requests nothing. A landed choice supersedes an automatic restore still
-  waiting; it is not a D2 grant, so a later automatic restore follows the current grant's rule and does not take it. A choice made with no
+  waiting. Revision 55 (Review 54, F-R54-1; design assessment of 5 November 2026, C-F1): a landed choice is the person's placement, so it
+  becomes the arrival's current grant with its own kind ("chosen"), whichever form held the automatic grant before (the chosen form
+  itself, or another whose restore is withdrawn later). No automatic restore of the arrival pre-empts it while focus is on its field, as
+  focus moved by hand is never taken; it ends only at a navigation or when focus is nowhere (its field went), never at another owner's
+  withdrawal or while a newer choice is still being read. D1, D2 among automatic restores, DA-F1/DA-F2 and the discard return are
+  unchanged (a keyboard discard's return is still not protected like a choice: that parity is an owner question). A choice made with no
   restored banner shown is focused by the banner's own arrival (D2), as before. Coverage: `tests/lib/recovery-discard-focus.test.tsx`
   (revision 53 cases), `tests/features/recovery-check-again.test.tsx` (household and policy editors) and the native household journey.
 

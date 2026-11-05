@@ -57,6 +57,11 @@ export interface Generations {
    * Replaces the whole set; `{}`: none, every backend path the backend's 404 again. Never a write.
    */
   reads(answers: Record<string, unknown>): Promise<void>;
+  /**
+   * WEB-14a revision 55: holds every GET of the canned read `path` unanswered at the server (`true`), or answers every held one and stops
+   * holding it (`false`). Answers how many were held when it was called. A server-side barrier: every engine sees it.
+   */
+  holdRead(path: string, on: boolean): Promise<number>;
   log(): Promise<LogEntry[]>;
   clearLog(): Promise<void>;
   /**
@@ -148,6 +153,12 @@ async function startGenerations(
     reads: async (answers) => {
       await post("/reads", JSON.stringify(answers));
     },
+    holdRead: async (path, on) =>
+      (
+        (await post(
+          `/reads/hold?path=${encodeURIComponent(path)}&on=${on ? 1 : 0}`,
+        )) as { held: number }
+      ).held,
     log: async () =>
       (await (
         await fetch(`${urls.control}/log`, { method: "GET" })

@@ -225,6 +225,12 @@ export interface FormSession extends PageFormSession {
   handoffId: string | null;
   /** Revision 6 (R13): the hand-off left to this page whose lock it holds, once taken (revision 40, R42: never the right to remove it). */
   claimed: string | null;
+  /**
+   * Revision 55 (Review 54, F-R54-2; design assessment of 5 November 2026, C-L2, L-5): this page RESOLVED the hand-off it claimed (a
+   * terminal act, a discard or an acknowledged submission, whose source was that hand-off), so no later offer look of this page offers it
+   * again; it stays in the store for later pages (R42). Set in the same step as that act; cleared by nothing (a new page is a new session).
+   */
+  claimedResolved: boolean;
   readonly order: { next: number; lastTerminal: number };
   /** The newest submission acknowledged (its input revision) and what its acknowledgement answered (revision 3, R3: no older one regresses it). */
   acknowledged: { input: number; result: Promise<SubmissionResult> } | null;
@@ -772,6 +778,13 @@ export function terminalAct(
   // Revision 10 (R11): the act resolves what the copy the form was restored from, and this page's own copy, hold (dropped, or covered): only
   // their removal is left.
   const { source, own } = session.persisted;
+  // Revision 55 (F-R54-2, C-L2): the act resolves the claimed hand-off this session was restored from, for this page (`claimedResolved`).
+  if (
+    source !== null &&
+    isHandoffContext(source.context) &&
+    source.id === session.claimed
+  )
+    session.claimedResolved = true;
   session.persisted = {
     ...session.persisted,
     source: source && { ...source, values: {} },
@@ -1038,6 +1051,7 @@ export function openSession(options: OpenSession): FormSession {
     handoffs: options.handoffs,
     handoffId: null,
     claimed: null,
+    claimedResolved: false,
     order: { next: 0, lastTerminal: 0 },
     acknowledged: null,
     view: { restored: null, alternatives: [] },
