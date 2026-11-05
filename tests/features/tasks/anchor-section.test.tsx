@@ -5,13 +5,14 @@ import {
   screen,
   within,
 } from "@testing-library/react";
+import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   type CacheRow,
   type EnqueueRequest,
   readResourceViewNow,
 } from "../../../src/data";
-import type { Loadable } from "../../../src/data/store/port";
+import type { Loadable, Watchable } from "../../../src/data/store/port";
 import { setAnchorRequest } from "../../../src/features/calendars/anchors";
 import * as words from "../../../src/features/calendars/copy-anchor";
 import type { CalendarAnchor } from "../../../src/features/calendars/model/anchor";
@@ -3575,5 +3576,292 @@ describe("revision 22: a refused change is explained only by what its refusal re
     ]);
     for (const reason of Object.values(words.ANCHOR_REASONS))
       for (const unproven of UNPROVEN) expect(reason).not.toContain(unproven);
+  });
+});
+
+describe("revision 33: a picker whose page is not read yet claims nothing (review 40 F40-2)", () => {
+  /**
+   * The pickers' OWN list read (`useResourceList` → `data.readResourceList` of `kind`), through the page's real store: while held, the
+   * picker is shown one CONSTANT `loading` (or the `unavailable` given) whatever the read underneath publishes; released, it is shown the
+   * read as it is. `when` narrows which reads are held (a later page only, for "Show next"). Installed before the picker mounts.
+   */
+  function holdList(
+    t: Mounted,
+    kind: "event" | "field",
+    when: (input: { after?: string | null }) => boolean = () => true,
+  ) {
+    const service = t.data.service();
+    if (service === null) throw new Error("setup: no open service");
+    const store = service.store as unknown as {
+      watch(plan: { name: string }, input: unknown): Watchable<unknown>;
+    };
+    const watch = store.watch.bind(store);
+    const LOADING: Loadable<never> = { status: "loading" };
+    let shown: Loadable<never> | null = LOADING;
+    let held = 0;
+    let subscribed = 0;
+    const listeners = new Set<() => void>();
+    vi.spyOn(store, "watch").mockImplementation(((
+      plan: { name: string },
+      input: { kind?: string; after?: string | null },
+    ) => {
+      const source = watch(plan, input);
+      if (
+        plan.name !== "data.readResourceList" ||
+        input.kind !== kind ||
+        !when(input)
+      )
+        return source;
+      return {
+        get: () => {
+          if (shown === null) return source.get();
+          held += 1;
+          return shown;
+        },
+        subscribe: (listener: () => void) => {
+          subscribed += 1;
+          listeners.add(listener);
+          const off = source.subscribe(() => {
+            if (shown === null) listener();
+          });
+          return () => {
+            listeners.delete(listener);
+            off();
+          };
+        },
+      } satisfies Watchable<unknown>;
+    }) as never);
+    const tell = () => {
+      for (const listener of [...listeners]) listener();
+    };
+    return {
+      hold: (as: Loadable<never> = LOADING) =>
+        act(() => {
+          shown = as;
+          tell();
+        }),
+      release: () =>
+        act(() => {
+          shown = null;
+          tell();
+        }),
+      /** How often a held read was shown held (a hold that hid nothing proves nothing). */
+      held: () => held,
+      subscriptions: () => subscribed,
+    };
+  }
+  const UNAVAILABLE: Loadable<never> = {
+    status: "unavailable",
+    reason: "error",
+  };
+  const pickerOf = (dialog: HTMLElement, kind: "event" | "field") =>
+    present(dialog.querySelector(`[data-anchor-picker="${kind}"]`));
+  /** What the picker's list area claims: its state element, and whether any empty or no-match sentence is shown. */
+  const claims = (picker: HTMLElement) => ({
+    state: picker
+      .querySelector("[data-picker-state]")
+      ?.getAttribute("data-picker-state"),
+    busy: picker
+      .querySelector("[data-picker-state]")
+      ?.getAttribute("aria-busy"),
+    text: picker.textContent ?? "",
+  });
+  async function openAnchorPanel(t: Mounted) {
+    fireEvent.click(
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.ANCHOR_ACTION,
+        }),
+      ),
+    );
+    return dialogOpened(t);
+  }
+  async function openPicker(t: Mounted, dialog: HTMLElement, name: string) {
+    fireEvent.click(present(within(dialog).queryByRole("button", { name })));
+    await t.settle();
+  }
+  const events = (count: number) =>
+    Array.from({ length: count }, (_, i) =>
+      eventRow({
+        id: `00000000-0000-4000-8000-${String(i + 5000).padStart(12, "0")}`,
+        label: `Event ${String(i).padStart(3, "0")}`,
+        value: {
+          uid: `event-${i}@example`,
+          original: "2026-11-02",
+          title: `Event ${String(i).padStart(3, "0")}`,
+          start: {
+            date: "2026-11-02",
+            time: "07:00:00",
+            timezone: "Europe/London",
+            instant: 1793602800,
+          },
+          end: null,
+          status: "present",
+          sequence: 0,
+        },
+      }),
+    );
+
+  test("Q3 event picker: loading while held (busy, no 'No events yet'), the events once ready, 'can't be shown' when unavailable", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, {
+      online: false,
+      rows: [sourceRow, eventRow()],
+    });
+    const dialog = await openAnchorPanel(t);
+    const list = holdList(t, "event");
+    await openPicker(t, dialog, words.CHANGE_EVENT);
+    const picker = pickerOf(dialog, "event");
+    expect(list.subscriptions()).toBeGreaterThan(0);
+    expect(list.held()).toBeGreaterThan(0);
+    expect(claims(picker)).toMatchObject({ state: "loading", busy: "true" });
+    expect(claims(picker).text).toContain(words.EVENTS_LOADING);
+    expect(claims(picker).text).not.toContain(words.NO_EVENTS_YET);
+    expect(claims(picker).text).not.toContain(words.NO_MATCHES);
+    // Q8: the busy loading state adds no accessibility violation to the panel.
+    expect((await axe(document.body)).violations).toEqual([]);
+    await list.release();
+    await t.settle();
+    expect(claims(picker).state).toBeUndefined();
+    expect(within(picker).queryByText("Bin day")).not.toBeNull();
+    await list.hold(UNAVAILABLE);
+    expect(claims(picker).state).toBe("unavailable");
+    expect(claims(picker).text).toContain(words.PICKER_UNREADABLE);
+    expect(claims(picker).text).not.toContain(words.NO_EVENTS_YET);
+    expect(within(picker).queryByText("Bin day")).toBeNull();
+  });
+
+  test("Q3 control: a ready page with no events says 'No events yet' (and nothing loading)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, { online: false, rows: [sourceRow] });
+    const dialog = await openAnchorPanel(t);
+    const list = holdList(t, "event");
+    await openPicker(t, dialog, words.CHANGE_EVENT);
+    const picker = pickerOf(dialog, "event");
+    expect(claims(picker).state).toBe("loading");
+    await list.release();
+    await t.settle();
+    expect(claims(picker).state).toBeUndefined();
+    expect(claims(picker).text).toContain(words.NO_EVENTS_YET);
+    expect(claims(picker).text).not.toContain(words.EVENTS_LOADING);
+  });
+
+  test("Q4 field picker: loading while held (no 'No date fields'), the fields once ready, 'can't be shown' when unavailable; ready-empty control", async () => {
+    const FIELD = "00000000-0000-4000-8000-00000000f401";
+    const task = await seededTask();
+    const t = await mounted(task, {
+      online: false,
+      rows: [
+        cacheRow({
+          id: FIELD,
+          kind: "field",
+          label: "Birthday",
+          value: { kind: "date", month: 3, day: 14 },
+        }),
+      ],
+    });
+    const dialog = await openAnchorPanel(t);
+    const list = holdList(t, "field");
+    await openPicker(t, dialog, words.CHOOSE_FIELD);
+    const picker = pickerOf(dialog, "field");
+    expect(list.held()).toBeGreaterThan(0);
+    expect(claims(picker)).toMatchObject({ state: "loading", busy: "true" });
+    expect(claims(picker).text).toContain(words.FIELDS_LOADING);
+    expect(claims(picker).text).not.toContain(words.NO_DATE_FIELDS);
+    expect(claims(picker).text).not.toContain(words.NO_MATCHES);
+    await list.release();
+    await t.settle();
+    expect(claims(picker).state).toBeUndefined();
+    expect(within(picker).queryByText("Birthday")).not.toBeNull();
+    await list.hold(UNAVAILABLE);
+    expect(claims(picker).state).toBe("unavailable");
+    expect(claims(picker).text).toContain(words.PICKER_UNREADABLE);
+    expect(claims(picker).text).not.toContain(words.NO_DATE_FIELDS);
+  });
+
+  test("Q4 control: no date field cached: 'No date fields on this device yet' once the page is ready", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, { online: false });
+    const dialog = await openAnchorPanel(t);
+    const list = holdList(t, "field");
+    await openPicker(t, dialog, words.CHOOSE_FIELD);
+    const picker = pickerOf(dialog, "field");
+    expect(claims(picker).state).toBe("loading");
+    await list.release();
+    await t.settle();
+    expect(claims(picker).state).toBeUndefined();
+    expect(claims(picker).text).toContain(words.NO_DATE_FIELDS);
+  });
+
+  test("Q5/Q6 Show next events: the next page loading claims nothing, Show previous stays, a search while loading claims no match; the 101st once ready", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, {
+      online: false,
+      rows: [sourceRow, ...events(101)],
+    });
+    const dialog = await openAnchorPanel(t);
+    // Only the later page's read is held: the first page is read as it is.
+    const list = holdList(
+      t,
+      "event",
+      (input) => (input.after ?? null) !== null,
+    );
+    await list.release();
+    await list.hold();
+    await openPicker(t, dialog, words.CHANGE_EVENT);
+    const picker = pickerOf(dialog, "event");
+    expect(within(picker).queryByText("Event 000")).not.toBeNull();
+    expect(within(picker).queryByText("Event 100")).toBeNull();
+    fireEvent.click(
+      present(
+        within(picker).queryByRole("button", { name: words.SHOW_NEXT_EVENTS }),
+      ),
+    );
+    await t.settle();
+    expect(list.held()).toBeGreaterThan(0);
+    expect(claims(picker)).toMatchObject({ state: "loading", busy: "true" });
+    expect(claims(picker).text).not.toContain(words.NO_EVENTS_YET);
+    expect(within(picker).queryByText("Event 000")).toBeNull();
+    expect(
+      within(picker).queryByRole("button", {
+        name: words.SHOW_PREVIOUS_EVENTS,
+      }),
+    ).not.toBeNull();
+    // Q6: a search typed while the page is loading claims no match either.
+    fireEvent.change(
+      present(within(picker).queryByLabelText(words.SEARCH_TITLES)),
+      { target: { value: "Event 100" } },
+    );
+    expect(claims(picker).state).toBe("loading");
+    expect(claims(picker).text).not.toContain(words.NO_MATCHES);
+    await list.release();
+    await t.settle();
+    expect(claims(picker).state).toBeUndefined();
+    expect(within(picker).queryByText("Event 100")).not.toBeNull();
+  });
+
+  test("Q7 panel ↔ picker: every opening of the picker shows loading until its read is ready, never a stale empty claim", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, {
+      online: false,
+      rows: [sourceRow, eventRow()],
+    });
+    const dialog = await openAnchorPanel(t);
+    const list = holdList(t, "event");
+    for (const round of [1, 2]) {
+      await list.hold();
+      await openPicker(t, dialog, words.CHANGE_EVENT);
+      const picker = pickerOf(dialog, "event");
+      expect(claims(picker).state, `round ${round}`).toBe("loading");
+      expect(claims(picker).text).not.toContain(words.NO_EVENTS_YET);
+      await list.release();
+      await t.settle();
+      expect(within(picker).queryByText("Bin day")).not.toBeNull();
+      fireEvent.click(
+        present(within(picker).queryByRole("button", { name: words.BACK })),
+      );
+      await t.settle();
+      expect(dialog.querySelector('[data-anchor-picker="event"]')).toBeNull();
+    }
   });
 });

@@ -13,11 +13,14 @@ import {
   CALENDAR,
   EVENT_CANCELLED,
   EVENT_MISSING,
+  EVENTS_LOADING,
+  FIELDS_LOADING,
   NO_DATE_FIELDS,
   NO_EVENTS_YET,
   NO_MATCHES,
   PICK_EVENT_TITLE,
   PICK_FIELD_TITLE,
+  PICKER_UNREADABLE,
   SEARCH_FIELDS,
   SEARCH_TITLES,
   SHOW_NEXT_EVENTS,
@@ -93,6 +96,29 @@ export function parseDateField(
     month: month as number,
     day: day as number,
   };
+}
+
+/**
+ * F40-2 (review 40; design assessment P2): a page that is not READY claims nothing. While its read has not answered (`loading`, every
+ * opening and every "Show next/previous" move) the list says it is loading; a database that cannot be read (`unavailable`) says so. Only
+ * a ready page with no rows says there are none.
+ */
+function PageState({
+  status,
+  loading,
+}: {
+  status: "loading" | "unavailable";
+  loading: string;
+}) {
+  return status === "loading" ? (
+    <div data-picker-state="loading" aria-busy="true">
+      <p className="text-[13px] text-ink-2">{loading}</p>
+    </div>
+  ) : (
+    <p data-picker-state="unavailable" className="text-[13px] text-ink-2">
+      {PICKER_UNREADABLE}
+    </p>
+  );
 }
 
 const matches = (text: string, search: string): boolean =>
@@ -224,7 +250,9 @@ export function EventPicker({
         value={search}
         onChange={(event) => setSearch(event.target.value)}
       />
-      {events.length === 0 ? (
+      {page.status !== "ready" ? (
+        <PageState status={page.status} loading={EVENTS_LOADING} />
+      ) : events.length === 0 ? (
         <p className="text-[13px] text-ink-2">{NO_EVENTS_YET}</p>
       ) : shown.length === 0 ? (
         <p className="text-[13px] text-ink-2">{NO_MATCHES}</p>
@@ -329,7 +357,9 @@ export function FieldPicker({
         value={search}
         onChange={(event) => setSearch(event.target.value)}
       />
-      {fields.length === 0 ? (
+      {page.status !== "ready" ? (
+        <PageState status={page.status} loading={FIELDS_LOADING} />
+      ) : fields.length === 0 ? (
         <p className="text-[13px] text-ink-2">{NO_DATE_FIELDS}</p>
       ) : shown.length === 0 ? (
         <p className="text-[13px] text-ink-2">{NO_MATCHES}</p>

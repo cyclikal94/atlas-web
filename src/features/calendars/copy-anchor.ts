@@ -75,6 +75,10 @@ export const SEARCH_FIELDS = "Search fields";
 export const NO_EVENTS_YET = "No events yet";
 export const NO_MATCHES = "Nothing matches";
 export const NO_DATE_FIELDS = "No date fields on this device yet";
+/** Provisional (F40-2, review 40): a picker's page while its read has not answered, and when it cannot be read. "Unknown claims nothing". */
+export const EVENTS_LOADING = "Loading events…";
+export const FIELDS_LOADING = "Loading date fields…";
+export const PICKER_UNREADABLE = "This list can't be shown on this device.";
 export const SEARCH_FURTHER = "Search further";
 export const SHOW_NEXT_EVENTS = "Show next events";
 export const SHOW_PREVIOUS_EVENTS = "Show previous events";

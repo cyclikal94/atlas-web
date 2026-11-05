@@ -261,6 +261,10 @@ export function ImportDialog({
     file !== null && !file.check.ok
       ? (FILE_PROBLEMS[file.check.reason] ?? null)
       : null;
+  // F40-1 (review 40): the file's refusal is the control's own error, as `Field` wires a field's: the button the person operates names it
+  // (after its label) and is invalid while it is shown.
+  const fileError = errors.file ?? fileProblem;
+  const fileErrorId = `${fileInputId}-error`;
 
   const submit = () => {
     if (!enablement.enabled || source === null) return;
@@ -493,7 +497,12 @@ export function ImportDialog({
           />
           <span className="flex">
             <Button
-              aria-describedby={`${fileInputId}-label`}
+              aria-describedby={
+                fileError === null
+                  ? `${fileInputId}-label`
+                  : `${fileInputId}-label ${fileErrorId}`
+              }
+              aria-invalid={fileError === null ? undefined : true}
               onClick={() => {
                 const input = fileInput.current;
                 if (input === null) return;
@@ -504,12 +513,13 @@ export function ImportDialog({
               {file === null ? CHOOSE_FILE : CHANGE_FILE}
             </Button>
           </span>
-          {(errors.file ?? fileProblem) !== null ? (
+          {fileError !== null ? (
             <p
+              id={fileErrorId}
               data-field-error=""
               className="text-[12.5px] leading-[1.5] text-ink-1"
             >
-              {errors.file ?? fileProblem}
+              {fileError}
             </p>
           ) : null}
         </div>

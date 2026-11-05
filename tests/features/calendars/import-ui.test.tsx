@@ -262,6 +262,85 @@ describe("the dialog", () => {
     },
   );
 
+  /**
+   * F40-1 (review 40, Q13; design assessment P1, Q1): the file control's refusal is programmatically its own. The button the person
+   * operates (the input is hidden) is described by its label FIRST and then by the error while one is shown, and is invalid while the
+   * file is refused; a valid choice leaves it described by the label alone. Copy and behaviour are unchanged.
+   */
+  test("F40-1: the file's refusal is the browse button's own error (label first, then the error; invalid), and a valid file clears both", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()] });
+    const dialog = await openFromRow(w);
+    const browse = () =>
+      present(
+        within(dialog).queryByRole("button", {
+          name: /^Choose (a|another) file…$/,
+        }),
+      );
+    const tokens = () =>
+      (browse().getAttribute("aria-describedby") ?? "").split(" ");
+    const shown = (text: string) => {
+      const error = present(dialog.querySelector("[data-field-error]"));
+      expect(error.textContent).toBe(text);
+      const [label, ...rest] = tokens();
+      expect(document.getElementById(label ?? "")?.textContent).toBe(
+        words.FILE,
+      );
+      expect(rest).toEqual([error.id]);
+      expect(error.id).not.toBe("");
+      expect(browse()).toHaveAttribute("aria-invalid", "true");
+    };
+    // Before anything is wrong: described by the label alone, not invalid.
+    expect(tokens()).toHaveLength(1);
+    expect(browse()).not.toHaveAttribute("aria-invalid");
+    // Import pressed with no file.
+    press(dialog, words.IMPORT);
+    await w.settle();
+    shown(words.FILE_REQUIRED);
+    expect((await axe(document.body)).violations).toEqual([]);
+    // Each refusal of a chosen file: too large, not UTF-8, too many lines, too many events.
+    const refusals: Array<[string, BlobPart]> = [
+      ["too_large", "a".repeat(1024 * 1024 + 1)],
+      ["not_utf8", new Uint8Array([0x42, 0x45, 0xff, 0xfe, 0x0a])],
+      ["too_many_lines", "\n".repeat(20_001)],
+      [
+        "too_many_events",
+        `BEGIN:VCALENDAR\r\n${"BEGIN:VEVENT\r\nEND:VEVENT\r\n".repeat(257)}END:VCALENDAR\r\n`,
+      ],
+    ];
+    for (const [reason, body] of refusals) {
+      const input = dialog.querySelector(
+        'input[type="file"]',
+      ) as HTMLInputElement;
+      await act(async () => {
+        fireEvent.change(input, {
+          target: {
+            files: [
+              new File([body], `${reason}.ics`, { type: "text/calendar" }),
+            ],
+          },
+        });
+      });
+      await w.settle();
+      await waitFor(() =>
+        expect(dialog.querySelector("[data-field-error]")?.textContent).toBe(
+          words.FILE_PROBLEMS[reason],
+        ),
+      );
+      shown(words.FILE_PROBLEMS[reason] as string);
+    }
+    // A valid file: no error, not invalid, the label alone.
+    await choose(w, dialog, ICS);
+    await waitFor(() =>
+      expect(dialog.querySelector("[data-field-error]")).toBeNull(),
+    );
+    expect(browse()).not.toHaveAttribute("aria-invalid");
+    expect(tokens()).toHaveLength(1);
+    expect(document.getElementById(tokens()[0] ?? "")?.textContent).toBe(
+      words.FILE,
+    );
+    expect(drafts(w)).toEqual([]);
+  });
+
   test("a source that becomes view-only while the dialog is open disables Import (its one read; the outbox's own denial is tested in outbox-calendar-extension)", async () => {
     const w = await calendarWorld({ cache: [sourceRow()] });
     const dialog = await openFromRow(w);

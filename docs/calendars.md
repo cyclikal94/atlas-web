@@ -309,6 +309,14 @@ read finds no row. It says "no longer available" only when the current page's hi
 the same rule a departed review follows. A review whose card was only ever loading (inserted, then deleted before its first read arrived)
 was never shown, so it simply goes; another page's history, or an earlier panel's, does not count. Evidence: `review-panel.test.tsx`
 "revision 25", MU-5247 to MU-5249.
+**Revision 33 (review 40 F40-1, F40-2):** the import dialog's file refusal ("Choose an .ics file to import." and every bound's
+refusal) is the browse button's own error: the error has an id, the button is described by its label and then by the error while one is
+shown, and it is `aria-invalid` while the file is refused (the slice's `Field` pattern; the input itself stays hidden). Both anchor pickers
+show the read's own state: while a page is loading (every opening and every "Show next/previous") they say "Loading events…" / "Loading
+date fields…" (`aria-busy`), an unreadable database says "This list can't be shown on this device.", and "No events yet" / "No date
+fields on this device yet" only for a ready, empty page (provisional copy). Evidence: `import-ui.test.tsx` "F40-1",
+`anchor-section.test.tsx` "revision 33", MU-5250 to MU-5256. The base merge of 5 November 2026 renumbered this card's colliding mutant
+IDs (`scripts/mutation/web13b-id-map-20261105.json`) and its invalidation-witness barrier to schema version 5.
 
 **Historical finding (F-13b-1; as recorded on 25 October 2026 at the first Running checkpoint `bfe4118`, pre-existing at `b9fd602`, not
 fixed in that checkpoint; kept as it was written):** an ordinary `403` to ANY queued command sent by the production
