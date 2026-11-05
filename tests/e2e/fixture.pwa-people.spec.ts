@@ -176,6 +176,8 @@ async function peopleOnA(
   context: BrowserContext,
   world: Generations,
 ): Promise<Page> {
+  // Base merge of 5 November 2026: accepted WEB-11b's People list reads the reader's pending requests; none here.
+  await world.reads({ [`${API}/people/requests`]: { items: [] } });
   await seedAccount(context, world, "acct-a", "s1", {
     validCache: "pwa-people-q4",
   });
