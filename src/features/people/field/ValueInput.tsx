@@ -58,7 +58,7 @@ export function ValueInput({
         <div className="flex flex-col gap-1.5">
           <label
             htmlFor={`${ids.text}-input`}
-            className="text-[13px] font-medium text-ink-1"
+            className="text-sm font-medium text-foreground"
           >
             {copy.FIELD_VALUE}
           </label>
@@ -76,9 +76,9 @@ export function ValueInput({
                 value: { text: event.target.value },
               })
             }
-            className="atlas-transition min-h-24 w-full rounded-control border border-field-edge bg-panel px-3 py-2.5 text-[14px] text-ink-1"
+            className="atlas-transition min-h-24 w-full rounded-md border border-input bg-card px-3 py-2.5 text-sm text-foreground"
           />
-          <span id={ids.count} className="text-[12px] text-ink-2">
+          <span id={ids.count} className="text-xs text-muted-foreground">
             {copy.CHARACTERS(charCount(text), LIMITS.text)}
           </span>
           <FieldError id={ids.text} message={message("text")} />
@@ -93,7 +93,6 @@ export function ValueInput({
               <Input
                 label={copy.AMOUNT}
                 inputMode="decimal"
-                surface="panel"
                 readOnly={readOnly}
                 value={slots.quantity.amount}
                 aria-invalid={problems.amount ? true : undefined}
@@ -110,7 +109,6 @@ export function ValueInput({
             <div className="min-w-0 flex-1">
               <Input
                 label={copy.UNIT}
-                surface="panel"
                 readOnly={readOnly}
                 value={slots.quantity.unit}
                 aria-invalid={problems.unit ? true : undefined}
@@ -135,7 +133,7 @@ export function ValueInput({
           className="flex flex-col gap-1.5"
           aria-describedby={described("date", ids.hint)}
         >
-          <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
+          <legend className="mb-1.5 text-sm font-medium text-foreground">
             {copy.FIELD_VALUE}
           </legend>
           <div className="flex gap-2">
@@ -150,7 +148,6 @@ export function ValueInput({
                 <Input
                   label={label}
                   inputMode="numeric"
-                  surface="panel"
                   readOnly={readOnly}
                   value={slots.date[part]}
                   aria-invalid={problems.date ? true : undefined}
@@ -165,7 +162,7 @@ export function ValueInput({
               </div>
             ))}
           </div>
-          <span id={ids.hint} className="text-[12px] text-ink-2">
+          <span id={ids.hint} className="text-xs text-muted-foreground">
             {copy.YEAR_HINT}
           </span>
           <FieldError id={ids.date} message={message("date")} />
@@ -177,7 +174,6 @@ export function ValueInput({
           <Input
             label={copy.LINK}
             type="url"
-            surface="panel"
             readOnly={readOnly}
             value={slots.url.url}
             aria-invalid={problems.url ? true : undefined}
@@ -199,7 +195,7 @@ export function ValueInput({
           className="flex flex-col gap-1.5"
           aria-describedby={described("boolean")}
         >
-          <span className="text-[13px] font-medium text-ink-1">
+          <span className="text-sm font-medium text-foreground">
             {copy.FIELD_VALUE}
           </span>
           <Choices<"yes" | "no">
@@ -236,7 +232,7 @@ export function ValueInput({
           className="flex flex-col gap-2"
           aria-describedby={described("options")}
         >
-          <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
+          <legend className="mb-1.5 text-sm font-medium text-foreground">
             {copy.OPTIONS}
           </legend>
           {options.map((option, index) => (
@@ -244,7 +240,6 @@ export function ValueInput({
               <div className="min-w-0 flex-1">
                 <Input
                   label={copy.OPTION_N(index + 1)}
-                  surface="panel"
                   readOnly={readOnly}
                   value={option.label}
                   onChange={(event) =>
@@ -258,7 +253,7 @@ export function ValueInput({
                   }
                 />
               </div>
-              <label className="flex min-h-11 items-center gap-2 text-[13px] text-ink-1">
+              <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
                 <input
                   type="checkbox"
                   checked={option.selected}
@@ -278,7 +273,7 @@ export function ValueInput({
               </label>
               {readOnly ? null : (
                 <Button
-                  variant="quiet"
+                  variant="ghost"
                   aria-label={`${copy.REMOVE} ${copy.OPTION_N(index + 1)}`}
                   onClick={() =>
                     set(options.filter((o) => o.key !== option.key))
@@ -312,7 +307,7 @@ export function ValueInput({
           className="flex flex-col gap-2"
           aria-describedby={described("items")}
         >
-          <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
+          <legend className="mb-1.5 text-sm font-medium text-foreground">
             {copy.ITEMS}
           </legend>
           {items.map((item, index) => (
@@ -320,7 +315,6 @@ export function ValueInput({
               <div className="min-w-0 flex-1">
                 <Input
                   label={copy.ITEM_N(index + 1)}
-                  surface="panel"
                   readOnly={readOnly}
                   value={item.label}
                   onChange={(event) =>
@@ -334,7 +328,7 @@ export function ValueInput({
                   }
                 />
               </div>
-              <label className="flex min-h-11 items-center gap-2 text-[13px] text-ink-1">
+              <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
                 <input
                   type="checkbox"
                   checked={item.checked}
@@ -354,7 +348,7 @@ export function ValueInput({
               </label>
               {readOnly ? null : (
                 <Button
-                  variant="quiet"
+                  variant="ghost"
                   aria-label={`${copy.REMOVE} ${copy.ITEM_N(index + 1)}`}
                   onClick={() => set(items.filter((i) => i.id !== item.id))}
                 >

@@ -66,11 +66,11 @@ export function HeldChanges({ personId }: { personId: string }) {
   });
   if (read.status === "loading")
     return after === null ? null : (
-      <p className="text-[13px] text-ink-2">{copy.HELD_CHECKING}</p>
+      <p className="text-sm text-muted-foreground">{copy.HELD_CHECKING}</p>
     );
   if (read.status === "unavailable")
     return read.reason === "error" ? (
-      <p className="text-[13px] text-ink-2">{copy.HELD_LIST_FAILED}</p>
+      <p className="text-sm text-muted-foreground">{copy.HELD_LIST_FAILED}</p>
     ) : null;
   if (!read.value.witnessed) return null;
   const { copies: rows, next } = read.value.page;
@@ -100,17 +100,17 @@ export function HeldChanges({ personId }: { personId: string }) {
           })}
         </List>
       ) : next !== null ? (
-        <p className="text-[13px] text-ink-2">{copy.HELD_MORE_EMPTY}</p>
+        <p className="text-sm text-muted-foreground">{copy.HELD_MORE_EMPTY}</p>
       ) : null}
       {next !== null || after !== null ? (
         <div className="flex flex-wrap gap-2">
           {after !== null ? (
-            <Button variant="quiet" onClick={() => setAfter(null)}>
+            <Button variant="ghost" onClick={() => setAfter(null)}>
               {copy.HELD_FIRST}
             </Button>
           ) : null}
           {next !== null ? (
-            <Button variant="quiet" onClick={() => setAfter(next)}>
+            <Button variant="ghost" onClick={() => setAfter(next)}>
               {copy.HELD_MORE}
             </Button>
           ) : null}
@@ -166,18 +166,18 @@ function UnreadableHeld({
   return (
     <li
       data-held-change={holdId}
-      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col items-start gap-2 rounded-lg border border-border bg-card p-3"
     >
-      <p className="text-[13px] text-ink-1">{copy.HELD_UNREADABLE}</p>
+      <p className="text-sm text-foreground">{copy.HELD_UNREADABLE}</p>
       {note !== null ? (
-        <p className="text-[12.5px] text-conflict-text">{note}</p>
+        <p className="text-xs text-destructive">{note}</p>
       ) : null}
       {busy ? (
-        <Button variant="quiet" disabled reason={copy.SAVING}>
+        <Button variant="ghost" disabled reason={copy.SAVING}>
           {copy.DISCARD}
         </Button>
       ) : (
-        <Button variant="quiet" onClick={() => void discard()}>
+        <Button variant="ghost" onClick={() => void discard()}>
           {copy.DISCARD}
         </Button>
       )}
@@ -427,9 +427,9 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
     <li
       data-held-change={holdId}
       data-held-field={change.fieldId}
-      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col items-start gap-2 rounded-lg border border-border bg-card p-3"
     >
-      <p className="text-[13px] text-ink-1">
+      <p className="text-sm text-foreground">
         {stopping
           ? copy.HELD_STOPPING(change.label)
           : discarding
@@ -441,12 +441,10 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
                 : copy.HELD_RECOVERED(change.label)}
       </p>
       {run === undefined && failure !== null ? (
-        <p className="text-[12.5px] text-conflict-text">
-          {copy.HELD_FAILED[failure]}
-        </p>
+        <p className="text-xs text-destructive">{copy.HELD_FAILED[failure]}</p>
       ) : null}
       {note !== null ? (
-        <p className="text-[12.5px] text-conflict-text">{note}</p>
+        <p className="text-xs text-destructive">{note}</p>
       ) : null}
       <div className="flex flex-wrap gap-2">
         {retryable && !discarding ? (
@@ -461,11 +459,11 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
           )
         ) : null}
         {stopping || discarding ? (
-          <Button variant="quiet" disabled reason={copy.SAVING}>
+          <Button variant="ghost" disabled reason={copy.SAVING}>
             {copy.DISCARD}
           </Button>
         ) : (
-          <Button variant="quiet" onClick={() => void discard()}>
+          <Button variant="ghost" onClick={() => void discard()}>
             {copy.DISCARD}
           </Button>
         )}
@@ -537,18 +535,18 @@ function RetiredHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
       data-held-change={change.holdId}
       data-held-field={change.fieldId}
       data-held-retired=""
-      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col items-start gap-2 rounded-lg border border-border bg-card p-3"
     >
-      <p className="text-[13px] text-ink-1">
+      <p className="text-sm text-foreground">
         {copy.HELD_UNRESOLVED(change.label)}
       </p>
       {observed !== null ? (
-        <p className="text-[13px] text-ink-2" data-held-observed="">
+        <p className="text-sm text-muted-foreground" data-held-observed="">
           {observed}
         </p>
       ) : null}
       {note !== null ? (
-        <p className="text-[12.5px] text-conflict-text">{note}</p>
+        <p className="text-xs text-destructive">{note}</p>
       ) : null}
       <div className="flex flex-wrap gap-2">
         {busy ? (
@@ -563,11 +561,11 @@ function RetiredHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
           </Button>
         )}
         {busy ? (
-          <Button variant="quiet" disabled reason={copy.SAVING}>
+          <Button variant="ghost" disabled reason={copy.SAVING}>
             {copy.DISCARD}
           </Button>
         ) : (
-          <Button variant="quiet" onClick={() => void discard()}>
+          <Button variant="ghost" onClick={() => void discard()}>
             {copy.DISCARD}
           </Button>
         )}
@@ -613,32 +611,32 @@ function UnboundHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
       data-held-change={change.holdId}
       data-held-field={change.fieldId}
       data-held-unbound=""
-      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col items-start gap-2 rounded-lg border border-border bg-card p-3"
     >
-      <p className="text-[13px] text-ink-1">
+      <p className="text-sm text-foreground">
         {copy.HELD_UNBOUND(change.label)}
       </p>
-      <div className="text-[13px] text-ink-2" data-held-value="">
+      <div className="text-sm text-muted-foreground" data-held-value="">
         <FieldValueView raw={change.value} />
       </div>
       {policy === "maybe" ? (
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {copy.HELD_UNBOUND_POLICY_MAYBE(change.label)}
         </p>
       ) : policy === "done" ? (
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {copy.HELD_UNBOUND_POLICY_DONE(change.label)}
         </p>
       ) : null}
       {note !== null ? (
-        <p className="text-[12.5px] text-conflict-text">{note}</p>
+        <p className="text-xs text-destructive">{note}</p>
       ) : null}
       {busy ? (
-        <Button variant="quiet" disabled reason={copy.SAVING}>
+        <Button variant="ghost" disabled reason={copy.SAVING}>
           {copy.DISCARD}
         </Button>
       ) : (
-        <Button variant="quiet" onClick={() => void discard()}>
+        <Button variant="ghost" onClick={() => void discard()}>
           {copy.DISCARD}
         </Button>
       )}
@@ -680,18 +678,20 @@ function LegacyHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
       data-held-change={change.holdId}
       data-held-field={change.fieldId}
       data-held-legacy=""
-      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col items-start gap-2 rounded-lg border border-border bg-card p-3"
     >
-      <p className="text-[13px] text-ink-1">{copy.HELD_LEGACY(change.label)}</p>
+      <p className="text-sm text-foreground">
+        {copy.HELD_LEGACY(change.label)}
+      </p>
       {note !== null ? (
-        <p className="text-[12.5px] text-conflict-text">{note}</p>
+        <p className="text-xs text-destructive">{note}</p>
       ) : null}
       {busy ? (
-        <Button variant="quiet" disabled reason={copy.SAVING}>
+        <Button variant="ghost" disabled reason={copy.SAVING}>
           {copy.DISCARD}
         </Button>
       ) : (
-        <Button variant="quiet" onClick={() => void discard()}>
+        <Button variant="ghost" onClick={() => void discard()}>
           {copy.DISCARD}
         </Button>
       )}

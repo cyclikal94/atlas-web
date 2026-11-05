@@ -33,7 +33,7 @@ function ListHeader() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
           <PageHeading>{copy.PAGE_TITLE}</PageHeading>
-          <p className="text-[13.5px] text-ink-2">{copy.PAGE_SUBHEAD}</p>
+          <p className="text-sm text-muted-foreground">{copy.PAGE_SUBHEAD}</p>
         </div>
         {/* WEB-11b: "Requests" with the waiting count (every layout), and the "N requests waiting for you" banner (below 1280 px). */}
         <RequestsEntry />
@@ -71,7 +71,7 @@ function PeopleLayout() {
           <div className="min-w-0">
             {personId === null ? (
               <p
-                className="text-[13.5px] text-ink-2"
+                className="text-sm text-muted-foreground"
                 data-people-state="select"
               >
                 {copy.SELECT_PERSON}
@@ -88,7 +88,7 @@ function PeopleLayout() {
       <div className="flex flex-col gap-3">
         <Link
           to="/people"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-[13.5px] text-ink-2 hover:text-ink-1"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft aria-hidden="true" size={16} />
           {copy.BACK_TO_PEOPLE}

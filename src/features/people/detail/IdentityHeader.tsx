@@ -121,19 +121,21 @@ export function IdentityHeader({
           />
           <div className="flex flex-wrap items-center gap-2">
             {person.archived ? (
-              <span className="text-[12.5px] text-ink-2">
+              <span className="text-xs text-muted-foreground">
                 {copy.ARCHIVED_TAG}
               </span>
             ) : null}
             <PendingBadge mark={shown.pending} />
             {updating ? (
-              <span className="text-[12.5px] text-ink-2">{copy.UPDATING}</span>
+              <span className="text-xs text-muted-foreground">
+                {copy.UPDATING}
+              </span>
             ) : null}
           </div>
         </div>
       </div>
       {person.archived ? (
-        <p className="text-[13px] text-ink-2" data-archived-person="">
+        <p className="text-sm text-muted-foreground" data-archived-person="">
           {copy.ARCHIVED_PERSON}
         </p>
       ) : null}
@@ -211,7 +213,7 @@ export function IdentityHeader({
 
 function SubHeading({ children }: { children: ReactNode }) {
   return (
-    <h2 className="text-[22px] font-semibold tracking-[-0.025em] text-ink-1">
+    <h2 className="text-2xl font-semibold tracking-[-0.025em] text-foreground">
       {children}
     </h2>
   );
@@ -230,7 +232,7 @@ function LinkageLine({
 }) {
   if (linkage.known)
     return (
-      <p className="text-[13px] text-ink-2" data-linkage={linkage.kind}>
+      <p className="text-sm text-muted-foreground" data-linkage={linkage.kind}>
         {linkage.kind === "self"
           ? copy.LINK_SELF
           : linkage.kind === "other"
@@ -240,12 +242,12 @@ function LinkageLine({
     );
   return (
     <div className="flex flex-wrap items-center gap-2" data-linkage="unknown">
-      <p className="text-[13px] text-ink-2">
+      <p className="text-sm text-muted-foreground">
         {copy.LINK_UNKNOWN}. {copy.LINK_UNKNOWN_REASON[linkage.reason]}
       </p>
       {online &&
       (linkage.reason === "failed" || linkage.reason === "refused") ? (
-        <Button variant="quiet" onClick={onRetry}>
+        <Button variant="ghost" onClick={onRetry}>
           {copy.TRY_AGAIN}
         </Button>
       ) : null}
@@ -290,11 +292,14 @@ function DuplicatesEntry({
       to="/people/$personId/duplicates"
       params={{ personId }}
       data-people-action="duplicates"
-      className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+      className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-card px-4 text-sm text-foreground hover:bg-accent"
     >
       {copy.POSSIBLE_DUPLICATES}
       {count === null ? null : (
-        <span className="font-num text-ink-2" data-duplicates-count="">
+        <span
+          className="font-num text-muted-foreground"
+          data-duplicates-count=""
+        >
           {count}
         </span>
       )}
@@ -689,7 +694,7 @@ function RenameForm({
   return (
     <form
       data-rename-form=""
-      className="flex max-w-[440px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex max-w-[440px] flex-col gap-2 rounded-lg border border-border bg-card p-3.5"
       onSubmit={(event) => {
         event.preventDefault();
         if (reason === null) void submit();
@@ -699,7 +704,6 @@ function RenameForm({
         <Input
           label={copy.NAME}
           value={name}
-          surface="panel"
           aria-invalid={message ? true : undefined}
           aria-describedby={message ? errorId : undefined}
           onChange={(event) => {
@@ -709,15 +713,15 @@ function RenameForm({
         />
         {message ? (
           <div id={errorId} className="flex flex-col items-start gap-1">
-            <p className="text-[12.5px] text-conflict-text">{message.text}</p>
+            <p className="text-xs text-destructive">{message.text}</p>
             {message.requestId ? (
-              <p className="font-num select-all text-[12px] text-ink-2">
+              <p className="font-num select-all text-xs text-muted-foreground">
                 Reference: {message.requestId}
               </p>
             ) : null}
             {message.reload ? (
               <Button
-                variant="quiet"
+                variant="ghost"
                 onClick={() => readLinkage(env, person.id, { force: true })}
               >
                 {copy.RELOAD}
@@ -728,18 +732,18 @@ function RenameForm({
         <div className="flex flex-wrap items-start gap-2">
           {reason === null ? (
             <Button
-              variant="primary"
+              variant="default"
               type="submit"
               data-people-action="save-rename"
             >
               {copy.SAVE}
             </Button>
           ) : (
-            <Button variant="primary" disabled reason={reason}>
+            <Button variant="default" disabled reason={reason}>
               {copy.SAVE}
             </Button>
           )}
-          <Button variant="quiet" onClick={close}>
+          <Button variant="ghost" onClick={close}>
             {copy.CANCEL}
           </Button>
         </div>
@@ -916,20 +920,20 @@ function UnlinkDialog({
       onClose={onClose}
       footer={
         <>
-          <Button variant="quiet" onClick={onClose}>
+          <Button variant="ghost" onClick={onClose}>
             {copy.CANCEL}
           </Button>
           <span className="ml-auto">
             {reason === null ? (
               <Button
-                variant="primary"
+                variant="default"
                 data-people-action="confirm-unlink"
                 onClick={() => void confirm()}
               >
                 {copy.UNLINK}
               </Button>
             ) : (
-              <Button variant="primary" disabled reason={reason}>
+              <Button variant="default" disabled reason={reason}>
                 {copy.UNLINK}
               </Button>
             )}
@@ -938,7 +942,7 @@ function UnlinkDialog({
       }
     >
       <div className="flex flex-col gap-3">
-        <p className="text-[13.5px] leading-[1.6] text-ink-1">
+        <p className="text-sm leading-[1.6] text-foreground">
           {copy.UNLINK_BODY}
         </p>
         {message ? (
@@ -960,38 +964,38 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
   // canonical person, so a press would act on the OTHER person).
   if (isMergedAlias(person) !== null)
     return (
-      <Button variant="quiet" disabled reason={requestsCopy.ALIAS_NO_RESTORE}>
+      <Button variant="ghost" disabled reason={requestsCopy.ALIAS_NO_RESTORE}>
         {label}
       </Button>
     );
   if (shown.projected)
     return (
-      <Button variant="quiet" disabled reason={copy.WAIT_FOR_SYNC_PERSON}>
+      <Button variant="ghost" disabled reason={copy.WAIT_FOR_SYNC_PERSON}>
         {label}
       </Button>
     );
   if (!person.can_edit)
     return (
-      <Button variant="quiet" disabled reason={copy.RENAME_CANNOT_EDIT}>
+      <Button variant="ghost" disabled reason={copy.RENAME_CANNOT_EDIT}>
         {label}
       </Button>
     );
   if (!env.writable)
     return (
-      <Button variant="quiet" disabled reason={copy.READ_ONLY_COMPAT}>
+      <Button variant="ghost" disabled reason={copy.READ_ONLY_COMPAT}>
         {label}
       </Button>
     );
   if (action.pending)
     return (
-      <Button variant="quiet" disabled reason={copy.SAVING}>
+      <Button variant="ghost" disabled reason={copy.SAVING}>
         {label}
       </Button>
     );
   return (
     <span className="inline-flex flex-col items-start gap-1">
       <Button
-        variant="quiet"
+        variant="ghost"
         data-people-action={
           person.archived ? "restore-person" : "archive-person"
         }
@@ -1000,7 +1004,7 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
         {label}
       </Button>
       {action.message ? (
-        <span className="text-[12px] text-conflict-text">{action.message}</span>
+        <span className="text-xs text-destructive">{action.message}</span>
       ) : null}
     </span>
   );

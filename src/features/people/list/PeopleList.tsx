@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { Search } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -118,25 +119,32 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
     <div ref={root} className="flex min-w-0 flex-col gap-4" data-people-list="">
       <div className="flex flex-wrap items-center gap-2">
         <Button
-          variant="primary"
+          variant="default"
           data-people-action="new-person"
           onClick={() => setCreating(true)}
         >
           {copy.NEW_PERSON}
         </Button>
       </div>
-      <div className="flex flex-col gap-2">
-        <Input
-          id={searchId}
-          type="search"
-          aria-label={copy.SEARCH}
-          placeholder={copy.SEARCH}
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            setStarts([null]);
-          }}
-        />
+      <div className="flex flex-col gap-3">
+        <div className="relative">
+          <Search
+            aria-hidden="true"
+            className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            id={searchId}
+            type="search"
+            aria-label={copy.SEARCH}
+            placeholder={copy.SEARCH}
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setStarts([null]);
+            }}
+            className="rounded-full bg-card pl-10"
+          />
+        </div>
         <fieldset className="flex flex-wrap items-center gap-1.5">
           <legend className="sr-only">{copy.FILTER_LABEL}</legend>
           {VIEWS.map(({ view: value, label }) => (
@@ -150,7 +158,7 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
                 setView(value);
                 setStarts([null]);
               }}
-              className={`atlas-transition min-h-11 rounded-control border px-3 text-[13px] text-ink-1 hover:bg-row-hover data-[status=active]:bg-select-tint ${view === value ? "border-action-fill" : "border-hairline-strong"}`}
+              className={`atlas-transition inline-flex h-9 items-center rounded-full border px-3 text-xs text-foreground hover:bg-accent hover:text-accent-foreground data-[status=active]:bg-accent data-[status=active]:font-medium data-[status=active]:text-accent-foreground ${view === value ? "border-primary/40" : "border-border bg-card"}`}
             >
               {label}
             </button>
@@ -459,9 +467,9 @@ function CachedRows({
     const panel = (
       <div
         data-people-state={neverSynced ? "offline-first-visit" : "empty"}
-        className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+        className="flex flex-col items-start gap-3 rounded-lg border border-border bg-card p-4"
       >
-        <p className="text-[13.5px] leading-[1.55] text-ink-1">
+        <p className="text-sm leading-[1.55] text-foreground">
           {neverSynced
             ? inputs.online
               ? copy.NOT_SYNCED_YET
@@ -493,7 +501,7 @@ function CachedRows({
       {cacheFailed}
       {notice}
       {neverSynced ? (
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {inputs.online ? copy.NOT_SYNCED_YET : copy.OFFLINE_FIRST_VISIT}
         </p>
       ) : null}
@@ -501,7 +509,10 @@ function CachedRows({
         // Nobody (matching) is claimed only from complete inventories; otherwise the notices above say what could not be read.
         known && status !== "failed" ? (
           confirmed(
-            <p data-people-state="no-match" className="text-[13px] text-ink-2">
+            <p
+              data-people-state="no-match"
+              className="text-sm text-muted-foreground"
+            >
               {wanted !== ""
                 ? step.end
                   ? copy.NO_MATCH(query.trim())
@@ -528,14 +539,17 @@ function CachedRows({
         </List>
       )}
       {partial && shown.length > 0 ? (
-        <p className="text-[12.5px] text-ink-2" data-people-state="partial">
+        <p
+          className="text-xs text-muted-foreground"
+          data-people-state="partial"
+        >
           {copy.SEARCH_PARTIAL(shown.length)}
         </p>
       ) : null}
       <Steps onPrevious={onPrevious} onNext={onNext} partial={partial} />
       {outstanding.capped ? (
         <p
-          className="text-[12.5px] text-ink-2"
+          className="text-xs text-muted-foreground"
           data-people-state="outstanding-capped"
         >
           {copy.OUTSTANDING_CAPPED}
@@ -648,7 +662,10 @@ function ScopeSteps({
     <div className="flex flex-col gap-2" data-people-scope={scope}>
       <ChangesNotice outstanding={outstanding} onRetry={onRetry} />
       {rows.length === 0 && !claimable ? null : rows.length === 0 ? (
-        <p data-people-state="no-match" className="text-[13px] text-ink-2">
+        <p
+          data-people-state="no-match"
+          className="text-sm text-muted-foreground"
+        >
           {wanted !== ""
             ? end
               ? copy.NO_MATCH(query.trim())
@@ -668,7 +685,7 @@ function ScopeSteps({
               summary={summary}
               count={
                 <span
-                  className="flex-none text-[12.5px] text-ink-2"
+                  className="flex-none text-xs text-muted-foreground"
                   data-field-count=""
                 >
                   {copy.FIELD_COUNT(summary.field_count)}
@@ -680,7 +697,10 @@ function ScopeSteps({
         </List>
       )}
       {partial && rows.length > 0 ? (
-        <p className="text-[12.5px] text-ink-2" data-people-state="partial">
+        <p
+          className="text-xs text-muted-foreground"
+          data-people-state="partial"
+        >
           {copy.SEARCH_PARTIAL(rows.length)}
         </p>
       ) : null}
@@ -712,7 +732,7 @@ function Skeleton() {
       {[0, 1, 2, 3, 4].map((n) => (
         <div
           key={n}
-          className="min-h-12 rounded-row border border-hairline bg-panel"
+          className="min-h-12 rounded-lg border border-border bg-card"
         />
       ))}
     </div>
@@ -723,9 +743,9 @@ function StatePanel({ state, message }: { state: string; message: string }) {
   return (
     <div
       data-people-state={state}
-      className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+      className="flex flex-col items-start gap-3 rounded-lg border border-border bg-card p-4"
     >
-      <p className="text-[13.5px] leading-[1.55] text-ink-1">{message}</p>
+      <p className="text-sm leading-[1.55] text-foreground">{message}</p>
     </div>
   );
 }
@@ -799,14 +819,14 @@ function PersonRow({
         aria-current={selected ? "page" : undefined}
         data-person-row={person.id}
         data-status={selected ? "active" : undefined}
-        className={`atlas-transition flex min-h-12 items-center gap-3 rounded-row border px-3 py-2 hover:bg-row-hover data-[status=active]:bg-select-tint ${selected ? "border-action-fill" : "border-hairline"}`}
+        className={`atlas-transition flex min-h-12 items-center gap-3 rounded-[10px] px-3 py-2 hover:bg-accent/60 data-[status=active]:bg-accent ${selected ? "text-accent-foreground" : ""}`}
       >
         <Avatar name={person.label} />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-[14px] text-ink-1">
+          <span className="truncate text-[15px] leading-6 text-foreground">
             {person.label}
           </span>
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-ink-2">
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             {attribution !== null ? (
               <span data-person-attribution="">{attribution}</span>
             ) : null}
@@ -821,7 +841,7 @@ function PersonRow({
           </span>
           {summary !== null ? (
             <span
-              className="text-[12.5px] text-ink-2"
+              className="text-xs text-muted-foreground"
               data-person-audience={summary.audience.disclosure}
             >
               {copy.VISIBLE_TO(audienceText(summary.audience))}
@@ -851,7 +871,10 @@ function FieldCount({ personId }: { personId: string }) {
     (row: { merged: CacheRow }) => !row.merged.archived,
   ).length;
   return (
-    <span className="flex-none text-[12.5px] text-ink-2" data-field-count="">
+    <span
+      className="flex-none text-xs text-muted-foreground"
+      data-field-count=""
+    >
       {page.next === null
         ? copy.FIELD_COUNT(count)
         : `${copy.FIELD_COUNT(count)}+`}

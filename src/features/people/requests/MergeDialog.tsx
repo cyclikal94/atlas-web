@@ -83,13 +83,19 @@ function Cell({
   hidden: boolean;
 }) {
   if (hidden)
-    return <span className="text-[12.5px] text-ink-2">{copy.NOT_VISIBLE}</span>;
-  if (cell === null) return <span className="text-ink-2">{copy.NONE}</span>;
+    return (
+      <span className="text-xs text-muted-foreground">{copy.NOT_VISIBLE}</span>
+    );
+  if (cell === null)
+    return <span className="text-muted-foreground">{copy.NONE}</span>;
   if (cell.kind === "name")
-    return <span className="text-[13.5px] text-ink-1">{cell.text}</span>;
+    return <span className="text-sm text-foreground">{cell.text}</span>;
   if (cell.kind === "unsynced")
     return (
-      <span className="text-[12.5px] text-ink-2" data-comparison-unsynced="">
+      <span
+        className="text-xs text-muted-foreground"
+        data-comparison-unsynced=""
+      >
         {copy.NOT_ON_DEVICE}
       </span>
     );
@@ -130,7 +136,7 @@ function Comparison({
       data-merge-comparison=""
     >
       <thead>
-        <tr className="border-b border-hairline text-[12px] text-ink-2">
+        <tr className="border-b border-border text-xs text-muted-foreground">
           <th scope="col" className="py-2 font-medium" style={{ width: "28%" }}>
             {copy.FIELD}
           </th>
@@ -146,10 +152,13 @@ function Comparison({
         {rows.map((row) => (
           <tr
             key={row.key}
-            className="border-b border-hairline"
+            className="border-b border-border"
             data-comparison-row={row.key}
           >
-            <th scope="row" className="py-2 text-[13px] font-medium text-ink-1">
+            <th
+              scope="row"
+              className="py-2 text-sm font-medium text-foreground"
+            >
               {row.label}
             </th>
             <td className="py-2">
@@ -184,7 +193,7 @@ function ConflictNote({
   return (
     <div className="flex flex-col gap-1" data-merge-conflicts="">
       {labels.map((label) => (
-        <p key={label} className="text-[12.5px] leading-[1.55] text-ink-2">
+        <p key={label} className="text-xs leading-[1.55] text-muted-foreground">
           {copy.BOTH_HAVE(label, (preview.source as Projection).label)}
         </p>
       ))}
@@ -207,13 +216,15 @@ function FreezeNote({ id, freezes }: { id: string; freezes: boolean }) {
       tabIndex={0}
       aria-labelledby={heading}
       data-merge-consequence=""
-      className="flex flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3.5"
     >
-      <h3 id={heading} className="text-[13.5px] font-medium text-ink-1">
+      <h3 id={heading} className="text-sm font-medium text-foreground">
         {copy.FREEZE_TITLE}
       </h3>
-      <p className="text-[13px] leading-[1.6] text-ink-1">{copy.FREEZE_BODY}</p>
-      <p className="text-[13px] leading-[1.6] text-ink-2">
+      <p className="text-sm leading-[1.6] text-foreground">
+        {copy.FREEZE_BODY}
+      </p>
+      <p className="text-sm leading-[1.6] text-muted-foreground">
         {copy.FREEZE_BLOCKED}
       </p>
     </section>
@@ -418,7 +429,7 @@ export function SenderMerge({
     );
   } else if (drawn === null) {
     body = (
-      <p className="text-[13.5px] text-ink-2" data-merge-state="loading">
+      <p className="text-sm text-muted-foreground" data-merge-state="loading">
         {copy.PREVIEW_LOADING}
       </p>
     );
@@ -459,7 +470,7 @@ export function SenderMerge({
           />
         ) : null}
         <section className="flex flex-col gap-2" data-merge-name="">
-          <h3 className="text-[13px] font-medium text-ink-1">
+          <h3 className="text-sm font-medium text-foreground">
             {copy.NAME_AFTER}
           </h3>
           {naming.kind === "choose" &&
@@ -476,19 +487,19 @@ export function SenderMerge({
               ]}
             />
           ) : (
-            <p className="text-[13.5px] text-ink-1" data-merge-name-fixed="">
+            <p className="text-sm text-foreground" data-merge-name-fixed="">
               {naming.kind === "fixed" ? naming.name : preview.target.label}
             </p>
           )}
           {naming.kind === "fixed" ? (
-            <p className="text-[12.5px] text-ink-2">{copy.LINKED_NAME}</p>
+            <p className="text-xs text-muted-foreground">{copy.LINKED_NAME}</p>
           ) : null}
           {naming.kind === "unknown" ? (
-            <span className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
+            <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               {copy.LINKAGE_UNKNOWN}
               {env.online ? (
                 <Button
-                  variant="quiet"
+                  variant="ghost"
                   onClick={() => {
                     source.retry();
                     target.retry();
@@ -510,18 +521,18 @@ export function SenderMerge({
       : copy.MERGE_THEM;
     footer = (
       <>
-        <span className="flex flex-col gap-0.5 text-[12.5px] text-ink-2">
+        <span className="flex flex-col gap-0.5 text-xs text-muted-foreground">
           <span>
             {needsApproval ? copy.HAS_TO_ACCEPT(owner) : copy.OWN_BOTH}
           </span>
           {needsApproval ? <span>{copy.EXPIRES_IN_7}</span> : null}
         </span>
-        <Button variant="quiet" onClick={onClose}>
+        <Button variant="ghost" onClick={onClose}>
           {copy.CANCEL}
         </Button>
         {reason === null ? (
           <Button
-            variant="primary"
+            variant="default"
             data-people-action="confirm-merge"
             aria-describedby={consequence}
             onClick={() => void press()}
@@ -529,7 +540,7 @@ export function SenderMerge({
             {retained ? copy.TRY_AGAIN : label}
           </Button>
         ) : (
-          <Button variant="primary" disabled reason={reason}>
+          <Button variant="default" disabled reason={reason}>
             {retained ? copy.TRY_AGAIN : label}
           </Button>
         )}
@@ -547,21 +558,21 @@ export function SenderMerge({
       footer={
         footer ?? (
           <>
-            <Button variant="quiet" onClick={onClose}>
+            <Button variant="ghost" onClick={onClose}>
               {copy.CLOSE}
             </Button>
             {/* A retained uncertain merge stays reachable whatever the comparison shows now: it is sent again as it was. */}
             {retained ? (
               blocked === null ? (
                 <Button
-                  variant="primary"
+                  variant="default"
                   data-people-action="confirm-merge"
                   onClick={() => void press()}
                 >
                   {copy.TRY_AGAIN}
                 </Button>
               ) : (
-                <Button variant="primary" disabled reason={blocked}>
+                <Button variant="default" disabled reason={blocked}>
                   {copy.TRY_AGAIN}
                 </Button>
               )
@@ -738,7 +749,7 @@ export function RecipientReview({
     );
   } else if (drawn === null) {
     body = (
-      <p className="text-[13.5px] text-ink-2" data-merge-state="loading">
+      <p className="text-sm text-muted-foreground" data-merge-state="loading">
         {copy.PREVIEW_LOADING}
       </p>
     );
@@ -772,22 +783,24 @@ export function RecipientReview({
     const left = request ? timeLeft(request.expires_at, env.now()) : null;
     body = (
       <>
-        <p className="text-[12.5px] text-ink-2" data-review-asked="">
+        <p className="text-xs text-muted-foreground" data-review-asked="">
           {copy.ASKED(senderText)}
           {left ? ` · ${timeLeftText(left)}` : ""}
         </p>
         {sender === null ? (
-          <p className="text-[12.5px] text-ink-2">{copy.UNNAMED_CAUTION}</p>
+          <p className="text-xs text-muted-foreground">
+            {copy.UNNAMED_CAUTION}
+          </p>
         ) : null}
         {preview.stale ? (
           <Banner message={copy.STALE(senderText)} tone="note" />
         ) : null}
         {request?.proposal.kind === "merge" ? (
           <section className="flex flex-col gap-1" data-merge-name="">
-            <h3 className="text-[13px] font-medium text-ink-1">
+            <h3 className="text-sm font-medium text-foreground">
               {copy.NAME_AFTER}
             </h3>
-            <p className="text-[13.5px] text-ink-1">{request.proposal.name}</p>
+            <p className="text-sm text-foreground">{request.proposal.name}</p>
           </section>
         ) : null}
         {bothVisible ? (
@@ -795,16 +808,16 @@ export function RecipientReview({
         ) : (
           <div className="flex flex-col gap-2" data-merge-partial="">
             <Comparison preview={preview} />
-            <h3 className="text-[13.5px] font-medium text-ink-1">
+            <h3 className="text-sm font-medium text-foreground">
               {copy.COMPARISON_UNAVAILABLE}
             </h3>
-            <p className="text-[13px] leading-[1.6] text-ink-2">
+            <p className="text-sm leading-[1.6] text-muted-foreground">
               {copy.PARTIAL_VIEW(senderText)}
             </p>
-            <p className="text-[13px] leading-[1.6] text-ink-2">
+            <p className="text-sm leading-[1.6] text-muted-foreground">
               {copy.PARTIAL_CHECKS(senderText)}
             </p>
-            <p className="text-[12.5px] text-ink-2">
+            <p className="text-xs text-muted-foreground">
               {copy.CANNOT_CHECK_HIDDEN}
             </p>
           </div>
@@ -819,12 +832,12 @@ export function RecipientReview({
   // A retained uncertain answer stays reachable whatever the preview shows now (it is sent again as it was).
   const footer =
     gone && retained === null ? (
-      <Button variant="quiet" onClick={onClose}>
+      <Button variant="ghost" onClick={onClose}>
         {copy.CLOSE}
       </Button>
     ) : (
       <>
-        <Button variant="quiet" onClick={onClose}>
+        <Button variant="ghost" onClick={onClose}>
           {copy.CLOSE}
         </Button>
         {declineReason === null ? (
@@ -842,7 +855,7 @@ export function RecipientReview({
         {expired && retained !== true ? null : acceptReason === null &&
           (preview !== null || retained === true) ? (
           <Button
-            variant="primary"
+            variant="default"
             data-people-action="accept-merge"
             aria-describedby={consequence}
             onClick={() => void respond(true)}
@@ -851,7 +864,7 @@ export function RecipientReview({
           </Button>
         ) : (
           <Button
-            variant="primary"
+            variant="default"
             disabled
             reason={acceptReason ?? copy.LOAD_FIRST}
           >

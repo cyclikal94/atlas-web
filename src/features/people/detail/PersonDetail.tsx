@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { Button } from "../../../components/ui/button";
+import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
 import { List } from "../../../components/ui/list";
 import {
   useCachedResource,
@@ -235,13 +236,17 @@ function PersonRead({
               ) : null}
               <Conflicts ids={[personId]} />
             </div>
-            <FieldsSection
-              person={shown}
-              changes={changes}
-              changesKnown={changesKnown}
-            />
-            {shown.projected ? null : <SharedWithSection personId={personId} />}
-            <DefaultsPanel />
+            <GroupedBox data-person-sections="">
+              <FieldsSection
+                person={shown}
+                changes={changes}
+                changesKnown={changesKnown}
+              />
+              {shown.projected ? null : (
+                <SharedWithSection personId={personId} />
+              )}
+              <DefaultsPanel />
+            </GroupedBox>
             {children}
           </div>
         );
@@ -257,11 +262,11 @@ function DetailSkeleton() {
       data-people-state="loading"
       className="flex flex-col gap-3"
     >
-      <div className="min-h-12 w-48 rounded-row bg-panel" />
+      <div className="min-h-12 w-48 rounded-lg bg-card" />
       {[0, 1, 2].map((n) => (
         <div
           key={n}
-          className="min-h-12 rounded-row border border-hairline bg-panel"
+          className="min-h-12 rounded-lg border border-border bg-card"
         />
       ))}
     </div>
@@ -278,9 +283,9 @@ function ReadFailed({
   return (
     <div
       data-people-state="read-failed"
-      className="flex max-w-[620px] flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+      className="flex max-w-[620px] flex-col items-start gap-3 rounded-lg border border-border bg-card p-4"
     >
-      <p className="text-[13.5px] leading-[1.55] text-ink-1">{message}</p>
+      <p className="text-sm leading-[1.55] text-foreground">{message}</p>
       <Button onClick={onRetry}>{copy.TRY_AGAIN}</Button>
     </div>
   );
@@ -290,14 +295,14 @@ function NotOnDevice() {
   return (
     <div
       data-people-state="not-on-device"
-      className="flex max-w-[620px] flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+      className="flex max-w-[620px] flex-col items-start gap-3 rounded-lg border border-border bg-card p-4"
     >
-      <p className="text-[13.5px] leading-[1.55] text-ink-1">
+      <p className="text-sm leading-[1.55] text-foreground">
         {copy.NOT_ON_DEVICE}
       </p>
       <Link
         to="/people"
-        className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+        className="atlas-transition inline-flex min-h-11 items-center rounded-md border border-border bg-card px-4 text-sm text-foreground hover:bg-accent"
       >
         {copy.BACK_TO_PEOPLE}
       </Link>
@@ -332,7 +337,7 @@ function Conflicts({ ids }: { ids: readonly string[] }) {
             <Link
               to="/sync"
               search={{ tab: "conflicts" }}
-              className="min-h-11 text-[13px] text-action-ink underline"
+              className="min-h-11 text-sm text-primary underline"
             >
               {copy.RELOAD}
             </Link>
@@ -357,11 +362,12 @@ function FieldsSection({
   const personId = person.row.id;
   const reviewing = person.projected && person.pending === "reviewing";
   return (
-    <section aria-labelledby={heading} className="flex flex-col gap-3">
+    <GroupedSection
+      aria-labelledby={heading}
+      data-fields-section=""
+      heading={<h3 id={heading}>{copy.FIELDS}</h3>}
+    >
       <div className="flex flex-wrap items-center gap-3">
-        <h3 id={heading} className="text-[17px] font-medium text-ink-1">
-          {copy.FIELDS}
-        </h3>
         <span className="ml-auto">
           {reviewing ? (
             <Button disabled reason={copy.CREATE_BLOCKED_REVIEW}>
@@ -372,7 +378,7 @@ function FieldsSection({
               to="/people/$personId/fields/new"
               params={{ personId }}
               data-people-action="add-field"
-              className="atlas-transition inline-flex min-h-11 items-center rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
+              className="atlas-transition inline-flex min-h-11 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               {copy.ADD_FIELD}
             </Link>
@@ -385,7 +391,7 @@ function FieldsSection({
         changesKnown={changesKnown}
       />
       <HeldChanges personId={personId} />
-    </section>
+    </GroupedSection>
   );
 }
 
@@ -608,7 +614,7 @@ function AudiencedRows({
 
 /** "Field | Value | Who can see it | actions" from tablet width: the template is a variable, so its rule in the shared stylesheet is short. */
 const FIELD_COLUMNS = {
-  "--field-columns": "minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr) auto",
+  "--field-columns": "minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 1.2fr) auto",
 } as CSSProperties;
 
 function FieldRows({
@@ -655,7 +661,7 @@ function FieldRows({
       >
         {(confirmation) =>
           confirmation === "absent" ? (
-            <p className="text-[13px] text-ink-2">{copy.NO_FIELDS}</p>
+            <p className="text-sm text-muted-foreground">{copy.NO_FIELDS}</p>
           ) : null
         }
       </ConfirmedAbsence>
@@ -674,7 +680,7 @@ function FieldRows({
     <div data-steady="" className="flex flex-col gap-1">
       <div
         aria-hidden="true"
-        className="hidden gap-3 px-3 text-[12px] text-ink-2 tablet:grid tablet:grid-cols-(--field-columns)"
+        className="hidden gap-3 px-3 text-xs text-muted-foreground tablet:grid tablet:grid-cols-(--field-columns)"
         style={FIELD_COLUMNS}
       >
         <span>{copy.COLUMN_FIELD}</span>
@@ -682,7 +688,7 @@ function FieldRows({
         <span>{copy.COLUMN_AUDIENCE}</span>
         <span />
       </div>
-      <List className="flex flex-col gap-1">
+      <List className="flex flex-col divide-y divide-border">
         {rows.map((row) => (
           <FieldRow
             key={row.row.id}
@@ -758,7 +764,7 @@ function FieldRow({
     (field.createDraft !== null && field.pending === "not_sent");
   return (
     <li
-      className="list-none rounded-row border border-hairline bg-panel px-3 py-2.5"
+      className="list-none px-3 py-2.5"
       data-field-row={row.id}
       data-steady=""
     >
@@ -767,15 +773,15 @@ function FieldRow({
         style={FIELD_COLUMNS}
       >
         <span className="flex flex-col gap-1">
-          <span id={nameId} className="text-[13.5px] font-medium text-ink-1">
+          <span id={nameId} className="text-sm font-medium text-foreground">
             {row.label}
           </span>
           <PendingBadge mark={field.pending} />
         </span>
         <FieldValueView raw={row.value} />
-        <span className="flex flex-col items-start gap-1">
+        <span className="flex flex-col items-stretch gap-1">
           {field.projected ? (
-            <span className="text-[12.5px] text-ink-2">
+            <span className="text-xs text-muted-foreground">
               {copy.WAIT_FOR_SYNC_FIELD}
             </span>
           ) : (
@@ -785,18 +791,21 @@ function FieldRow({
               data-field-audience={summary?.audience.disclosure ?? "unknown"}
               aria-describedby={nameId}
               onClick={() => setSharing(true)}
-              className="atlas-transition min-h-11 rounded-control border border-hairline-strong px-3 text-left text-[12.5px] text-ink-1 hover:bg-row-hover"
+              className="atlas-transition min-h-11 w-full rounded-md border border-border px-3 text-left text-xs text-foreground hover:bg-accent"
             >
               {audience}
             </button>
           )}
           {summary === null && read !== undefined && !field.projected ? (
-            <span className="text-[12px] text-ink-2" data-field-checked="">
+            <span
+              className="text-xs text-muted-foreground"
+              data-field-checked=""
+            >
               {copy.AUDIENCE_CHECKED_AT(timeOf(read.checkedAt))}
             </span>
           ) : null}
           {reach !== null ? (
-            <span className="text-[12px] text-ink-2" data-field-reach="">
+            <span className="text-xs text-muted-foreground" data-field-reach="">
               {reach}
               {summary?.audience.disclosure === "partial"
                 ? ` ${copy.FIELD_AUDIENCE_PARTIAL}`
@@ -819,7 +828,7 @@ function FieldRow({
               params={{ personId: person.row.id, fieldId: row.id }}
               data-people-action="edit-field"
               aria-describedby={nameId}
-              className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+              className="atlas-transition inline-flex min-h-11 items-center rounded-md border border-border bg-card px-4 text-sm text-foreground hover:bg-accent"
             >
               {copy.EDIT}
             </Link>
@@ -878,20 +887,20 @@ function ArchiveFieldButton({
   const action = useArchiveAction(id);
   if (!env.writable)
     return (
-      <Button variant="quiet" disabled reason={copy.READ_ONLY_COMPAT}>
+      <Button variant="ghost" disabled reason={copy.READ_ONLY_COMPAT}>
         {label}
       </Button>
     );
   if (action.pending)
     return (
-      <Button variant="quiet" disabled reason={copy.SAVING}>
+      <Button variant="ghost" disabled reason={copy.SAVING}>
         {label}
       </Button>
     );
   return (
     <span className="inline-flex flex-col items-start gap-1">
       <Button
-        variant="quiet"
+        variant="ghost"
         aria-describedby={nameId}
         data-people-action={archived ? "restore-field" : "archive-field"}
         onClick={() => void action.run(!archived, version)}
@@ -899,7 +908,7 @@ function ArchiveFieldButton({
         {label}
       </Button>
       {action.message ? (
-        <span className="text-[12px] text-conflict-text">{action.message}</span>
+        <span className="text-xs text-destructive">{action.message}</span>
       ) : null}
     </span>
   );
@@ -916,7 +925,7 @@ function ArchivedFields({ rows }: { rows: ShownRow[] }) {
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen(!open)}
-        className="min-h-11 self-start text-[13px] text-ink-1 underline"
+        className="min-h-11 self-start text-sm text-foreground underline"
       >
         {copy.ARCHIVED_FIELDS(rows.length)}
       </button>
@@ -936,8 +945,8 @@ function ArchivedFields({ rows }: { rows: ShownRow[] }) {
 function ArchivedFieldRow({ field }: { field: ShownRow }) {
   const nameId = useId();
   return (
-    <li className="flex list-none flex-wrap items-center gap-3 rounded-row border border-hairline px-3 py-2">
-      <span id={nameId} className="text-[13px] text-ink-1">
+    <li className="flex list-none flex-wrap items-center gap-3 border-t border-border px-3 py-2">
+      <span id={nameId} className="text-sm text-foreground">
         {field.row.label}
       </span>
       <PendingBadge mark={field.pending} />
@@ -960,24 +969,24 @@ function DefaultsPanel() {
   const defaults = useSharingDefaults();
   const label = fieldDefaultsLabel(defaults.record);
   const home = primaryHousehold(defaults.record);
+  const heading = useId();
   return (
-    <section
+    <GroupedSection
       data-defaults-panel=""
-      className="flex max-w-[620px] flex-col gap-1 rounded-row border border-hairline bg-panel p-3.5"
+      aria-labelledby={heading}
+      heading={<h3 id={heading}>{copy.NEW_FIELDS_START_AS}</h3>}
+      summary={label}
     >
-      <h3 className="text-[13px] font-medium text-ink-1">
-        {copy.NEW_FIELDS_START_AS}
-      </h3>
       {label === null ? (
-        <p className="text-[13px] text-ink-2">{copy.DEFAULTS_UNKNOWN}</p>
+        <p className="text-sm text-muted-foreground">{copy.DEFAULTS_UNKNOWN}</p>
       ) : (
         <>
-          <p className="text-[13.5px] text-ink-1">{label}</p>
-          <p className="text-[12.5px] leading-[1.55] text-ink-2">
+          <p className="text-sm text-foreground">{label}</p>
+          <p className="text-xs leading-[1.55] text-muted-foreground">
             {copy.DEFAULTS_EXPLAIN(home?.household?.name ?? "Home")}
           </p>
         </>
       )}
-    </section>
+    </GroupedSection>
   );
 }

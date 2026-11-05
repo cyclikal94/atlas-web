@@ -143,7 +143,7 @@ export class StubServer {
   oidcIssuer = "https://idp.example.test";
   /** The browser's cookie jar for the origin: shared by every page. */
   cookie: string | null = null;
-  apiVersion: string | undefined = "0.29.0";
+  apiVersion: string | undefined = "0.31.0";
   rules: Rule[] = [];
   readonly requests: RecordedRequest[] = [];
   /** Make the next activations answer `503 device_capacity`. */

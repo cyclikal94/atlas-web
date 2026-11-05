@@ -1,8 +1,8 @@
 {
-  "_": "Size budgets and recorded baselines. check-budgets.mjs fails above a shared `budget` figure or more than `tolerance` above the build baseline, and refuses the retired `provisional`/`provisional_by_build` keys. The figures are WEB-09c's reasoned successor (C11, FB-20261010, revision 8): `budget_basis` gives the measurement, the rationale, the effective bounds and the named obligations. Size guards, not performance targets.",
+  "_": "Size budgets and recorded baselines. check-budgets.mjs fails above a shared `budget` figure or more than `tolerance` above the build baseline, and refuses the retired `provisional`/`provisional_by_build` keys. The figures are WEB-09c's reasoned successor (C11, FB-20261010, revision 8): `budget_basis` gives the measurement, the rationale, the effective bounds and the named obligations. Size guards, not performance targets. Re-recorded on 5 November 2026 for the shadcn/ui redesign (see budget_basis.history.redesign_20261105).",
   "budget": {
-    "initial_js_gzip": 289142,
-    "css_gzip": 8078,
+    "initial_js_gzip": 326636,
+    "css_gzip": 13121,
     "fonts": 92110
   },
   "budget_basis": {
@@ -149,6 +149,25 @@
         },
         "authority": "WEB-11b-FIXTURE-JS-20261102 (Kieran, 2 November 2026): dist-fixture initial JavaScript ceiling 279,900 B over the re-recorded 279,866 B baseline on the WEB-11a base; production, CSS, fonts and tolerance unchanged.",
         "integration": "Base merge of accepted main a7e0b7d88dda751cc03afd65ba633715823c1ce1 (WEB-09c integration) into WEB-11b on 4 November 2026 under LOCAL-FEATURE-HISTORY-20261011. The shared successor budget, both build baselines and the 10% tolerance are main\u2019s; the retired provisional figures above are history only, with no combined allowance or baseline reset. The combined-build measurement is recorded in .agtx/merge-maintenance-20261104.md and .agtx/evidence/merge-20261104/."
+      },
+      "redesign_20261105": {
+        "commit": "the cyclikal94/shadcn-ui branch after merging accepted main 546bc79 (WEB-11a/11b People, WEB-09c) on 5 November 2026",
+        "fixture_baseline": {
+          "initial_js_gzip": 296942,
+          "css_gzip": 11928,
+          "fonts": 83736
+        },
+        "production_baseline": {
+          "initial_js_gzip": 119305,
+          "css_gzip": 11928,
+          "fonts": 83736
+        },
+        "shared_budget": {
+          "initial_js_gzip": 326636,
+          "css_gzip": 13121,
+          "fonts": 92110
+        },
+        "rationale": "The shadcn/ui rebuild (the tweakcn-compatible token set, Radix primitives, tw-animate-css, the Final design's rail, grouped box and sidebar) and the merged People area together measure 296,942 B of fixture initial JavaScript gzip and 11,928 B of CSS gzip: the CSS grows with the kit's utilities (every screen now draws from one component set), the JavaScript with Radix and the People chunk's shared modules in the fixture entry. Both baselines are re-recorded with `check-budgets.mjs <build> --record` and the shared ceilings follow OD-2 (the signed-in measurement plus 10 %). Production's own baseline guard keeps its 10 % tolerance over its new baseline. This is the redesign's re-measurement, recorded on the branch for Kieran's acceptance with the redesign itself; nothing of the accepted main figures is claimed for it."
       }
     },
     "follow_up": [
@@ -161,13 +180,13 @@
   "tolerance": 0.1,
   "baseline": {
     "dist": {
-      "initial_js_gzip": 109809,
-      "css_gzip": 7512,
+      "initial_js_gzip": 119305,
+      "css_gzip": 11928,
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 262856,
-      "css_gzip": 7344,
+      "initial_js_gzip": 296942,
+      "css_gzip": 11928,
       "fonts": 83736
     }
   },

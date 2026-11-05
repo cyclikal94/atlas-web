@@ -420,7 +420,7 @@ function EditorUnread({
       footer={
         <>
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() => {
               discard();
               close();
@@ -431,7 +431,7 @@ function EditorUnread({
           {onRetry === null ? null : (
             <span className="ml-auto">
               <Button
-                variant="primary"
+                variant="default"
                 onClick={() => {
                   if (shown()) onRetry();
                 }}
@@ -443,7 +443,7 @@ function EditorUnread({
         </>
       }
     >
-      <p data-people-state={state} className="text-[13.5px] text-ink-1">
+      <p data-people-state={state} className="text-sm text-foreground">
         {message}
       </p>
     </Dialog>
@@ -1424,20 +1424,20 @@ function Editor({
       initialFocusSelector="input"
       footer={
         readOnly ? (
-          <Button variant="quiet" onClick={close}>
+          <Button variant="ghost" onClick={close}>
             {copy.CANCEL}
           </Button>
         ) : offline ? (
           <>
-            <span className="text-[12px] text-ink-2">
+            <span className="text-xs text-muted-foreground">
               {copy.ESCAPE_DISCARDS}
             </span>
-            <Button variant="quiet" onClick={close}>
+            <Button variant="ghost" onClick={close}>
               {copy.CANCEL}
             </Button>
             <span className="ml-auto">
               <Button
-                variant="primary"
+                variant="default"
                 data-people-action="offline-confirm"
                 onClick={() => void submit(offlineChoice)}
               >
@@ -1447,7 +1447,7 @@ function Editor({
           </>
         ) : (
           <>
-            <Button variant="quiet" onClick={close}>
+            <Button variant="ghost" onClick={close}>
               {copy.CANCEL}
             </Button>
             {!isNew && !projected && canEdit ? (
@@ -1481,14 +1481,14 @@ function Editor({
             <span className="ml-auto">
               {saveReason === null ? (
                 <Button
-                  variant="primary"
+                  variant="default"
                   data-people-action="save-field"
                   onClick={() => void submit()}
                 >
                   {copy.SAVE}
                 </Button>
               ) : (
-                <Button variant="primary" disabled reason={saveReason}>
+                <Button variant="default" disabled reason={saveReason}>
                   {copy.SAVE}
                 </Button>
               )}
@@ -1506,10 +1506,14 @@ function Editor({
       >
         <fieldset disabled={saving} className="flex flex-col gap-4">
           {initial.restored ? (
-            <p className="text-[12.5px] text-ink-2">{copy.RESTORED_DRAFT}</p>
+            <p className="text-xs text-muted-foreground">
+              {copy.RESTORED_DRAFT}
+            </p>
           ) : null}
           {readOnly ? (
-            <p className="text-[13px] text-ink-2">{copy.READ_ONLY_FIELD}</p>
+            <p className="text-sm text-muted-foreground">
+              {copy.READ_ONLY_FIELD}
+            </p>
           ) : null}
           {conflict !== null && existing !== null ? (
             <ReviewPanel
@@ -1591,7 +1595,6 @@ function Editor({
             <Input
               label={copy.FIELD_NAME}
               value={state.name}
-              surface="panel"
               readOnly={readOnly}
               aria-invalid={problems.name ? true : undefined}
               aria-describedby={problems.name ? nameError : undefined}
@@ -1607,7 +1610,7 @@ function Editor({
           <div className="flex flex-col gap-1.5">
             <label
               htmlFor={typeId}
-              className="text-[13px] font-medium text-ink-1"
+              className="text-sm font-medium text-foreground"
             >
               {copy.FIELD_TYPE}
             </label>
@@ -1622,7 +1625,7 @@ function Editor({
                     value: event.target.value as FieldKind,
                   })
                 }
-                className="atlas-transition min-h-11 w-full appearance-none rounded-control border border-field-edge bg-panel py-2.5 pl-3 pr-9 text-[14px] text-ink-1 disabled:opacity-60"
+                className="atlas-transition min-h-11 w-full appearance-none rounded-md border border-input bg-card py-2.5 pl-3 pr-9 text-sm text-foreground disabled:opacity-60"
               >
                 {FIELD_KINDS.map((kind) => (
                   <option key={kind} value={kind}>
@@ -1633,7 +1636,7 @@ function Editor({
               <ChevronDown
                 aria-hidden="true"
                 size={16}
-                className="pointer-events-none absolute right-3 text-ink-2"
+                className="pointer-events-none absolute right-3 text-muted-foreground"
                 style={CHEVRON_CENTRED}
               />
             </span>
@@ -1739,7 +1742,7 @@ function AudienceSection({
   if (isNew)
     return (
       <fieldset className="flex flex-col gap-2" data-audience="new">
-        <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
+        <legend className="mb-1.5 text-sm font-medium text-foreground">
           {copy.AUDIENCE}
         </legend>
         <Choices<NewAudience>
@@ -1756,9 +1759,11 @@ function AudienceSection({
             },
           ]}
         />
-        <p className="text-[12.5px] text-ink-2">{copy.CHOOSE_AFTER_SAVE}</p>
+        <p className="text-xs text-muted-foreground">
+          {copy.CHOOSE_AFTER_SAVE}
+        </p>
         {note ? (
-          <p data-subject-note="" className="text-[12.5px] text-ink-1">
+          <p data-subject-note="" className="text-xs text-foreground">
             {note}
           </p>
         ) : null}
@@ -1766,10 +1771,14 @@ function AudienceSection({
     );
   if (projected) return null;
   if (policyLoad === "forbidden")
-    return <p className="text-[13px] text-ink-2">{copy.AUDIENCE_OWNER_ONLY}</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        {copy.AUDIENCE_OWNER_ONLY}
+      </p>
+    );
   if (current === null)
     return (
-      <p className="text-[13px] text-ink-2" data-audience="unknown">
+      <p className="text-sm text-muted-foreground" data-audience="unknown">
         {policyLoad === "loading"
           ? copy.AUDIENCE_LOADING
           : policyLoad === "failed"
@@ -1779,7 +1788,7 @@ function AudienceSection({
     );
   return (
     <fieldset className="flex flex-col gap-2" data-audience="existing">
-      <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
+      <legend className="mb-1.5 text-sm font-medium text-foreground">
         {copy.AUDIENCE}
       </legend>
       <Choices<ExistingAudience>
@@ -1809,7 +1818,7 @@ function AudienceSection({
         </Button>
       ) : null}
       {note ? (
-        <p data-subject-note="" className="text-[12.5px] text-ink-1">
+        <p data-subject-note="" className="text-xs text-foreground">
           {note}
         </p>
       ) : null}
@@ -1831,12 +1840,12 @@ function OfflineChoice({
   return (
     <section
       data-offline-choice=""
-      className="flex flex-col gap-2 rounded-row border border-hairline-strong bg-inset p-3.5"
+      className="flex flex-col gap-2 rounded-lg border border-border bg-muted p-3.5"
     >
-      <h3 className="text-[14px] font-medium text-ink-1">
+      <h3 className="text-sm font-medium text-foreground">
         {copy.OFFLINE_HEADING}
       </h3>
-      <p className="text-[13px] leading-[1.55] text-ink-1">
+      <p className="text-sm leading-[1.55] text-foreground">
         {copy.OFFLINE_BODY(name)}
       </p>
       <Choices<"save_now" | "hold">
@@ -1856,10 +1865,10 @@ function OfflineChoice({
           },
         ]}
       />
-      <p className="text-[12.5px] leading-[1.55] text-ink-2">
+      <p className="text-xs leading-[1.55] text-muted-foreground">
         {copy.HOLD_CAVEAT(name)}
       </p>
-      <p className="text-[12.5px] leading-[1.55] text-ink-2">
+      <p className="text-xs leading-[1.55] text-muted-foreground">
         {copy.HOLD_CAVEAT_2}
       </p>
     </section>
@@ -1902,50 +1911,50 @@ function ReviewPanel({
   return (
     <section
       data-field-conflict=""
-      className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+      className="flex flex-col gap-2 rounded-lg border border-destructive/35 bg-destructive/10 p-3.5"
     >
-      <h3 className="text-[14px] font-medium text-ink-1">{title}</h3>
+      <h3 className="text-sm font-medium text-foreground">{title}</h3>
       {note === undefined ? null : (
-        <p className="text-[12.5px] text-ink-1" data-review-published="">
+        <p className="text-xs text-foreground" data-review-published="">
           {note}
         </p>
       )}
       {refused ? (
-        <p className="text-[12.5px] text-ink-1" data-review-refused="">
+        <p className="text-xs text-foreground" data-review-refused="">
           {copy.STALE_NOT_SAVED}
         </p>
       ) : null}
-      <p className="text-[12.5px] text-ink-1" data-review-current="">
+      <p className="text-xs text-foreground" data-review-current="">
         {copy.CONFLICT_CURRENT}: {current.label}
         {value === null ? "" : ` — ${formatValue(value)}`}
       </p>
       {audienceNow === null ? null : (
-        <p className="text-[12.5px] text-ink-1" data-review-audience="">
+        <p className="text-xs text-foreground" data-review-audience="">
           {audienceNow === false
             ? audienceUnknown
             : copy.CONFLICT_AUDIENCE_NOW(audienceNow)}
         </p>
       )}
-      <p className="text-[12.5px] text-ink-1" data-review-mine="">
+      <p className="text-xs text-foreground" data-review-mine="">
         {copy.CONFLICT_MINE}
         {mine === null ? "" : `: ${mine.label} — ${formatValue(mine.value)}`}
       </p>
       <div className="flex flex-wrap gap-2">
         {saveReason === null ? (
           <Button
-            variant="primary"
+            variant="default"
             data-people-action="save-mine"
             onClick={() => void onSaveMine()}
           >
             {copy.SAVE_MINE}
           </Button>
         ) : (
-          <Button variant="primary" disabled reason={saveReason}>
+          <Button variant="default" disabled reason={saveReason}>
             {copy.SAVE_MINE}
           </Button>
         )}
         <Button
-          variant="quiet"
+          variant="ghost"
           data-people-action="discard-mine"
           onClick={() => void onDiscard()}
         >
@@ -1980,13 +1989,13 @@ function ArchiveInEditor({
   const announcer = useAnnouncer();
   if (pending)
     return (
-      <Button variant="quiet" disabled reason={copy.SAVING}>
+      <Button variant="ghost" disabled reason={copy.SAVING}>
         {copy.ARCHIVE}
       </Button>
     );
   return (
     <Button
-      variant="quiet"
+      variant="ghost"
       data-people-action="archive-field-editor"
       onClick={async () => {
         const admitted = admission();

@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { Button } from "../../../components/ui/button";
+import { GroupedSection } from "../../../components/ui/grouped";
 import { List } from "../../../components/ui/list";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
@@ -37,25 +38,22 @@ export function SharedWithSection({ personId }: { personId: string }) {
   const shown = shownOf(view);
   const rail = shown?.value.shared_with ?? null;
   return (
-    <section
+    <GroupedSection
       aria-labelledby={heading}
       data-shared-with={rail?.disclosure ?? view.status}
-      className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline bg-panel p-3.5"
+      heading={<h3 id={heading}>{copy.SHARED_WITH}</h3>}
     >
-      <h3 id={heading} className="text-[13px] font-medium text-ink-1">
-        {copy.SHARED_WITH}
-      </h3>
       {view.status === "failed" && view.reason === "not_found" ? (
-        <p className="text-[13px] text-ink-2">{copy.RAIL_NOT_FOUND}</p>
+        <p className="text-sm text-muted-foreground">{copy.RAIL_NOT_FOUND}</p>
       ) : rail === null && view.status === "failed" ? (
-        <p className="flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
+        <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           {copy.RAIL_FAILED}
-          <Button variant="quiet" onClick={view.retry}>
+          <Button variant="ghost" onClick={view.retry}>
             {copy.TRY_AGAIN}
           </Button>
         </p>
       ) : rail === null ? (
-        <p className="text-[13px] text-ink-2">
+        <p className="text-sm text-muted-foreground">
           {view.status === "offline" ? copy.RAIL_OFFLINE : copy.RAIL_CHECKING}
         </p>
       ) : (
@@ -82,7 +80,7 @@ export function SharedWithSection({ personId }: { personId: string }) {
           </List>
           {rail.excluded_accounts !== null &&
           rail.excluded_accounts.length > 0 ? (
-            <p className="text-[12.5px] text-ink-2" data-rail-excluded="">
+            <p className="text-xs text-muted-foreground" data-rail-excluded="">
               {copy.EXCLUDED_ACCOUNTS(
                 rail.excluded_accounts.map((a) => a.username).join(", "),
               )}
@@ -91,17 +89,19 @@ export function SharedWithSection({ personId }: { personId: string }) {
           {rail.disclosure === "complete" &&
           rail.accounts.length === 0 &&
           rail.households.length === 0 ? (
-            <p className="text-[12.5px] text-ink-2">{copy.ONLY_YOU_RAIL}</p>
+            <p className="text-xs text-muted-foreground">
+              {copy.ONLY_YOU_RAIL}
+            </p>
           ) : null}
           {rail.disclosure === "partial" ? (
-            <p className="text-[12.5px] text-ink-2" data-rail-partial="">
+            <p className="text-xs text-muted-foreground" data-rail-partial="">
               {copy.RAIL_PARTIAL(ownerName(rail.owner))}
             </p>
           ) : null}
         </>
       )}
       {rail !== null ? <SummaryNotes view={view} partial={false} /> : null}
-    </section>
+    </GroupedSection>
   );
 }
 
@@ -120,12 +120,12 @@ function Entry({
     <li className="flex list-none items-center gap-3" data-rail-entry={entry}>
       <Avatar name={name} />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-[13.5px] text-ink-1">{name}</span>
+        <span className="truncate text-sm text-foreground">{name}</span>
         {detail !== undefined ? (
-          <span className="text-[12px] text-ink-2">{detail}</span>
+          <span className="text-xs text-muted-foreground">{detail}</span>
         ) : null}
       </span>
-      <span className="flex-none text-[12.5px] text-ink-2">{role}</span>
+      <span className="flex-none text-xs text-muted-foreground">{role}</span>
     </li>
   );
 }

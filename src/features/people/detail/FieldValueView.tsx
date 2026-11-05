@@ -21,7 +21,7 @@ export function FieldValueView({
   const value = parseFieldValue(raw);
   if (value === null)
     return (
-      <span data-unreadable-value="" className="text-[13px] text-ink-2">
+      <span data-unreadable-value="" className="text-sm text-muted-foreground">
         {copy.UNREADABLE_VALUE}
       </span>
     );
@@ -38,7 +38,7 @@ function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
         <span className="flex flex-col items-start gap-1">
           <span
             id={id}
-            className={`whitespace-pre-wrap break-words text-[13.5px] text-ink-1 ${!open && long ? "line-clamp-2" : ""}`}
+            className={`whitespace-pre-wrap break-words text-sm text-foreground ${!open && long ? "line-clamp-2" : ""}`}
             style={anywhere ? { overflowWrap: "anywhere" } : undefined}
           >
             {value.text}
@@ -49,7 +49,7 @@ function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
               aria-expanded={open}
               aria-controls={id}
               onClick={() => setOpen(!open)}
-              className="min-h-11 text-[12.5px] text-action-ink underline"
+              className="min-h-11 text-xs text-primary underline"
             >
               {open ? copy.SHOW_LESS : copy.SHOW_MORE}
             </button>
@@ -63,7 +63,7 @@ function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
           href={value.url}
           target="_blank"
           rel="noopener noreferrer"
-          className="break-all text-[13.5px] text-action-ink underline"
+          className="break-all text-sm text-primary underline"
         >
           {value.url}
           <span className="sr-only"> {copy.OPENS_NEW_TAB}</span>
@@ -71,9 +71,9 @@ function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
       );
     case "choices":
       return (
-        <span className="text-[13.5px] text-ink-1">
+        <span className="text-sm text-foreground">
           {value.selected.length === 0 ? "—" : value.selected.join(", ")}{" "}
-          <span className="text-ink-2">
+          <span className="text-muted-foreground">
             {copy.OF_TOTAL(value.options.length)}
           </span>
         </span>
@@ -86,14 +86,14 @@ function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
             aria-expanded={open}
             aria-controls={id}
             onClick={() => setOpen(!open)}
-            className="min-h-11 text-left text-[13.5px] text-ink-1 underline"
+            className="min-h-11 text-left text-sm text-foreground underline"
           >
             {formatValue(value)}
           </button>
           {open ? (
             <ul id={id} className="m-0 flex list-none flex-col gap-1 p-0">
               {value.items.map((item) => (
-                <li key={item.id} className="text-[13px] text-ink-1">
+                <li key={item.id} className="text-sm text-foreground">
                   <span aria-hidden="true">
                     {value.checked.includes(item.id) ? "✓ " : "○ "}
                   </span>
@@ -109,7 +109,7 @@ function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
       );
     default:
       return (
-        <span className="text-[13.5px] text-ink-1">{formatValue(value)}</span>
+        <span className="text-sm text-foreground">{formatValue(value)}</span>
       );
   }
 }

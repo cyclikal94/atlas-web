@@ -37,11 +37,11 @@ export function Banner({
   return (
     <div
       data-people-banner={tone}
-      className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex flex-col items-start gap-2 rounded-lg border border-border bg-card p-3.5"
     >
-      <p className="text-[13.5px] leading-[1.55] text-ink-1">{message}</p>
+      <p className="text-sm leading-[1.55] text-foreground">{message}</p>
       {requestId ? (
-        <p className="font-num select-all text-[12px] text-ink-2">
+        <p className="font-num select-all text-xs text-muted-foreground">
           Reference: {requestId}
         </p>
       ) : null}
@@ -93,25 +93,25 @@ export function Choices<Value extends string>({
             value={choice.value}
             disabled={choice.disabledReason !== undefined}
             data-choice={choice.value}
-            className="atlas-transition flex min-h-11 items-start gap-2.5 rounded-control border border-hairline-strong bg-canvas px-3 py-2.5 text-left text-[13px] text-ink-1 hover:border-field-edge disabled:opacity-60 data-[state=checked]:border-action-fill"
+            className="atlas-transition flex min-h-11 items-start gap-2.5 rounded-md border border-border bg-background px-3 py-2.5 text-left text-sm text-foreground hover:border-input disabled:opacity-60 data-[state=checked]:border-primary"
           >
             <span
               aria-hidden="true"
-              className="mt-0.5 flex size-[15px] flex-none items-center justify-center rounded-round border-[1.5px] border-field-edge"
+              className="mt-0.5 flex size-[15px] flex-none items-center justify-center rounded-full border-[1.5px] border-input"
             >
-              <RadioGroup.Indicator className="size-[7px] rounded-round bg-action-fill" />
+              <RadioGroup.Indicator className="size-[7px] rounded-full bg-primary" />
             </span>
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="font-medium">{choice.label}</span>
               {choice.description ? (
-                <span className="text-[12.5px] leading-[1.55] text-ink-2">
+                <span className="text-xs leading-[1.55] text-muted-foreground">
                   {choice.description}
                 </span>
               ) : null}
             </span>
           </RadioGroup.Item>
           {choice.disabledReason ? (
-            <span className="pl-3 text-[12px] text-ink-2">
+            <span className="pl-3 text-xs text-muted-foreground">
               {choice.disabledReason}
             </span>
           ) : null}
@@ -153,7 +153,7 @@ export function Avatar({
   return (
     <span
       aria-hidden="true"
-      className={`flex flex-none items-center justify-center rounded-round border border-hairline-strong bg-raised font-medium text-ink-1${size === "large" ? "" : " size-9 text-[13px]"}`}
+      className={`flex flex-none items-center justify-center rounded-full border border-border bg-card font-medium text-foreground${size === "large" ? "" : " size-9 text-sm"}`}
       style={size === "large" ? LARGE : undefined}
     >
       {initialsOf(name)}
@@ -166,7 +166,7 @@ export function PendingBadge({ mark }: { mark: PendingMark | null }) {
   return (
     <span
       data-pending={mark}
-      className="inline-flex items-center rounded-badge border border-hairline-strong px-1.5 py-0.5 text-[11.5px] text-ink-2"
+      className="inline-flex items-center rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground"
     >
       {copy.PENDING[mark]}
     </span>
@@ -176,7 +176,7 @@ export function PendingBadge({ mark }: { mark: PendingMark | null }) {
 export function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
-    <p id={id} data-field-error="" className="text-[12.5px] text-conflict-text">
+    <p id={id} data-field-error="" className="text-xs text-destructive">
       {message}
     </p>
   );

@@ -230,10 +230,10 @@ for (const layout of layouts) {
       await scrollTo(page, "bottom");
       await pointerClick(
         page,
-        primaryNav(page).getByRole("link", { name: "People" }),
-        "People link",
+        primaryNav(page).getByRole("link", { name: "Upcoming" }),
+        "Upcoming link",
       );
-      await expect(page).toHaveURL(/\/people/);
+      await expect(page).toHaveURL(/\/upcoming/);
       await expectChromeReachable(page, "after navigating from the bottom");
     });
 
@@ -334,13 +334,16 @@ for (const layout of layouts) {
       await scrollTo(page, "bottom");
       await pointerClick(
         page,
-        primaryNav(page).getByRole("link", { name: "People" }),
-        "People link",
+        primaryNav(page).getByRole("link", { name: "Upcoming" }),
+        "Upcoming link",
       );
-      const heading = page.getByRole("heading", { level: 1, name: "People" });
+      const heading = page.getByRole("heading", {
+        level: 1,
+        name: "Upcoming",
+      });
       await expect(heading).toBeFocused();
       const band = await contentBand(page, mode);
-      const box = await boxOf(heading, "People heading");
+      const box = await boxOf(heading, "Upcoming heading");
       expect(box.y, "heading is not under the header").toBeGreaterThanOrEqual(
         band.top - SLACK,
       );

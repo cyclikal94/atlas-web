@@ -59,12 +59,12 @@ export function ArchivedItems() {
       <div className="flex flex-col gap-2">
         <Link
           to="/settings"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13.5px] text-ink-2 hover:text-ink-1"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
         >
           Settings
         </Link>
         <PageHeading>{copy.ARCHIVED_ITEMS}</PageHeading>
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">
+        <p className="text-xs leading-[1.6] text-muted-foreground">
           {copy.ARCHIVED_NOTE}
         </p>
       </div>
@@ -149,7 +149,7 @@ function Ledger({ headingId }: { headingId: string }) {
       </h2>
       <div
         aria-hidden="true"
-        className="grid gap-3 px-3 text-[12px] text-ink-2"
+        className="grid gap-3 px-3 text-xs text-muted-foreground"
         style={ARCHIVED_COLUMNS}
       >
         <span>{copy.COLUMN_KIND}</span>
@@ -169,7 +169,7 @@ function Ledger({ headingId }: { headingId: string }) {
           data-archived-state="failed"
           className="flex flex-col items-start gap-2"
         >
-          <p className="text-[13px] leading-[1.6] text-ink-2">
+          <p className="text-sm leading-[1.6] text-muted-foreground">
             {copy.ARCHIVED_FAILED}
           </p>
           <Button
@@ -186,7 +186,7 @@ function Ledger({ headingId }: { headingId: string }) {
       ) : complete && total === 0 ? (
         <p
           data-archived-state="empty"
-          className="text-[13px] leading-[1.6] text-ink-2"
+          className="text-sm leading-[1.6] text-muted-foreground"
         >
           {copy.ARCHIVED_EMPTY}
         </p>
@@ -212,28 +212,26 @@ function LedgerRow({
   return (
     <li
       data-archived-row={shown.row.id}
-      className="grid list-none items-center gap-3 rounded-row border border-hairline px-3 py-2"
+      className="grid list-none items-center gap-3 rounded-lg border border-border px-3 py-2"
       style={ARCHIVED_COLUMNS}
     >
-      <span className="text-[12.5px] text-ink-2">{kindLabel}</span>
+      <span className="text-xs text-muted-foreground">{kindLabel}</span>
       <span className="flex min-w-0 flex-col gap-1">
-        <span id={nameId} className="truncate text-[13.5px] text-ink-1">
+        <span id={nameId} className="truncate text-sm text-foreground">
           {name}
         </span>
         <PendingBadge mark={shown.pending} />
         {action.message ? (
-          <span className="text-[12px] text-conflict-text">
-            {action.message}
-          </span>
+          <span className="text-xs text-destructive">{action.message}</span>
         ) : null}
       </span>
       {shown.row.can_edit && !shown.projected && action.pending ? (
-        <Button variant="quiet" disabled reason={copy.SAVING}>
+        <Button variant="ghost" disabled reason={copy.SAVING}>
           {copy.RESTORE}
         </Button>
       ) : shown.row.can_edit && !shown.projected ? (
         <Button
-          variant="quiet"
+          variant="ghost"
           aria-describedby={nameId}
           data-people-action="ledger-restore"
           onClick={() => void action.run(false, shown.row.version)}

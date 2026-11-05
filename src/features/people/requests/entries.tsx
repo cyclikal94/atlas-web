@@ -35,11 +35,11 @@ export function RequestsEntry() {
     <Link
       to="/people/requests"
       data-people-action="requests"
-      className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+      className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-card px-4 text-sm text-foreground hover:bg-accent"
     >
       {copy.REQUESTS}
       {count === null ? null : (
-        <span className="font-num text-ink-2" data-requests-count="">
+        <span className="font-num text-muted-foreground" data-requests-count="">
           {copy.countText(count)}
         </span>
       )}
@@ -52,7 +52,7 @@ export function RequestsEntry() {
       <Link
         to="/people/requests"
         data-requests-banner=""
-        className="atlas-transition flex min-h-11 w-full items-center justify-between gap-2 rounded-row border border-hairline-strong bg-panel px-3 text-[13.5px] text-ink-1 hover:bg-row-hover"
+        className="atlas-transition flex min-h-11 w-full items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 text-sm text-foreground hover:bg-accent"
       >
         <span>{copy.REQUESTS_WAITING(count)}</span>
         <span aria-hidden="true">→</span>
@@ -108,7 +108,10 @@ function MergedNote({ canonicalId }: { canonicalId: string }) {
       : null;
   if (row === null)
     return (
-      <span className="text-[13px] text-ink-2" data-merged-alias={canonicalId}>
+      <span
+        className="text-sm text-muted-foreground"
+        data-merged-alias={canonicalId}
+      >
         {copy.MERGED_ALIAS(copy.ANOTHER_PERSON)}
       </span>
     );
@@ -117,7 +120,7 @@ function MergedNote({ canonicalId }: { canonicalId: string }) {
       to="/people/$personId"
       params={{ personId: canonicalId }}
       data-merged-alias={canonicalId}
-      className="atlas-transition inline-flex min-h-11 items-center text-[13.5px] text-ink-1 underline hover:text-ink-2"
+      className="atlas-transition inline-flex min-h-11 items-center text-sm text-foreground underline hover:text-muted-foreground"
     >
       {copy.MERGED_ALIAS(row.label)}
     </Link>
@@ -148,7 +151,7 @@ function CompareEntry({
       to="/people/$personId/duplicates/$otherId"
       params={{ personId, otherId }}
       data-people-action="compare-and-merge"
-      className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
+      className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
     >
       {copy.COMPARE_AND_MERGE}
     </Link>

@@ -100,19 +100,19 @@ export function DuplicatesView({
       <Link
         to="/people/$personId"
         params={{ personId }}
-        className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-[13.5px] text-ink-2 hover:text-ink-1"
+        className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft aria-hidden="true" size={16} />
         {title}
       </Link>
       <div className="flex flex-col gap-2">
         <PageHeading>{copy.DUPLICATES_TITLE(title)}</PageHeading>
-        <p className="text-[13.5px] leading-[1.55] text-ink-2">
+        <p className="text-sm leading-[1.55] text-muted-foreground">
           {copy.DUPLICATES_SUBHEAD}
         </p>
       </div>
       {!env.online && state.pages === 0 ? (
-        <p data-duplicates-state="offline" className="text-[13.5px] text-ink-1">
+        <p data-duplicates-state="offline" className="text-sm text-foreground">
           {copy.DUPLICATES_OFFLINE}.
         </p>
       ) : null}
@@ -145,12 +145,12 @@ export function DuplicatesView({
             <li
               key={hint.id}
               data-duplicate-hint={hint.id}
-              className="flex list-none flex-wrap items-center gap-3 rounded-row border border-hairline-strong bg-panel p-3"
+              className="flex list-none flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3"
             >
               <Avatar name={hint.label} />
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="text-[14px] text-ink-1">{hint.label}</span>
-                <span className="flex flex-wrap gap-2 text-[12.5px] text-ink-2">
+                <span className="text-sm text-foreground">{hint.label}</span>
+                <span className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                   <span>{copy.SIMILAR_NAME}</span>
                   <HintFieldCount personId={hint.id} />
                 </span>
@@ -169,13 +169,13 @@ export function DuplicatesView({
         </List>
       ) : null}
       {summary.kind === "none_at_all" ? (
-        <p data-duplicates-state="none" className="text-[13.5px] text-ink-1">
+        <p data-duplicates-state="none" className="text-sm text-foreground">
           {copy.NONE_AT_ALL}
         </p>
       ) : summary.kind === "none_so_far" ? (
         <p
           data-duplicates-state="none-so-far"
-          className="text-[13.5px] text-ink-1"
+          className="text-sm text-foreground"
         >
           {copy.NONE_SO_FAR}
         </p>
@@ -200,7 +200,7 @@ export function DuplicatesView({
           </Button>
         )
       ) : null}
-      <p className="text-[12.5px] leading-[1.55] text-ink-2">
+      <p className="text-xs leading-[1.55] text-muted-foreground">
         {copy.DUPLICATES_FOOTER}
       </p>
     </div>

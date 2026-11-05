@@ -40,23 +40,23 @@ export function SummaryNotes({
   return (
     <div className="flex flex-col gap-1" data-people-summary={view.status}>
       {view.status === "offline" ? (
-        <p className="text-[12.5px] text-ink-2">{words.offline}</p>
+        <p className="text-xs text-muted-foreground">{words.offline}</p>
       ) : view.status === "failed" ? (
-        <p className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
+        <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           {words.failed}
-          <Button variant="quiet" onClick={view.retry}>
+          <Button variant="ghost" onClick={view.retry}>
             {copy.TRY_AGAIN}
           </Button>
         </p>
       ) : shown === null ? (
-        <p className="text-[12.5px] text-ink-2">{words.checking}</p>
+        <p className="text-xs text-muted-foreground">{words.checking}</p>
       ) : (
-        <p className="text-[12.5px] text-ink-2" data-summary-checked="">
+        <p className="text-xs text-muted-foreground" data-summary-checked="">
           {copy.SUMMARY_AS_OF(timeOf(shown.checkedAt))}
         </p>
       )}
       {partial && shown !== null ? (
-        <p className="text-[12.5px] text-ink-2" data-people-partial="">
+        <p className="text-xs text-muted-foreground" data-people-partial="">
           {partialNote}
         </p>
       ) : null}

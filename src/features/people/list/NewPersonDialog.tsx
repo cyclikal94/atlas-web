@@ -220,7 +220,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       footer={
         <>
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() => {
               forget();
               onClose();
@@ -231,14 +231,14 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
           <span className="ml-auto">
             {disabledReason === null ? (
               <Button
-                variant="primary"
+                variant="default"
                 data-people-action="save-person"
                 onClick={() => void submit()}
               >
                 {copy.SAVE}
               </Button>
             ) : (
-              <Button variant="primary" disabled reason={disabledReason}>
+              <Button variant="default" disabled reason={disabledReason}>
                 {copy.SAVE}
               </Button>
             )}
@@ -254,13 +254,12 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       >
         <fieldset disabled={saving} className="flex flex-col gap-4">
           {restored.current ? (
-            <p className="text-[12.5px] text-ink-2">{copy.RESTORED_DRAFT}</p>
+            <p className="text-xs text-muted-foreground">
+              {copy.RESTORED_DRAFT}
+            </p>
           ) : null}
           {refusal ? (
-            <p
-              data-people-refusal=""
-              className="text-[13px] text-conflict-text"
-            >
+            <p data-people-refusal="" className="text-sm text-destructive">
               {refusal}
             </p>
           ) : null}
@@ -274,12 +273,11 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
               onChange={(event) =>
                 dispatch({ type: "name", value: event.target.value })
               }
-              surface="panel"
             />
             <FieldError id={nameError} message={problems.name} />
           </div>
           <fieldset className="flex flex-col gap-2">
-            <legend className="mb-1.5 text-[13px] font-medium text-ink-1">
+            <legend className="mb-1.5 text-sm font-medium text-foreground">
               {copy.PERSON_SHARING}
             </legend>
             <Choices<PersonSharing>
@@ -296,7 +294,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
             <div className="flex flex-col gap-1.5">
               <label
                 htmlFor={noteId}
-                className="text-[13px] font-medium text-ink-1"
+                className="text-sm font-medium text-foreground"
               >
                 {copy.FIRST_NOTE}
               </label>
@@ -309,11 +307,11 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
                 onChange={(event) =>
                   dispatch({ type: "note", value: event.target.value })
                 }
-                className="atlas-transition min-h-24 w-full rounded-control border border-field-edge bg-panel px-3 py-2.5 text-[14px] text-ink-1"
+                className="atlas-transition min-h-24 w-full rounded-md border border-input bg-card px-3 py-2.5 text-sm text-foreground"
               />
               <FieldError id={noteError} message={problems.note} />
               <Button
-                variant="quiet"
+                variant="ghost"
                 onClick={() => dispatch({ type: "note_open", value: false })}
               >
                 {copy.HIDE_NOTE}
@@ -321,7 +319,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
             </div>
           ) : (
             <Button
-              variant="quiet"
+              variant="ghost"
               data-people-action="add-note"
               onClick={() => dispatch({ type: "note_open", value: true })}
             >

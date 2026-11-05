@@ -92,12 +92,12 @@ export function NewRequest({ bare = false }: { bare?: boolean }) {
       className={
         bare
           ? "flex flex-col gap-4"
-          : "flex flex-col gap-4 rounded-row border border-hairline-strong bg-panel p-3.5"
+          : "flex flex-col gap-4 rounded-lg border border-border bg-card p-3.5"
       }
     >
       <h2
         id={heading}
-        className={bare ? "sr-only" : "text-[15px] font-medium text-ink-1"}
+        className={bare ? "sr-only" : "text-[15px] font-medium text-foreground"}
       >
         {copy.NEW_REQUEST}
       </h2>
@@ -106,7 +106,7 @@ export function NewRequest({ bare = false }: { bare?: boolean }) {
         {(["link", "merge"] as const).map((mode) => (
           <Button
             key={mode}
-            variant={draft.mode === mode ? "primary" : "secondary"}
+            variant={draft.mode === mode ? "default" : "outline"}
             aria-pressed={draft.mode === mode}
             data-request-mode={mode}
             onClick={() => update((d) => ({ ...d, mode }))}
@@ -216,7 +216,7 @@ function EarlierLink({
         }
       />
       {origin !== null ? (
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {copy.EARLIER_LINK(origin.person.label, origin.recipient.username)}
         </p>
       ) : null}
@@ -362,9 +362,11 @@ function AskToLink() {
           onSent={(sent) => completeLink(env, other, sent, announce)}
         />
       ))}
-      <p className="text-[13px] leading-[1.6] text-ink-2">{copy.LINK_INTRO}</p>
+      <p className="text-sm leading-[1.6] text-muted-foreground">
+        {copy.LINK_INTRO}
+      </p>
       <div className="flex flex-col gap-1.5">
-        <span className="text-[12.5px] font-medium text-ink-1">
+        <span className="text-xs font-medium text-foreground">
           {copy.WHICH_OF_YOUR_PEOPLE}
         </span>
         {person !== null ? (
@@ -373,9 +375,9 @@ function AskToLink() {
             data-link-person={person.id}
           >
             <Avatar name={person.label} />
-            <span className="text-[13.5px] text-ink-1">{person.label}</span>
+            <span className="text-sm text-foreground">{person.label}</span>
             <Button
-              variant="quiet"
+              variant="ghost"
               data-people-action="change-person"
               onClick={() => setView("person")}
             >
@@ -390,10 +392,12 @@ function AskToLink() {
             {copy.CHOOSE}
           </Button>
         )}
-        <span className="text-[12px] text-ink-2">{copy.ONLY_UNLINKED}</span>
+        <span className="text-xs text-muted-foreground">
+          {copy.ONLY_UNLINKED}
+        </span>
       </div>
       <div className="flex flex-col gap-1.5">
-        <span className="text-[12.5px] font-medium text-ink-1">
+        <span className="text-xs font-medium text-foreground">
           {copy.WHO_TO_ASK}
         </span>
         {recipient !== null ? (
@@ -402,11 +406,11 @@ function AskToLink() {
             data-link-recipient={recipient.username}
           >
             <Avatar name={recipient.username} />
-            <span className="text-[13.5px] text-ink-1">
+            <span className="text-sm text-foreground">
               {recipient.username}
             </span>
             <Button
-              variant="quiet"
+              variant="ghost"
               data-people-action="change-recipient"
               onClick={() => setView("lookup")}
             >
@@ -427,24 +431,26 @@ function AskToLink() {
       ) : null}
       <span className="flex flex-col items-start gap-1">
         {sendsEarlier ? (
-          <span className="text-[12.5px] text-ink-2" data-retry-sends="">
+          <span className="text-xs text-muted-foreground" data-retry-sends="">
             {copy.RETRY_SENDS_EARLIER(origin.recipient.username)}
           </span>
         ) : null}
         {reason === null ? (
           <Button
-            variant="primary"
+            variant="default"
             data-people-action="send-link-request"
             onClick={() => void send()}
           >
             {retained ? copy.TRY_AGAIN : copy.SEND_REQUEST}
           </Button>
         ) : (
-          <Button variant="primary" disabled reason={reason}>
+          <Button variant="default" disabled reason={reason}>
             {copy.SEND_REQUEST}
           </Button>
         )}
-        <span className="text-[12px] text-ink-2">{copy.REQUEST_RULES}</span>
+        <span className="text-xs text-muted-foreground">
+          {copy.REQUEST_RULES}
+        </span>
       </span>
     </div>
   );
@@ -504,12 +510,12 @@ function AskToMerge() {
     label: string,
   ) => (
     <div className="flex flex-col gap-1.5">
-      <span className="text-[12.5px] font-medium text-ink-1">{label}</span>
+      <span className="text-xs font-medium text-foreground">{label}</span>
       {chosen !== null ? (
         <span className="flex items-center gap-2" data-merge-pick={which}>
           <Avatar name={chosen.label} />
-          <span className="text-[13.5px] text-ink-1">{chosen.label}</span>
-          <Button variant="quiet" onClick={() => setView(which)}>
+          <span className="text-sm text-foreground">{chosen.label}</span>
+          <Button variant="ghost" onClick={() => setView(which)}>
             {copy.CHANGE}
           </Button>
         </span>
@@ -525,12 +531,14 @@ function AskToMerge() {
   );
   return (
     <div className="flex flex-col gap-4" data-ask-to-merge="">
-      <p className="text-[13px] leading-[1.6] text-ink-2">{copy.MERGE_INTRO}</p>
+      <p className="text-sm leading-[1.6] text-muted-foreground">
+        {copy.MERGE_INTRO}
+      </p>
       {pick("first", first, copy.ONE_OF_YOUR_PEOPLE)}
       {pick("second", second, copy.THE_SAME_PERSON)}
       {reason === null && first !== null && second !== null ? (
         <Button
-          variant="primary"
+          variant="default"
           data-people-action="compare"
           onClick={() =>
             void navigate({
@@ -543,7 +551,7 @@ function AskToMerge() {
         </Button>
       ) : (
         <Button
-          variant="primary"
+          variant="default"
           disabled
           reason={reason ?? copy.CHOOSE_BOTH_FIRST}
         >
@@ -637,10 +645,10 @@ function PersonPicker({
       data-picker-window={starts.length}
     >
       <div className="flex items-center gap-3">
-        <Button variant="quiet" onClick={onBack}>
+        <Button variant="ghost" onClick={onBack}>
           ‹ {copy.CANCEL}
         </Button>
-        <h3 id={heading} className="text-[15px] font-medium text-ink-1">
+        <h3 id={heading} className="text-[15px] font-medium text-foreground">
           {label}
         </h3>
       </div>
@@ -651,21 +659,23 @@ function PersonPicker({
         autoComplete="off"
       />
       {shown !== null && !whole && needle !== "" ? (
-        <p className="text-[12.5px] text-ink-2" data-picker-partial="">
+        <p className="text-xs text-muted-foreground" data-picker-partial="">
           {copy.FILTER_SHOWN_ONLY}
         </p>
       ) : null}
       {view.status === "offline" ? (
-        <p className="text-[13px] text-ink-2">{copy.PEOPLE_OFFLINE}</p>
+        <p className="text-sm text-muted-foreground">{copy.PEOPLE_OFFLINE}</p>
       ) : view.status === "failed" ? (
         <Banner
           message={copy.PEOPLE_FAILED}
           action={<Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>}
         />
       ) : shown === null ? (
-        <p className="text-[13px] text-ink-2">{copy.REQUESTS_CHECKING}</p>
+        <p className="text-sm text-muted-foreground">
+          {copy.REQUESTS_CHECKING}
+        </p>
       ) : rows.length === 0 ? (
-        <p className="text-[13px] text-ink-1" data-picker-empty="">
+        <p className="text-sm text-foreground" data-picker-empty="">
           {whole
             ? shown.kept.length === 0
               ? empty
@@ -682,12 +692,10 @@ function PersonPicker({
                 type="button"
                 data-pick-person={summary.id}
                 onClick={() => onChoose(summary)}
-                className="atlas-transition flex min-h-11 w-full items-center gap-3 rounded-row px-3 py-2 text-left hover:bg-row-hover"
+                className="atlas-transition flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent"
               >
                 <Avatar name={summary.label} />
-                <span className="text-[13.5px] text-ink-1">
-                  {summary.label}
-                </span>
+                <span className="text-sm text-foreground">{summary.label}</span>
               </button>
             </li>
           ))}

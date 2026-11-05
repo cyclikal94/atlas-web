@@ -49,7 +49,7 @@ describe("the neutral gate's stylesheet (src/styles/base.css)", () => {
       /inset:\s*0/,
       /z-index:\s*100/,
       /display:\s*flex/,
-      /background:\s*var\(--canvas\)/,
+      /background:\s*var\(--background\)/,
     ])
       expect(body).toMatch(declaration);
   });

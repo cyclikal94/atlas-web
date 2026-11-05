@@ -74,7 +74,7 @@ export function RequestsScreen() {
   const back = (
     <Link
       to="/people"
-      className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-[13.5px] text-ink-2 hover:text-ink-1"
+      className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
     >
       <ArrowLeft aria-hidden="true" size={16} />
       {copy.BACK_TO_PEOPLE}
@@ -83,13 +83,13 @@ export function RequestsScreen() {
   const checked =
     shownIncoming !== null ? (
       <p
-        className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2"
+        className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
         data-requests-checked=""
       >
         {copy.CHECKED_AT(timeOf(shownIncoming.checkedAt))}
         {env.online ? (
           <Button
-            variant="quiet"
+            variant="ghost"
             data-people-action="refresh-requests"
             onClick={() => env.memory.invalidateSummaries()}
           >
@@ -114,18 +114,24 @@ export function RequestsScreen() {
             >
               <h2
                 id={ids.incoming}
-                className="text-[15px] font-medium text-ink-1"
+                className="text-[15px] font-medium text-foreground"
               >
                 {copy.WAITING_FOR_YOU}
                 {count !== null ? (
-                  <span className="font-num text-ink-2"> {count}</span>
+                  <span className="font-num text-muted-foreground">
+                    {" "}
+                    {count}
+                  </span>
                 ) : null}
               </h2>
               {checked}
               <Incoming env={env} view={incoming} />
             </section>
             <section aria-labelledby={ids.sent} className="flex flex-col gap-3">
-              <h2 id={ids.sent} className="text-[15px] font-medium text-ink-1">
+              <h2
+                id={ids.sent}
+                className="text-[15px] font-medium text-foreground"
+              >
                 {copy.SENT}
               </h2>
               <Sent env={env} />
@@ -161,7 +167,7 @@ export function RequestsScreen() {
         )}
       </div>
       <Button
-        variant="primary"
+        variant="default"
         data-people-action="new-request"
         onClick={() => setPanel(true)}
       >
@@ -209,7 +215,7 @@ function Tabs({
     <div
       role="tablist"
       aria-label={copy.REQUESTS}
-      className="flex flex-wrap gap-1 border-b border-hairline"
+      className="flex flex-wrap gap-1 border-b border-border"
     >
       {order.map((id) => (
         <button
@@ -226,10 +232,10 @@ function Tabs({
           data-tab={id}
           onClick={() => onChange(id)}
           onKeyDown={(event) => move(event, id)}
-          className={`atlas-transition min-h-11 border-b-2 px-3 text-[13.5px] ${
+          className={`atlas-transition min-h-11 border-b-2 px-3 text-sm ${
             tab === id
-              ? "border-action-ink font-medium text-ink-1"
-              : "border-transparent text-ink-2 hover:text-ink-1"
+              ? "border-primary font-medium text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
           }`}
         >
           {labels[id]}
@@ -273,7 +279,7 @@ function Incoming({
         <OrphanReport key={key} env={env} reportKey={key} />
       ))}
       {view.status === "offline" ? (
-        <p className="text-[13.5px] text-ink-1" data-requests-state="offline">
+        <p className="text-sm text-foreground" data-requests-state="offline">
           {copy.REQUESTS_OFFLINE}
         </p>
       ) : view.status === "failed" ? (
@@ -282,11 +288,14 @@ function Incoming({
           action={<Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>}
         />
       ) : rows === null ? (
-        <p className="text-[13.5px] text-ink-2" data-requests-state="loading">
+        <p
+          className="text-sm text-muted-foreground"
+          data-requests-state="loading"
+        >
           {copy.REQUESTS_CHECKING}
         </p>
       ) : rows.length === 0 ? (
-        <p className="text-[13.5px] text-ink-1" data-requests-state="empty">
+        <p className="text-sm text-foreground" data-requests-state="empty">
           {copy.NO_REQUESTS}
         </p>
       ) : (
@@ -350,7 +359,7 @@ function OrphanReport({
           ) : (
             // Closed only once nothing is left to resolve: closing never hides an attempt whose outcome is still unknown.
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => {
                 env.memory.requestReports.delete(reportKey);
                 env.memory.touch();
@@ -434,13 +443,13 @@ function IncomingRow({
           to="/people/requests/$requestId"
           params={{ requestId: request.id }}
           data-people-action="see-what-changes"
-          className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
+          className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           {copy.SEE_WHAT_CHANGES}
         </Link>
       ) : accept === "accept" && kept !== true ? (
         <Button
-          variant="primary"
+          variant="default"
           data-people-action="accept-request"
           onClick={() => setAccepting(true)}
         >
@@ -448,14 +457,14 @@ function IncomingRow({
         </Button>
       ) : blocked === null ? (
         <Button
-          variant="primary"
+          variant="default"
           data-people-action="confirm-accept"
           onClick={() => void answer(true)}
         >
           {kept === true ? copy.TRY_AGAIN : copy.CONFIRM_ACCEPT}
         </Button>
       ) : (
-        <Button variant="primary" disabled reason={blocked}>
+        <Button variant="default" disabled reason={blocked}>
           {copy.CONFIRM_ACCEPT}
         </Button>
       )}
@@ -463,14 +472,14 @@ function IncomingRow({
   );
   return (
     <li
-      className="flex list-none flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col gap-2 rounded-lg border border-border bg-card p-3"
       data-incoming-request={request.id}
       data-request-kind={proposal.kind}
     >
       <div className="flex items-center gap-3">
         <Avatar name={senderText} />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[14px] text-ink-1">
+          <span className="text-sm text-foreground">
             <span
               className="font-medium"
               data-request-sender={sender === null ? "unknown" : "known"}
@@ -481,25 +490,25 @@ function IncomingRow({
               ? copy.WANTS_TO_LINK(proposal.name)
               : copy.WANTS_TO_MERGE}
           </span>
-          <span className="text-[12.5px] text-ink-2" data-request-left="">
+          <span className="text-xs text-muted-foreground" data-request-left="">
             {left}
           </span>
         </span>
       </div>
       {sender === null ? (
-        <p className="text-[12.5px] text-ink-2" data-request-caution="">
+        <p className="text-xs text-muted-foreground" data-request-caution="">
           {copy.UNNAMED_CAUTION}
         </p>
       ) : null}
       {proposal.kind === "link" && (accepting || kept === true) ? (
         <div
-          className="flex flex-col gap-2 rounded-row border border-hairline bg-canvas p-3"
+          className="flex flex-col gap-2 rounded-lg border border-border bg-background p-3"
           data-link-consequence=""
         >
-          <p className="text-[13px] font-medium text-ink-1">
+          <p className="text-sm font-medium text-foreground">
             {copy.BEFORE_YOU_ACCEPT}
           </p>
-          <p className="text-[13px] leading-[1.6] text-ink-1">
+          <p className="text-sm leading-[1.6] text-foreground">
             {copy.LINK_CONSEQUENCE(proposal.name)}
           </p>
           {actions("confirm")}
@@ -538,7 +547,7 @@ function Sent({ env }: { env: PeopleEnv }) {
   return (
     <div className="flex flex-col gap-2" data-requests-sent={view.status}>
       {view.status === "offline" ? (
-        <p className="text-[13.5px] text-ink-1" data-sent-state="offline">
+        <p className="text-sm text-foreground" data-sent-state="offline">
           {copy.REQUESTS_OFFLINE}
         </p>
       ) : view.status === "failed" ? (
@@ -547,12 +556,12 @@ function Sent({ env }: { env: PeopleEnv }) {
           action={<Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>}
         />
       ) : page === null ? (
-        <p className="text-[13.5px] text-ink-2" data-sent-state="loading">
+        <p className="text-sm text-muted-foreground" data-sent-state="loading">
           {copy.REQUESTS_CHECKING}
         </p>
       ) : page.items.length === 0 ? (
         <p
-          className="text-[13.5px] text-ink-1"
+          className="text-sm text-foreground"
           data-sent-state={page.next_after === null && first ? "empty" : "more"}
         >
           {page.next_after === null && first ? copy.NO_SENT : copy.PAGE_MORE}
@@ -619,7 +628,7 @@ function SentRow({ env, request }: { env: PeopleEnv; request: SentRequest }) {
   const action =
     blocked === null ? (
       <Button
-        variant="quiet"
+        variant="ghost"
         data-people-action="cancel-request"
         aria-label={copy.CANCEL_REQUEST_TO(request.recipient_username)}
         onClick={() => void cancel()}
@@ -627,21 +636,21 @@ function SentRow({ env, request }: { env: PeopleEnv; request: SentRequest }) {
         {retained ? copy.TRY_AGAIN : copy.CANCEL_REQUEST}
       </Button>
     ) : (
-      <Button variant="quiet" disabled reason={blocked}>
+      <Button variant="ghost" disabled reason={blocked}>
         {retained ? copy.TRY_AGAIN : copy.CANCEL_REQUEST}
       </Button>
     );
   return (
     <li
-      className="flex list-none flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+      className="flex list-none flex-col gap-2 rounded-lg border border-border bg-card p-3"
       data-sent-request={request.id}
       data-sent-state={request.state}
     >
       <div className="flex flex-wrap items-center gap-3">
-        <span className="min-w-0 flex-1 text-[13.5px] text-ink-1">{text}</span>
+        <span className="min-w-0 flex-1 text-sm text-foreground">{text}</span>
         {request.state === "pending" ? (
           <span className="flex flex-wrap items-center gap-2">
-            <span className="text-[12.5px] text-ink-2">
+            <span className="text-xs text-muted-foreground">
               {timeLeftText(timeLeft(request.expires_at, env.now()))}
             </span>
             {action}
@@ -649,7 +658,7 @@ function SentRow({ env, request }: { env: PeopleEnv; request: SentRequest }) {
         ) : (
           <span className="flex flex-wrap items-center gap-2">
             <span
-              className="text-[12.5px] font-medium text-ink-2"
+              className="text-xs font-medium text-muted-foreground"
               data-sent-label=""
             >
               {copy.STATE[request.state]}
