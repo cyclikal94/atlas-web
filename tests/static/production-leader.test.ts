@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { snapshotSourceFacts } from "../../scripts/lib/profile-source-facts.mjs";
 
 /**
  * ST-1 (WEB-09b, P-3 and P-13): production LEADS. The protected tree is unmounted under every fence, and recovery must run exactly
@@ -72,5 +73,26 @@ describe("the production composition starts the sync leader", () => {
       "src/data/ui/browser-leader.ts",
     ])
       expect(code(path), path).not.toMatch(/\.query\(|steal/);
+  });
+});
+
+describe("the profiling hand-over's snapshot answer is this composition (WEB-09c revision 5, review 5 R6)", () => {
+  it("every link from the production entry to the snapshot page's /sync request and its sized limit holds, so H9 says snapshots are sent", () => {
+    const facts = snapshotSourceFacts();
+    expect(
+      facts.links.filter((l) => !l.holds).map((l) => `${l.id} (${l.file})`),
+    ).toEqual([]);
+    expect(facts.snapshot_requests).toBe(true);
+    expect(facts.links.map((l) => l.file)).toEqual([
+      "src/main.tsx",
+      "src/app/boot.tsx",
+      "src/app/data-leader.ts",
+      "src/data/leader/start.ts",
+      "src/data/ui/browser-leader.ts",
+      "src/data/leader/leader.ts",
+      "src/data/engine/recovery-job.ts",
+      "src/data/plans/recovery-writers.ts",
+      "src/data/model/sizing.ts",
+    ]);
   });
 });

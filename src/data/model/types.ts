@@ -154,6 +154,12 @@ export interface PendingEffectRow {
   created_at: IsoInstant;
   /** Written once, never overwritten by a resend. */
   submitted_at_page_seq: number;
+  /**
+   * WEB-09c (R20-SEG): `sync_state.request_seq` when the row was created (the claim), written once like `submitted_at_page_seq`. A word
+   * STAGED from a request captured at or before it is not evidence about this row (`stagedMentionReaches`). Absent on a row written before
+   * it: unknown (the receipt's floor, which comes later, stands in).
+   */
+  submitted_at_request_seq?: number;
   last_mentioned_page_seq: number | null;
   display: ProjectionPatch | null;
   resolved: "no_publication" | null;
@@ -217,6 +223,28 @@ export interface ReadRetryState {
 }
 
 export type SizingClass = "constrained" | "unconstrained" | "unknown";
+/**
+ * The revision being staged (`sync_state.delta_stage`; absent or null: none). `boundary_cursor` is the delta cursor the revision was asked
+ * from (the position of the live cache, which is unchanged until activation); `next_index` the segment expected next.
+ */
+export interface DeltaStage {
+  revision: number;
+  next_index: number;
+  /** The delta cursor the revision was asked from: where a broken sequence starts again. */
+  boundary_cursor: string;
+  /**
+   * The continuation the last staged segment stored as `sync_state.cursor`. The stage belongs to THAT position: any writer that replaces the
+   * cursor (an invalidation, a snapshot activation, an abandonment, a restart) leaves a stage whose cursor is no longer the row's, and such a
+   * stage is no stage at all (`stageOf`), so no writer can forget to retire it.
+   */
+  cursor: string;
+  /** Changes received in staged segments (ancestors repeated across segments counted each time) and their response bytes. */
+  changes: number;
+  bytes: number;
+  /** Client clock of the first segment. */
+  started_at: number;
+}
+
 export interface SizingState {
   /** The `limit` of the next `/sync` request, 1 to 80. Stepped down by observed outcomes only (D-09). */
   limit: number;
@@ -224,7 +252,18 @@ export interface SizingState {
   class: SizingClass | null;
   floor_hits: number;
   /** The crash-loop marker (D-09): present while a large page is being processed. */
-  attempt: null | { id: string; limit: number; started_at: number };
+  attempt: null | {
+    id: string;
+    limit: number;
+    started_at: number;
+    /** WEB-09c: the `max_changes` the attempt's request carried, when it carried one. */
+    max_changes?: number;
+  };
+  /**
+   * WEB-09c (segmented delivery, `model/segmented-sync.ts`): the `max_changes` a device signal at `limit = 1` stepped down to (halving, never
+   * below the contract's 4). Absent: the configured starting value.
+   */
+  max_changes?: number;
 }
 
 export interface ProfileState {
@@ -311,6 +350,11 @@ export interface SyncStateRow {
    * the cache as it is then, and clears this. Absent: nothing is owed.
    */
   recovery_reconcile_pending?: boolean;
+  /**
+   * WEB-09c: the delta revision being received in segments (`model/segmented-sync.ts`), staged in `delta_staging` and applied whole by W1.
+   * Absent or null: none. In force only while `cursor` is the continuation it stored (`stageOf`).
+   */
+  delta_stage?: DeltaStage | null;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

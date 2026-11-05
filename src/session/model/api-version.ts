@@ -45,6 +45,25 @@ export function rangeFromPin(pinVersion: string): VersionRange {
   };
 }
 
+/**
+ * WEB-09c (R38-DIAG): DIAGNOSTIC ONLY. The range that admits EXACTLY `version` (`>=X.Y.Z <X.Y.(Z+1)`), for the fixture session harness's
+ * development-pair page, whose verified diagnostic selection names one backend API version. Only a strict `MAJOR.MINOR.PATCH` is accepted; a
+ * pre-release, a partial version or anything else throws, so a malformed descriptor never boots a page with a wider policy. The production
+ * entry never uses it (its range is `rangeFromPin`); a static test asserts that.
+ */
+export function exactVersionRange(version: string): VersionRange {
+  const parsed = parseSemVer(version);
+  if (!parsed) throw new Error(`Not an exact API version: ${version}`);
+  return {
+    floor: parsed,
+    ceiling: {
+      major: parsed.major,
+      minor: parsed.minor,
+      patch: parsed.patch + 1,
+    },
+  };
+}
+
 export const formatRange = (range: VersionRange): string =>
   `>=${range.floor.major}.${range.floor.minor}.${range.floor.patch} <${range.ceiling.major}.${range.ceiling.minor}.${range.ceiling.patch}`;
 

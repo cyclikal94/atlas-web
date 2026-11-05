@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, describe, expect, test } from "vitest";
 import type { EngineState } from "../../src/data/engine/sync-engine";
 import { DATA_CONFIG } from "../../src/data/model/config";
 import {
@@ -13,7 +13,10 @@ import {
   restoreFaults,
   type ScanSite,
 } from "../support/data/allocation-faults";
-import { engineWorld } from "../support/data/engine-world";
+import {
+  type DisposedWitness,
+  engineWorld,
+} from "../support/data/engine-world";
 import { draftRow } from "../support/data/rows";
 import { type PageSpec, uuid } from "../support/data/sync-pages";
 
@@ -70,7 +73,10 @@ const cursors = (w: World) =>
 const retry = (w: World) => w.sync().read_retry_states.sync;
 const track = (w: World): EngineState[] => {
   const seen: EngineState[] = [];
-  w.engine.state.subscribe(() => seen.push(w.engine.state.get()));
+  // The case owns the subscription too: its teardown ends it.
+  releases.push(
+    w.engine.state.subscribe(() => seen.push(w.engine.state.get())),
+  );
   return seen;
 };
 const ids = (w: World) =>
@@ -89,41 +95,121 @@ const SCANNER = /src\/data\/scan\/scan\.ts/;
 const DECODER = /src\/data\/scan\/validate\.ts/;
 
 /**
- * Settles the world and asserts that it SETTLED: an engine that asks again at once, without bound, never lets the world reach idle (the
- * world says so with an error). That is a finding of these cases (the failure is bounded, or it is not), so it is recorded and
- * asserted, not left to end the test by an error.
- *
- * The automatic driver of the store double drains the same world, so such an engine makes ITS drain reach the world's step bound as
- * well, and the test's teardown would report that again as a plain error beside this assertion (WEB-14a revision 27,
- * WEB14A-UNIT-MUTATION-SELECTION-20261023, MU-731). That one failure is this finding, so it is consumed here, where the finding is
- * asserted; any other failure of the driver still stands.
+ * WEB-09c R41-MUT (revision 41): every case OWNS the worlds it builds. A world comes from `world()` (never `engineWorld` directly), which
+ * registers it before the case can use it, gives it a request ceiling enforced at the issue boundary whatever drives the world (the
+ * double of IndexedDB drives itself), and wraps its `settle` so that every drive also asserts the ceiling held. After the case, passed
+ * or failed, `afterEach` disposes of every owned world (`EngineWorld.dispose`: issuance refused, every engine stopped, held work answered,
+ * the due work, future timers and the automatic drive joined, quiet across further turns) BEFORE it restores the process-wide fault; a
+ * disposed world must then never move again, which every later teardown checks. A teardown that cannot prove quiet fails the hook (an
+ * invalid result, never a sound one) and every later case of the file refuses to start.
  */
-const settleBounded = async (w: World): Promise<void> => {
+type Options = Parameters<typeof engineWorld>[0];
+/** A termination control for cases without a ladder of their own: far above every sequence of this file (the longest is 5). */
+const GENERAL_CEILING = 32;
+/** Every log the world may write in one case (its own halt, `World.maxLogs`): an event-level bound for a loop that issues no request. */
+const CASE_LOG_BOUND = 30_000;
+const FLOOR = DATA_CONFIG.floorAfter;
+const owned: World[] = [];
+const releases: Array<() => void> = [];
+const disposed: Array<{
+  name: string;
+  w: World;
+  witness: DisposedWitness;
+}> = [];
+let contaminated: string | null = null;
+let cases = 0;
+
+const IDLE_LIMIT = /world did not reach (idle|the target time)/;
+
+const world = async (options: Options = {}): Promise<World> => {
+  if (contaminated !== null)
+    throw new Error(
+      `a previous case's world did not quiesce, so this worker's results are not sound: ${contaminated}`,
+    );
+  const w = await engineWorld(options);
+  owned.push(w);
+  w.ceiling = GENERAL_CEILING;
+  w.env.world.maxLogs = w.env.world.logs.length + CASE_LOG_BOUND;
+  const drive = w.settle;
+  w.settle = async () => {
+    await drive();
+    expect(
+      w.overrun,
+      `the engine asks no more than ${w.ceiling} times in all: it does not ask again without bound`,
+    ).toBeNull();
+    expect(
+      w.env.world.livelocked,
+      "the world is not halted by a loop that issues no request",
+    ).toBe(false);
+  };
+  return w;
+};
+
+/**
+ * Settles the world and asserts that it SETTLED within the scenario's semantic bound: `ceiling` is the number of requests the specified
+ * ladder allows IN TOTAL so far (the request past it fails the named assertion at once, and stops the engine), and the world must reach
+ * idle without halting. An engine that asks again at once, without bound, is a finding of these cases, so it is recorded and asserted,
+ * not left to end the test by a timeout; any other error of the settling is reported with its own cause.
+ */
+const settleBounded = async (w: World, ceiling: number): Promise<void> => {
+  w.ceiling = ceiling;
   let reached = true;
   try {
     await w.settle();
-  } catch {
+  } catch (error) {
+    if (!(error instanceof Error && IDLE_LIMIT.test(error.message)))
+      throw error;
     reached = false;
   }
-  if (!reached)
-    try {
-      await w.env.idb.disposeAndWait();
-    } catch (error) {
-      if (
-        !(
-          error instanceof Error && error.message === "world did not reach idle"
-        )
-      )
-        throw error;
-    }
   expect(
     reached,
     "the engine reaches a terminal state: it does not ask again at once without bound",
   ).toBe(true);
 };
 
-afterEach(() => {
-  restoreFaults();
+afterEach(async (context) => {
+  cases += 1;
+  const name = context.task.name;
+  const problems: string[] = [];
+  try {
+    for (const release of releases.splice(0)) release();
+    for (const w of owned.splice(0)) {
+      const report = await w.dispose();
+      problems.push(...report.problems);
+      disposed.push({ name, w, witness: report.witness });
+    }
+    // A world disposed in this case or any earlier one must not have moved since (it would be working under this case's fault).
+    for (const entry of disposed) {
+      const now = entry.w.requests.length;
+      const logs = entry.w.env.world.logs.length;
+      if (
+        now !== entry.witness.requests ||
+        logs !== entry.witness.logs ||
+        entry.w.inFlight !== 0
+      )
+        problems.push(
+          `a world of "${entry.name}" moved after its disposal: requests ${entry.witness.requests} -> ${now}, logs ${entry.witness.logs} -> ${logs}`,
+        );
+    }
+  } catch (error) {
+    problems.push(
+      `teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    restoreFaults();
+  }
+  if (problems.length > 0) {
+    contaminated ??= `${name}: ${problems.join("; ")}`;
+    throw new Error(
+      `the case's worlds were not quiesced: ${problems.join("; ")}`,
+    );
+  }
+});
+
+afterAll(() => {
+  // Every case of the file disposed of its worlds; none was left over.
+  expect(owned).toHaveLength(0);
+  expect(cases).toBeGreaterThan(0);
 });
 
 describe("R44: an allocation failure anywhere in the scan steps the ladder down and the same position is asked for again", () => {
@@ -140,7 +226,7 @@ describe("R44: an allocation failure anywhere in the scan steps the ladder down 
   test.each(SITES)(
     "$site ($count changes): 4 -> 2, the page commits whole at the smaller size, the run never stops and nothing is counted as data or storage",
     async ({ site, count, grown }) => {
-      const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+      const w = await world({ signals: big, cursor: "cursor-0" });
       const states = track(w);
       const fault = injectFault(site, { grown });
       w.script.push(w.json(pageOf(count)), w.json(pageOf(count)));
@@ -178,7 +264,7 @@ describe("R44: an allocation failure anywhere in the scan steps the ladder down 
   ] as const)(
     "the decoding of a small token (%s) is the same signal",
     async (site) => {
-      const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+      const w = await world({ signals: big, cursor: "cursor-0" });
       const fault = injectFault(site, { cursor: CURSOR });
       w.script.push(w.json(pageOf(SMALL)), w.json(pageOf(SMALL)));
       w.start();
@@ -201,7 +287,7 @@ describe("R44: an allocation failure while decoding or validating an element, in
   test.each(["change.decode", "change.parse"] as const)(
     "%s: 4 -> 2, the valid page is NOT asked for again at the unchanged size and counts nothing as unrecognised",
     async (site) => {
-      const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+      const w = await world({ signals: big, cursor: "cursor-0" });
       const fault = injectFault(site);
       w.script.push(w.json(pageOf(SMALL)), w.json(pageOf(SMALL)));
       w.start();
@@ -221,7 +307,7 @@ describe("R44: an allocation failure while decoding or validating an element, in
   );
 
   test("a REMOVE element's decoding fails the same way", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     const page: PageSpec = {
       ...pageOf(1),
       batches: [
@@ -252,7 +338,7 @@ describe("R44: an allocation failure while decoding or validating an element, in
       }
       return true;
     });
-    const w = await engineWorld({
+    const w = await world({
       signals: big,
       cursor: "cursor-0",
       decode: { validators, derivers: createKeyDerivers() },
@@ -272,7 +358,7 @@ describe("R44: an allocation failure while decoding or validating an element, in
     validators.register("person", () => {
       throw new Error("a defect of the registrant");
     });
-    const w = await engineWorld({
+    const w = await world({
       signals: big,
       cursor: "cursor-0",
       decode: { validators, derivers: createKeyDerivers() },
@@ -296,7 +382,7 @@ describe("R44: an allocation failure while decoding or validating an element, in
       }
       return null;
     });
-    const w = await engineWorld({
+    const w = await world({
       signals: big,
       cursor: "cursor-0",
       decode: { validators: createValueValidators(), derivers },
@@ -315,12 +401,12 @@ describe("R44 with R42: a large page's attempt marker is retired by the failed a
   test.each(["change.decode", "change.parse"] as const)(
     "%s on a page over markerMinBytes: 4 -> 2 (not 4 -> 1), the marker is gone and the next attempt leaves none",
     async (site) => {
-      const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+      const w = await world({ signals: big, cursor: "cursor-0" });
       const page = pageOf(BULKY.count, BULKY.filler);
       const fault = injectFault(site);
       w.script.push(w.json(page), w.json(page));
       w.start();
-      await settleBounded(w);
+      await settleBounded(w, 2);
       expect(JSON.stringify(page).length).toBeGreaterThan(
         DATA_CONFIG.markerMinBytes,
       );
@@ -344,12 +430,12 @@ describe("R44 with R42: a large page's attempt marker is retired by the failed a
   );
 
   test("the lowest rung: three failed attempts are three counts (a marker left behind would be a fourth and fifth)", async () => {
-    const w = await engineWorld({ cursor: "cursor-0" });
+    const w = await world({ cursor: "cursor-0" });
     const page = pageOf(BULKY.count, BULKY.filler);
     const fault = injectFault("change.decode", { times: 10_000 });
     for (let i = 0; i < 8; i += 1) w.script.push(w.json(page));
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, FLOOR);
     expect(fault.hits).toBe(DATA_CONFIG.floorAfter);
     expect(limits(w)).toEqual([1, 1, 1]);
     expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
@@ -364,11 +450,11 @@ describe("R44 with R42: a large page's attempt marker is retired by the failed a
 
 describe("R44: a failure part-way through a page rolls the whole page back", () => {
   test("the 251st element's decoding fails after 200 rows were streamed into the transaction: nothing of that attempt lands, the retry commits all 300 once", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     const fault = injectFault("change.decode", { skip: 250 });
     w.script.push(w.json(pageOf(300)), w.json(pageOf(300)));
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, 2);
     expect(fault.hits).toBe(1);
     expect(limits(w)).toEqual([4, 2]);
     expect(ids(w)).toEqual(expectedIds(300));
@@ -377,12 +463,12 @@ describe("R44: a failure part-way through a page rolls the whole page back", () 
   });
 
   test("a persistent mid-page failure leaves the cache, the position and the drafts exactly as they were", async () => {
-    const w = await engineWorld({ cursor: "cursor-0" });
+    const w = await world({ cursor: "cursor-0" });
     w.put("drafts", [draftRow({ local_id: "d1", status: "queued" })]);
     const fault = injectFault("change.parse", { skip: 250, times: 10_000 });
     for (let i = 0; i < 8; i += 1) w.script.push(w.json(pageOf(300)));
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, FLOOR);
     expect(fault.hits).toBeGreaterThanOrEqual(DATA_CONFIG.floorAfter);
     expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
     expect(w.cache()).toEqual([]);
@@ -409,7 +495,7 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
   test.each(PERSISTENT)(
     "$site at the lowest rung (no device-memory signal): FLOOR_AFTER attempts, then `stopped / floor`, and nothing else is touched",
     async ({ site, count, grown }) => {
-      const w = await engineWorld({ cursor: "cursor-0" });
+      const w = await world({ cursor: "cursor-0" });
       w.put("drafts", [draftRow({ local_id: "d1", status: "queued" })]);
       const fault = injectFault(site, {
         times: 10_000,
@@ -418,7 +504,7 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
       });
       for (let i = 0; i < 8; i += 1) w.script.push(w.json(pageOf(count)));
       w.start();
-      await settleBounded(w);
+      await settleBounded(w, FLOOR);
       expect(fault.hits).toBeGreaterThanOrEqual(DATA_CONFIG.floorAfter);
       expect(limits(w)).toEqual([1, 1, 1]);
       expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
@@ -440,11 +526,11 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
   test.each(["offsets.initial", "change.decode"] as const)(
     "%s from the device's first rung: 4 -> 2 -> 1, then three at the lowest rung",
     async (site) => {
-      const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+      const w = await world({ signals: big, cursor: "cursor-0" });
       injectFault(site, { times: 10_000 });
       for (let i = 0; i < 8; i += 1) w.script.push(w.json(pageOf(SMALL)));
       w.start();
-      await settleBounded(w);
+      await settleBounded(w, 2 + FLOOR);
       expect(limits(w)).toEqual([4, 2, 1, 1, 1]);
       expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
       expect(w.sync().sizing).toMatchObject({
@@ -457,15 +543,15 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
   test.each(["offsets.copy", "change.parse"] as const)(
     "%s: 'Try again' resets the count and asks again; a success then clears everything, and the same page commits whole",
     async (site) => {
-      const w = await engineWorld({ cursor: "cursor-0" });
+      const w = await world({ cursor: "cursor-0" });
       injectFault(site, { times: 10_000 });
       for (let i = 0; i < 8; i += 1) w.script.push(w.json(pageOf(SMALL)));
       w.start();
-      await settleBounded(w);
+      await settleBounded(w, FLOOR);
       expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
       restoreFaults();
       w.engine.retryNow();
-      await settleBounded(w);
+      await settleBounded(w, FLOOR + 1);
       expect(w.state().kind).toBe("idle");
       expect(w.sync()).toMatchObject({
         cursor: CURSOR,
@@ -476,14 +562,14 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
   );
 
   test("'Try again' with the failure still there: exactly FLOOR_AFTER more attempts (the count really restarted), then the floor again", async () => {
-    const w = await engineWorld({ cursor: "cursor-0" });
+    const w = await world({ cursor: "cursor-0" });
     injectFault("nodes.initial", { times: 10_000 });
     for (let i = 0; i < 12; i += 1) w.script.push(w.json(pageOf(SMALL)));
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, FLOOR);
     expect(limits(w)).toEqual([1, 1, 1]);
     w.engine.retryNow();
-    await settleBounded(w);
+    await settleBounded(w, 2 * FLOOR);
     expect(limits(w)).toEqual([1, 1, 1, 1, 1, 1]);
     expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
     expect(w.sync().sizing).toMatchObject({
@@ -493,25 +579,25 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
   });
 
   test("a floor reached in the scan is durable: a restarted engine on the same database is still stopped, with no request", async () => {
-    const w = await engineWorld({ cursor: "cursor-0" });
+    const w = await world({ cursor: "cursor-0" });
     injectFault("offsets.initial", { times: 10_000 });
     for (let i = 0; i < 8; i += 1) w.script.push(w.json(pageOf(SMALL)));
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, FLOOR);
     const issued = w.requests.length;
     w.engine.stop();
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, FLOOR);
     expect(w.state()).toEqual({ kind: "stopped", cause: "floor" });
     expect(w.requests).toHaveLength(issued);
   });
 
   test("a success after failures at the lowest rung clears the count (an allocation failure from the scan, then a healthy page)", async () => {
-    const w = await engineWorld({ cursor: "cursor-0" });
+    const w = await world({ cursor: "cursor-0" });
     injectFault("offsets.initial", { times: 2 });
     for (let i = 0; i < 4; i += 1) w.script.push(w.json(pageOf(SMALL)));
     w.start();
-    await settleBounded(w);
+    await settleBounded(w, 2 + 1);
     expect(limits(w)).toEqual([1, 1, 1]);
     expect(w.state().kind).toBe("idle");
     expect(w.sync().sizing).toMatchObject({
@@ -525,7 +611,7 @@ describe("R44: repeated allocation failure is bounded exhaustion, and 'Try again
 
 describe("R44 controls: malformed data keeps its own classification, and a healthy page does not step down", () => {
   test("a healthy page: one request at the device's rung, nothing counted", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     w.script.push(w.json(pageOf(GROWN)));
     w.start();
     await w.settle();
@@ -539,7 +625,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
   });
 
   test("a response body that cannot be allocated still steps down (the existing path, unchanged)", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     const unreadable = new Response("x");
     Object.defineProperty(unreadable, "arrayBuffer", {
       value: async () => {
@@ -567,7 +653,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
   test.each(MALFORMED)(
     "a $kind fault at $site is a fault of the DATA: the unrecognised budget counts it, the ladder does not move, and the same size is asked for again",
     async ({ site, kind }) => {
-      const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+      const w = await world({ signals: big, cursor: "cursor-0" });
       const fault = injectFault(site, { kind, cursor: CURSOR });
       w.script.push(w.json(pageOf(SMALL)), w.json(pageOf(SMALL)));
       w.start();
@@ -591,7 +677,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
   );
 
   test("a page that stays malformed ends at `unrecognised` after the budget, never at the floor: the two terminal states are not mixed", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     injectFault("change.parse", { kind: "syntax", times: 10_000 });
     for (let i = 0; i < 6; i += 1) w.script.push(w.json(pageOf(SMALL)));
     w.start();
@@ -606,7 +692,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
   });
 
   test("a REAL invalid UTF-8 byte inside an element (no injection) is invalid data, as before", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     const text = JSON.stringify(pageOf(SMALL)).replace("Person 1", "PersonZZ1");
     const bytes = new TextEncoder().encode(text);
     const at = text.indexOf("ZZ");
@@ -628,7 +714,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
   });
 
   test("a REAL syntax fault in the document (no injection) is invalid data, as before", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     w.script.push(
       new Response('{"phase":"delta","batches":[', {
         status: 200,
@@ -643,7 +729,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
   });
 
   test("a defect that is neither an allocation failure nor invalid data still reaches the loop's own stop: it is not a sizing signal", async () => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     const fault = injectFault("offsets.initial", { kind: "defect" });
     w.script.push(w.json(pageOf(SMALL)), w.json(pageOf(SMALL)));
     w.start();
@@ -657,7 +743,7 @@ describe("R44 controls: malformed data keeps its own classification, and a healt
 
 describe("R44: the run, ownership and hold checks are unchanged", () => {
   const ended = async (during: "body" | "scan") => {
-    const w = await engineWorld({ signals: big, cursor: "cursor-0" });
+    const w = await world({ signals: big, cursor: "cursor-0" });
     const fault = during === "scan" ? injectFault("offsets.initial") : null;
     const response = w.json(pageOf(SMALL));
     const read = response.arrayBuffer.bind(response);
@@ -693,7 +779,7 @@ describe("R44: the run, ownership and hold checks are unchanged", () => {
   });
 
   test("a scan failure, then a page another leader's commit guard refuses: the owner check still stops it, one rung down and nothing else", async () => {
-    const w = await engineWorld({
+    const w = await world({
       signals: big,
       cursor: "cursor-0",
       ownerToken: "tok-OLD",

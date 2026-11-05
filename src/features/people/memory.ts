@@ -67,6 +67,35 @@ export interface SummaryEntry {
     | { kind: "failed"; reason: "failed" | "not_found" | "stale" };
 }
 
+/** A request command's last word (`requestReports`): the message, a copyable reference, and whether its outcome is uncertain. */
+export interface RequestReport {
+  text: string;
+  requestId?: string;
+  uncertain?: boolean;
+}
+
+/**
+ * WEB-11b (R7 of review 2): the dispatches of one request read key (`requests/reads.ts`). `issued`: the number of the latest dispatch;
+ * `answered`: the number of the newest dispatch whose answer counted (an answer numbered at or below it is obsolete and has no effect);
+ * `latest`: the latest dispatch, with a promise settled once its answer has been taken into account, while it is on its way.
+ */
+export interface RequestReadLedger {
+  issued: number;
+  answered: number;
+  latest: { dispatch: number; settled: Promise<void>; done: boolean } | null;
+}
+
+/** WEB-11b: a request read's remembered `403` (`requests/reads.ts`), with the dispatch that answered it. */
+export interface RequestRefusal {
+  refusal: {
+    ok: false;
+    kind: "forbidden";
+    requestId?: string;
+    message?: string;
+  };
+  dispatch: number;
+}
+
 type Listener = () => void;
 
 export class PeopleMemory {
@@ -138,6 +167,19 @@ export class PeopleMemory {
   /** The count "Possible duplicates" showed from its first page, per person ("2", "2+"; null: none claimed). */
   readonly duplicateCounts = new Map<string, string | null>();
   readonly attempts = new Map<string, Attempt>();
+  /**
+   * WEB-11b: what a request command last said that is not a success (a refusal, an uncertain outcome), by its attempt key
+   * (`respond:<id>`, `cancel:<id>`, `request-link:<person>`, `merge:<source>:<target>`), for whichever row or dialog shows that request
+   * now: the one that pressed may be gone (a remount, another page of the history). Cleared by the key's next send.
+   */
+  readonly requestReports = new Map<string, RequestReport>();
+  /**
+   * WEB-11b: the request reads' `403`s remembered for the page, by read key (N1 of revision 1, R7 of review 2; `requests/reads.ts`). Kept
+   * across invalidations and remounts; ended only by the key's explicit retry, a newer answer of the key, or the end of this memory.
+   */
+  readonly requestRefusals = new Map<string, RequestRefusal>();
+  /** WEB-11b: the request reads' dispatches, by read key: which answer is the newest (`requests/reads.ts`). Compact; never a payload. */
+  readonly requestReads = new Map<string, RequestReadLedger>();
   /** Bumped by every invalidation: every earlier summary read is superseded, and none of its answers is applied. */
   summaryGeneration = 0;
   /** The highest `preferences_version` a summary applied in this epoch (0: none yet). */

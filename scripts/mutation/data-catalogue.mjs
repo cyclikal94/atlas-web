@@ -19,6 +19,7 @@ import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
+import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
 
 export class PatchError extends Error {}
 
@@ -276,8 +277,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        /const missing = candidateRows\(draft, sync\.page_seq\)\.filter\(\s*\(row\) => !have\.has\(row\.resource_id\),\s*\);/,
-        "const missing = candidateRows(draft, sync.page_seq);",
+        /const missing = candidateRows\(\s*draft,\s*sync\.page_seq,\s*sync\.request_seq,\s*\)\.filter\(\s*\(row\) => !have\.has\(row\.resource_id\),?\s*\);/,
+        "const missing = candidateRows(draft, sync.page_seq, sync.request_seq);",
       ),
   },
   {
@@ -459,11 +460,12 @@ export const UNIT = [
     title: "an empty page does not commit (a renewed cursor is lost)",
     file: "src/data/plans/commit-page.ts",
     tests: PAGE_TESTS,
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
     patch: (t) =>
       sub(
         t,
-        "    const { scan } = input;\n    let revision",
-        '    const { scan } = input;\n    if (scan.totalChanges === 0)\n      return { result: { kind: "committed", pageSeq: sync.page_seq, changes: 0, revision: null, hasMore: scan.hasMore, stats: { mentioned: 0, resolvedNoPublication: 0, heldReleased: 0, unavailable: 0 } } };\n    let revision',
+        '    const activation = continuity.kind === "finish" && continuity.staged;\n    let revision',
+        '    const activation = continuity.kind === "finish" && continuity.staged;\n    if (scan.totalChanges === 0)\n      return { result: { kind: "committed", pageSeq: sync.page_seq, changes: 0, revision: null, activated: 0, hasMore: scan.hasMore, stats: { mentioned: 0, resolvedNoPublication: 0, heldReleased: 0, unavailable: 0 } } };\n    let revision',
       ),
   },
 
@@ -3290,11 +3292,12 @@ export const UNIT = [
       "R20 (revision 9): a page that applies does not clear what only the page counted (the next outage inherits the clock of an earlier one)",
     file: "src/data/engine/sync-engine.ts",
     tests: ["tests/data/engine-bookkeeping.test.ts"],
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
     patch: (t) =>
       sub(
         t,
-        "      unverified = 0;\n      unsaved = null;\n      behind = value.hasMore;",
-        "      unverified = 0;\n      behind = value.hasMore;",
+        "      unverified = 0;\n      unsaved = null;\n      // A staged segment",
+        "      unverified = 0;\n      // A staged segment",
       ),
   },
   {
@@ -6204,8 +6207,13 @@ export const UNIT = [
     tests: ["tests/data/quota-cache-admission.test.ts"],
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /a hold that ended once: the page is admitted again/,
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
     patch: (t) =>
-      sub(t, "          leaseLive: () => reservation.live(),\n", ""),
+      sub(
+        t,
+        "                now: deps.clock.iso(),\n                decode: deps.decode,\n                elapsed: deps.elapsed,\n                leaseLive: () => reservation.live(),\n",
+        "                now: deps.clock.iso(),\n                decode: deps.decode,\n                elapsed: deps.elapsed,\n",
+      ),
   },
   {
     id: "MU-482",
@@ -9295,8 +9303,9 @@ export const UNIT = [
           "          attempt = deps.ids.uuid();\n          try {",
           "          const chosen = deps.ids.uuid();\n          try {",
         ),
-        "              id: attempt,\n              limit,\n              startedAt: deps.clock.now(),\n            });\n          } catch {",
-        "              id: chosen,\n              limit,\n              startedAt: deps.clock.now(),\n            });\n            attempt = chosen;\n          } catch {",
+        // WEB-09c: re-anchored (the marker now records the request's max_changes); the mutation is unchanged.
+        "              id: attempt,\n              limit,\n              startedAt: deps.clock.now(),\n              maxChanges: budget,\n            });\n          } catch {",
+        "              id: chosen,\n              limit,\n              startedAt: deps.clock.now(),\n              maxChanges: budget,\n            });\n            attempt = chosen;\n          } catch {",
       ),
   },
   {
@@ -9573,7 +9582,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         "      // in a step, and reaches the loop's stop.\n      throw error;",
       ),
   },
@@ -9589,7 +9598,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return invalidPage(id, service, captured, "invalid");\n      throw error;',
       ),
   },
@@ -9605,7 +9614,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return failRead(id, service, captured, "failure");\n      throw error;',
       ),
   },
@@ -9621,7 +9630,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error)) return { when: "after", ms: 1_000 };\n      throw error;',
       ),
   },
@@ -9688,7 +9697,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, {\n          kind: "commit_failed",\n          cause: "error",\n        });\n      throw error;',
       ),
   },
@@ -15496,7 +15505,13 @@ export const UNIT = [
     file: "src/data/plans/recovery-writers.ts",
     tests: ["tests/data/snapshot-plans.test.ts"],
     expect: /S-9 the final page and the swap/,
-    patch: (t) => sub(t, 'writes: [w.clear("cache")],', "writes: [],"),
+    // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): re-anchored on the segmented-delivery text; the mutation and its intent are unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        'writes: [w.clear("cache"), w.clear("delta_staging")],',
+        'writes: [w.clear("delta_staging")],',
+      ),
   },
   {
     id: "MU-1205",
@@ -22440,8 +22455,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    <DuplicatesView\n      key={personId}\n",
-        "    <DuplicatesView\n",
+        // WEB-11b re-anchor (the view is now inside a fragment beside its "Compare & merge" Outlet: two more spaces); same patch.
+        "      <DuplicatesView\n        key={personId}\n",
+        "      <DuplicatesView\n",
       ),
   },
   {
@@ -32383,6 +32399,7 @@ export const UNIT = [
         "  } else if (false) {\n",
       ),
   },
+  ...UNIT_WEB11B,
 ];
 
 /**
@@ -33641,7 +33658,7 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(id, service, { kind: "allocation_failed" });\n      throw error;',
+        '      // in a step, and reaches the loop\'s stop.\n      if (isAllocationError(error))\n        return sizingFailure(\n          id,\n          service,\n          { kind: "allocation_failed" },\n          budget,\n        );\n      throw error;',
         "      // in a step, and reaches the loop's stop.\n      throw error;",
       ),
   },
@@ -34788,7 +34805,8 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        "              : await service.commit(activateSnapshot, {\n                  ...common,\n                  operation: issued.capture.operation,\n                  activateOperation: issued.capture.activateOperation as string,\n                  now: deps.clock.iso(),\n                  mode: issued.mode,\n                });",
+        // WEB-09c: re-anchored (the branch is one level deeper and formatted anew); the mutation is unchanged.
+        "                : await service.commit(activateSnapshot, {\n                    ...common,\n                    operation: issued.capture.operation,\n                    activateOperation: issued.capture\n                      .activateOperation as string,\n                    now: deps.clock.iso(),\n                    mode: issued.mode,\n                  });",
         '              : await (async () => {\n                  const first = await service.commit(commitStagingPage, {\n                    ...common,\n                    scan: { ...ok, hasMore: true },\n                    operation: issued.capture.operation,\n                  });\n                  if (first.kind !== "applied" || first.value.kind !== "staged")\n                    return first;\n                  return service.commit(activateSnapshot, {\n                    ...common,\n                    captured: { ...issued.captured, expectedPosition: ok.nextCursor },\n                    operation: issued.capture.operation,\n                    activateOperation: issued.capture.activateOperation as string,\n                    now: deps.clock.iso(),\n                    mode: issued.mode,\n                  });\n                })();',
       ),
   },
@@ -35683,11 +35701,16 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.data-composition.spec.ts",
     grep: "E-CG2:",
     expect: /E-CG2:/,
+    // WEB-09c (schema version 4): "stays at version 2" now means no barrier at all: both the barrier and the current version are 2.
     patch: (t) =>
       sub(
-        t,
-        "export const SCHEMA_VERSION = 3;",
-        "export const SCHEMA_VERSION = 2;",
+        sub(
+          t,
+          "export const SCHEMA_VERSION = 4;",
+          "export const SCHEMA_VERSION = 2;",
+        ),
+        "export const COMPOSITION_BARRIER_VERSION = 3;",
+        "export const COMPOSITION_BARRIER_VERSION = 2;",
       ),
   },
 
@@ -36584,4 +36607,5 @@ export const ENGINE = [
         "",
       ),
   },
+  ...ENGINE_WEB11B,
 ];

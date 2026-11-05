@@ -1,3 +1,4 @@
+import type { DeltaStagingRow } from "./segmented-sync";
 import type {
   CacheRow,
   DraftCommandRow,
@@ -31,6 +32,7 @@ export const accountDatabaseName = (account: string): string =>
 export const STORE_NAMES = [
   "cache",
   "cache_staging",
+  "delta_staging",
   "pending_effects",
   "drafts",
   "draft_commands",
@@ -46,9 +48,12 @@ export type StoreName = (typeof STORE_NAMES)[number];
 export interface StagingRow extends CacheRow {
   recovery_generation: number;
 }
+/** `delta_staging` (version 4): the last word of the segmented delta revision being staged about one resource. */
+export type DeltaStagingStoreRow = DeltaStagingRow<CacheRow>;
 export interface RowByStore {
   cache: CacheRow;
   cache_staging: StagingRow;
+  delta_staging: DeltaStagingStoreRow;
   pending_effects: PendingEffectRow;
   drafts: DraftRow;
   draft_commands: DraftCommandRow;
@@ -64,6 +69,8 @@ export type RowOf<K extends StoreName> = RowByStore[K];
 export const DEXIE_SCHEMA: Readonly<Record<StoreName, string>> = Object.freeze({
   cache: "id, kind, parent_id, [kind+kind_date]",
   cache_staging: "id, kind, parent_id, [kind+kind_date], recovery_generation",
+  // Version 4 (WEB-09c): keyed by resource id (the last word), indexed by the revision it belongs to.
+  delta_staging: "id, revision",
   pending_effects: "[resource_id+local_id], resource_id, local_id",
   // `[status+created_seq]`: the oldest drafts of a status, in queue order, without reading the rest. `review_block.kind` and
   // `retry_state.state` are nested key paths: a row is indexed only while it has the object, so each index lists exactly the
@@ -103,8 +110,15 @@ export const D_INDEX_NAMES: Readonly<Record<string, string>> = Object.freeze({
  * this build advances it, a build before it did not, and opening version 3 delivers `versionchange` to an older build's connections,
  * which latch the account `upgrade_pending` and close (an older build cannot open a version-3 database at all), so no writer that leaves
  * the generation alone can commit beside a page that relies on it.
+ *
+ * VERSION 4 (WEB-09c, BOUNDED-SYNC-PAGINATION-20261027) adds ONE store, `delta_staging`: the persisted pieces of a delta revision delivered
+ * in segments (`model/segmented-sync.ts`), never shown, applied whole by W1. No existing store or row changes, and the upgrade moves no
+ * data. Like version 3 it is a barrier: an older build's connections latch `upgrade_pending` and close, so no build that does not know a
+ * staged revision writes `sync_state` beside one.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+/** The version 3 schema (no `delta_staging`), kept so a database created by it is upgraded in order. */
+export const COMPOSITION_BARRIER_VERSION = 3;
 /** The version that moved the command bodies to `draft_commands` (its upgrade runs for a version-1 database). */
 export const SPLIT_BODIES_VERSION = 2;
 /**
@@ -113,10 +127,19 @@ export const SPLIT_BODIES_VERSION = 2;
  */
 export const DECLARED_IDB_VERSION = SCHEMA_VERSION * 10;
 
+/** The version 2 and 3 schema (every store but `delta_staging`), kept so the version chain declares each store where it began. */
+export const DEXIE_SCHEMA_V3: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(DEXIE_SCHEMA).filter(([name]) => name !== "delta_staging"),
+  ),
+);
+
 /** The version 1 schema, kept so a database created by it is upgraded (the command bodies move to `draft_commands`). */
 export const DEXIE_SCHEMA_V1: Readonly<Record<string, string>> = Object.freeze({
   ...Object.fromEntries(
-    Object.entries(DEXIE_SCHEMA).filter(([name]) => name !== "draft_commands"),
+    Object.entries(DEXIE_SCHEMA_V3).filter(
+      ([name]) => name !== "draft_commands",
+    ),
   ),
   drafts: "local_id, status, created_seq, *depends_on, *index_targets",
 });
@@ -127,6 +150,7 @@ export const KEY_PATHS: Readonly<
 > = Object.freeze({
   cache: "id",
   cache_staging: "id",
+  delta_staging: "id",
   pending_effects: ["resource_id", "local_id"],
   drafts: "local_id",
   draft_commands: "local_id",

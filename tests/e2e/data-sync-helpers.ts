@@ -42,11 +42,11 @@ export interface SyncStub {
   /** Every command request, in order, and what answers them next (when empty: `200 {revision}` with a rising revision). */
   commands: CommandRequest[];
   commandScript: Array<(request: CommandRequest) => CommandAnswer>;
-  /** The pages (or errors) `/sync` answers next, in order; when empty, an empty page. */
+  /** The pages (or errors) `/sync` answers next, in order; when empty, an empty page. A `Buffer` body is served as exactly those bytes. */
   script: Array<
     (url: URL) => {
       status: number;
-      body: string;
+      body: string | Buffer;
       headers?: Record<string, string>;
     }
   >;
@@ -733,6 +733,8 @@ export async function startOutbox(
     estimateLagsWrites?: boolean;
     /** FIXTURE clock injection (R28, revision 17): the guard has the page's monotonic clock, so a clock offset is a STEP of the wall clock. */
     quotaMonotonic?: boolean;
+    /** FIXTURE (WEB-09c revision 14): the dispatcher's commits, requests and lifecycle are recorded (`dispatchLog`). */
+    observeDispatch?: boolean;
   } = {},
 ): Promise<void> {
   await page.evaluate(

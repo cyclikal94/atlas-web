@@ -56,6 +56,7 @@ import {
 } from "../model/linkage";
 import type { ShownRow } from "../model/project";
 import { type RenameInput, renameCodec } from "../model/recovery";
+import { isMergedAlias } from "../model/requests";
 import {
   type EditSnapshot,
   followsOf,
@@ -68,6 +69,7 @@ import { charCount } from "../model/values";
 import { replayOnline, sendOnline } from "../online";
 import { Avatar, Banner, PendingBadge, useOutboxSave } from "../parts";
 import { linkageIn, readLinkage, usePersonLinkage } from "../reads";
+import * as requestsCopy from "../requests/copy";
 
 /**
  * The identity header of WF-PEOPLE-02 with the Q21 gap-6 additions (`profile-rename-unlink.html`) and the archive entry point
@@ -1054,6 +1056,14 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
   const label = person.archived ? copy.RESTORE : copy.ARCHIVE;
   // One archive or restore of the person at a time, whichever view asks (review 7, finding 1; review 8, finding 2).
   const action = useArchiveAction(person.id);
+  // WEB-11b (D-11b-12): a merged alias is never archived or restored by itself (the backend redirects `archive` of an alias to its
+  // canonical person, so a press would act on the OTHER person).
+  if (isMergedAlias(person) !== null)
+    return (
+      <Button variant="quiet" disabled reason={requestsCopy.ALIAS_NO_RESTORE}>
+        {label}
+      </Button>
+    );
   if (shown.projected)
     return (
       <Button variant="quiet" disabled reason={copy.WAIT_FOR_SYNC_PERSON}>

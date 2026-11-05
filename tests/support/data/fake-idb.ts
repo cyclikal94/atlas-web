@@ -257,6 +257,12 @@ export class FakeIdb {
   }
   /** Drains the automatic driver ran, and how many of them delivered nothing (a diagnostic and a regression oracle). */
   readonly pumpStats = { drains: 0, idleDrains: 0 };
+  /**
+   * Every failure of an automatic drive (WEB-09c R41-MUT, revision 41), kept so that a test's teardown can report it (`EngineWorld.dispose`
+   * counts them). In this driver the first failure also ENDS automatic driving and is the owning test's failure (`dispose`, R32 above), so
+   * the list holds at most one entry: the same boxed failure, recorded once in each of the two places that report it.
+   */
+  readonly pumpFailures: unknown[] = [];
 
   /** @internal */
   pump(): void {
@@ -280,7 +286,10 @@ export class FakeIdb {
       (error: unknown) => {
         this.pumping = false;
         // The first failure is kept and ends automatic driving: no wake, request or later `pump` starts another drain.
-        this.failure ??= { reason: error };
+        if (this.failure === null) {
+          this.failure = { reason: error };
+          this.pumpFailures.push(error);
+        }
         this.unwake?.();
         this.unwake = null;
       },
@@ -321,6 +330,22 @@ export class FakeIdb {
       await this.drain;
       this.dispose();
     }
+  }
+
+  /** Whether a drain of the automatic driver is running now (WEB-09c R41-MUT; a parked driver is not running: it waits on the wake). */
+  get pumpActive(): boolean {
+    return this.pumping;
+  }
+
+  /**
+   * JOINS the automatic drive (WEB-09c R41-MUT): resolves once no drain is in progress, including a drain it restarted itself, within
+   * `rounds` successive drains; false when one was still running after them. `stop(); await settled()` of an engine does not join it (it
+   * is the world's, not the engine's), so a teardown that must prove quiescence awaits this. A drain never rejects (its failure is boxed
+   * above), so joining it never throws.
+   */
+  async pumpIdle(rounds = 1_000): Promise<boolean> {
+    for (let i = 0; i < rounds && this.pumping; i += 1) await this.drain;
+    return !this.pumping;
   }
 
   // ---- faults and inspection ----------------------------------------------------------------------------------------

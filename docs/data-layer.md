@@ -2,8 +2,10 @@
 
 WEB-09a owns the per-account local database, the ordinary delta sync, the draft outbox, the status model that the sync chip and the sync screens read, and the real
 ports that the session's account wipe calls. It is the only slice that may touch IndexedDB for account data. WEB-09b supplies what this slice leaves open: leadership
-(which page runs the sync engine and the dispatcher), the first snapshot, and recovery. **In production nothing here starts an engine yet**, so the sync chip reads
-"Updates stopped", which is true.
+(which page runs the sync engine and the dispatcher), the first snapshot, and recovery. Since WEB-09b the production boot starts that leadership by default
+(`src/app/boot.tsx`, `src/data/leader/start.ts`; `tests/static/production-leader.test.ts`), so production does run the engine, the dispatcher and the recovery job
+(the first snapshot included) on the leading page. Statements below that production starts no engine were true when they were written, before WEB-09b, and are kept
+as the history of the slice; the fixture specs of WEB-09a still use a FIXTURE test leader (see "Testing, and what each layer does not prove").
 
 This document is written from the code and the tests. Where a statement rests on a test, the test file is named. Where the design or the plan was deliberately
 departed from, the departure is listed under "Departures from the plan".
@@ -62,6 +64,7 @@ by version 1 in three real engines, `tests/e2e/fixture.data-store.spec.ts`, E-A4
 | `form_recovery` | `[form_context+tab_instance_id]` | `form_context` | the form-recovery port |
 | `sync_state` | `key` (`"singleton"`) | none | the ordinary fields (see below) |
 | `cache_staging`, `materialise_sequences`, `reminder_firings` | | | created empty; owned by WEB-09b, WEB-10c and WEB-14b |
+| `delta_staging` (schema version 4, WEB-09c) | `id` | `revision` | W27 (a non-final segment of a delta revision: the last word per resource id, with the `request_seq` of the request that delivered it) and W1 (the activation, which moves and deletes it); cleared by W18, W23 and W24's abandonment ("Segmented delta delivery" below) |
 
 **Why a header and a body (D-23).** A command can be large (an import carries up to 1 MiB) and an IndexedDB read returns whole rows, so every scan, count and list of the queue read the bodies of drafts nobody
 was looking at. The header is the small row (about 2 KB) that every queue read, dispatch scan, summary, consent count and page reconciliation uses; the body is read for **one draft at a time**, when it is sent, edited or projected. The header gains a derived `kind` so the
@@ -122,6 +125,7 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
+| W27 | `stageDeltaSegment` (WEB-09c: one non-final segment of a delta revision into `delta_staging`; the final segment and the activation are W1's) | INC, CLS, CAS, GEN, OWN, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -433,7 +437,63 @@ shared sharing dialog, part of the first load, uses them, and the larger reads s
 
 The approved dense batch (800 changes of 100-item checklists) reproduces the design's figures exactly: each value is 7,402 bytes and 547 nodes, and the page is 455,214 nodes and
 5.83 MiB (`tests/profiling/workloads.test.ts`). It is applied as **one** request at the lowest rung in all three engines (`tests/e2e/fixture.data-sync.spec.ts`, E-C3).
-Whether that suffices on a real constrained device is exactly what the measurement handoff must show (`.agtx/evidence/WEB-09a/profiling/handoff/`), and it has not been run on one.
+Whether that suffices on a real constrained device is exactly what the measurement hand-over must show (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c: `docs/sync-measurements.md`), and it has not been run on one: WEB-09c measured desktop engines only, and the physical-device runs are WEB-09d's before beta (STAGED-ACCEPTANCE-20261011; OD-1 had escalated the roster).
+
+### Segmented delta delivery (WEB-09c, BOUNDED-SYNC-PAGINATION-20261027)
+
+**What it is for.** A delta revision is indivisible on the wire today: at `limit = 1` the smallest response is one whole revision (up to 800 changes with ancestors). BE-Q23 owns an
+opt-in protocol that splits an oversized revision into ordered SEGMENTS (`max_changes`, `Batch.segment { index, last }`, a continuation cursor). The client's half is here. It is
+built against BE-Q23's **provisional** contract (its plan §5.2, SHA-256 `e088522a…4189`), spelt in ONE module (`model/segmented-sync.ts`), and **switched off in production**:
+the pinned API types (`0.29.0-rc.1`) do not contain it, `DATA_CONFIG.segmentedMinApiVersion` is `null` and the engine's `segmentedCapable` is absent, so no request carries the
+parameter (an older server answers an unknown query parameter with `400 malformed_request`). It is integration only once BE-Q23's contract is released into a reviewed pin.
+
+**The rule: staged, never shown, activated whole.**
+* The request carries `max_changes` (`segmentedMaxChanges`, one conservative provisional value; stepped down by device signals only) when the server is known to segment, and
+  ALWAYS while a revision is staged (the cursor is then a continuation, which only a segmenting server can have issued; without a budget the contract answers the remainder in one
+  final segment). The scan accepts a `segment` member only for such a request, and a page carrying one must be a delta page with that single batch.
+* A non-final segment is **W27**: one transaction decodes it with the ordinary bounded decode and writes the LAST WORD per resource id to `delta_staging` (a chunk at a time),
+  stores the continuation verbatim as `sync_state.cursor` and records `sync_state.delta_stage` (`revision`, `next_index`, `boundary_cursor` where the revision began, the
+  `cursor` it stored, and counts). Nothing the person sees changes: not the cache, `applied_revision`, `last_synced_at`, `page_seq`, the queue, the overlays or the composition
+  generation.
+* The final segment is **W1**, which in the SAME one transaction first moves every staged word into the cache a window (`queueWorkingSet`) at a time, deleting each window
+  from staging as it goes and recording each as a mention like a decoded change, then applies the segment's own changes in order, reconciles exactly as for a whole page,
+  clears the stage and stores the ordinary cursor. Upserts and removals are absolute per id and staging keeps the last word per id, so the cache is the one the whole batch
+  would have made; the person sees the previous revision until the commit and the next one after it; a failure anywhere rolls the activation back with the staging intact.
+* **A staged word is judged by WHEN it was true (R20-SEG, revision 20).** The cache takes every staged word; the local work does not. A delta page's words are the account's
+  present-moment view of the ids it names (release (a)), but a staged word was delivered by an EARLIER request, possibly long before the activation, and an edit may have been
+  sent and acknowledged in between. Each staged word therefore carries the `request_seq` of the request that delivered it (`delta_staging.request_seq`, the last word's), each
+  candidate row the `request_seq` of its claim (`pending_effects.submitted_at_request_seq`, written once by `markInFlight`), and a staged word is a mention only for a row
+  whose claim came BEFORE the word's request was captured: `word.request_seq > submitted_at_request_seq`, strictly, the live edge's comparison on the same durable, monotone
+  counter (`stagedMentionReaches` in `model/reconcile.ts`). To any other row the id is unnamed by the activation, so its overlay, held flag and draft stay until content that
+  can reflect the edit arrives (a later page, the final segment's own word, a fresh word of a later segment) or the live edge resolves it, exactly as if the earlier pieces had
+  been applied before the row existed. A row without the claim's witness (written before it) uses its receipt's floor, which is later and so only stricter; one with neither is
+  not reached. A batch revision is never the comparison (a delta batch can carry present-moment content under an older label, the 40/50/60 case). The final segment's own
+  words, ordinary pages and the snapshot's receipt boundary are unchanged; the recovery catch-up still leaves the bookkeeping to W26, whose `receipt_revision <= applied_revision`
+  stays sound here because a receipt at or below the revision being delivered committed before any piece of that revision was generated. Tests:
+  `tests/data/segmented-receipts.test.ts` (U11) and N5/N6 in `tests/e2e/fixture.data-segmented.spec.ts`.
+* **Continuity is decided by the writer, in its transaction, from the stored stage** (`continuityOf`): out of order, repeated, another revision, a later segment with nothing
+  staged, a whole page while a revision is staged, or a non-final segment that ends the feed is BROKEN: the writer clears the staging and moves the position back to
+  `boundary_cursor` (`restartStage`), and the engine counts an unrecognised answer (so a server that keeps breaking revisions pauses at the ordinary bound; a staged segment
+  does not end the unrecognised streak, only the activation does). A duplicated or late response for a cursor that has moved is dropped by CAS and stages nothing twice.
+* **A stage belongs to the cursor it stored** (`stageOf`): any writer that replaces the cursor (W18's invalidation, W23's snapshot activation, W24's abandonment, a restart)
+  retires it by construction, and those three also clear `delta_staging` in their own transactions. A reload resumes from the stored continuation with the staged words; an
+  expired, pruned or foreign continuation is the server's `410 resync_required` (W18). The staging is per account by construction (one database per account).
+* **The ladder below `limit = 1`.** A device signal (allocation failure, non-quota abort, watchdog, crash-loop marker, whose marker now records the request's `max_changes`)
+  at the lowest rung halves `max_changes` to the contract's minimum of 4 (one change and at most three ancestors) before a floor hit is counted, so the floor is reached only
+  at the smallest response the protocol has. Quota and oversize never step down.
+* **The early quota check judges THIS request's response (R21-QUOTA, revision 21).** Both callers decide the request's budget ONCE from the capture (`maxChangesFor`), before
+  the advisory check, and the URL carries that same value. With `max_changes = m` the response holds at most `m` changes across all its batches, ancestors included, whatever
+  the limit, so the check asks for the reserve plus `admissionBytesFor(limit, m)` = `m x bytesPerChange x responseMargin + responseOverhead` of the caller's merged configuration
+  (120,832 bytes at `m = 4`, 1,447,936 at the default 100). A request without a budget (no capability or no configured value, a snapshot, or a continuation sent without one,
+  which asks for the whole remainder) keeps the whole-batch estimate `maxResponseBytesFor(limit)`; an earlier piece's `m` is never reused for it. The revision-20 engines
+  asked for the whole-batch estimate in front of every segmented request, so a valid bounded request was refused as `storage_full` with ample room for it beyond the reserve;
+  quota refusal never steps the budget down, so retrying could not progress. Unchanged: the check holds nothing; the reservation of the bytes actually received (and, for a
+  final snapshot page, the staged bytes) at the commit is the authority and still refuses the page when other writers took the room meanwhile; the authentication reserve,
+  the origin-wide ledger, the body ceiling (`maxResponseBytesFor(limit)`, a contract violation, not an admission) and a refusal leaving no crash marker. Tests:
+  `tests/data/segmented-quota-admission.test.ts` (both callers, the boundaries at the reserve plus the estimate, stepped and default budgets, limit independence, the caller's
+  configuration, no-budget requests and remainders, reload, snapshot, a save taking the room while the response is held) and `tests/e2e/fixture.data-segmented-quota.spec.ts`
+  (the ordinary engine and the production leader's fenced catch-up in three engines, with a declared free-space estimate: an admission calculation, not disk exhaustion).
+* The recovery job's catch-up follows the same rules (W27 for a non-final segment; the final one through W1 in recovery mode); a snapshot never opts in.
 
 ### Device class, step-down and the floor
 
@@ -889,42 +949,46 @@ sign-in), and `readReadRetry` is the read-only plan that reads an entry.
 
 ## Provisional constants
 
-Every one is in `src/data/model/config.ts`, none is measured, and the right-hand column names what would settle it. The profiling programme (`pnpm profile:sync`) records them in
-`.agtx/evidence/WEB-09a/profiling/constants.md` and says the same.
+Every one is in `src/data/model/config.ts`, none is measured, and the "Settled by" column names what would settle it. The profiling programme
+(`node scripts/profile-sync.mjs --evidence <dir>`, evidence key `WEB-09a:sync-profiling`, owned by WEB-09c) records them in `<dir>/handoff/constants.md` and says
+the same. The last column points to the DESKTOP figures WEB-09c measured beside a constant (`docs/sync-measurements.md`); they inform it and settle none that names the
+device roster.
 
-| Name | Value | Source | Settled by |
-| --- | --- | --- | --- |
-| `syncLimitMax` | 80 | the design, section 4.2 (B1 unshipped: `SyncPage.batches` has `maxItems` 80) | BE-B1 |
-| `initialLimitUnconstrained`, `initialLimitOther` | 4, 1 | WEB-03 section 3.3d | the device roster |
-| `stepUpAfterSuccesses` | `null` (disabled) | not specified anywhere | the device roster |
-| `floorAfter` | 3 | the design's proposed three-failure family | the device roster |
-| `markerMinBytes` | 256 KiB | engineering default | P-2 and P-4 |
-| `syncApplyWatchdogMs` | 20,000 (was 30,000: kept 10 s inside the persistence hold's bound) | engineering default | P-2 |
-| `maxResponseBytesFor(limit)` | `limit x 800 x 9 KiB x 1.5 + 64 KiB` | contract maxima; 9 KiB from WEB-03 | the captured W2 |
-| `maxChangeBytes`, `maxValueNodes`, `maxDepth` | 64 KiB, 8,192, 24 | engineering default; WEB-03 for the depth | the largest projection per kind (W6) |
-| `syncIdleMs`, `syncReceiptMs` | 60 s, 2 s | not specified anywhere | a cadence decision |
-| `backoffInitialMs`, `backoffMaxMs`, `backoffJitter` | 2 s, 60 s, 20 % | the matrix's schedule for covers | a cadence decision |
-| `retrySustainedMs` | 180 s | the design: "a few minutes" | a cadence decision |
-| `queueWarnAt`, `queueWorkingSet` | 200, 100 | Q9, WEB-03 | P-5 on a dense queue |
-| `queueRescanMs` | 5 s, doubling to 60 s | this slice (a departure from "one extra lookup") | P-5 on a dense queue |
-| `listPage` | 100 | Q9 (100-row list pages); the overlay of a page is read in windows of `queueWorkingSet` | P-5 on a dense list |
-| `factsReadRetryMs`, `factsReadRetryMaxMs` | 250 ms, doubling to 10 s | engineering default (the paced re-read of the sync facts after a failed read, R13; also the outbox facade's paced look after a look that could not read every stop record, R55 revision 36) | a cadence decision |
-| `fenceStaleMs` | 120 s | engineering default (longer than the 20 s lock wait) | P-4 |
-| `quotaReserveBytes` | 8 MiB (user input refused below half) | engineering default | P-Q on the roster |
-| `quotaEstimateTtlMs` | 5 s (how long one reading of the free space is used, and how long the estimate is ASSUMED to take to show a write that has landed; the landed entry is kept one further lifetime for the readings that began before it ended, revision 17) | engineering default | the roster (a real estimate's lag) |
-| `quotaClockSlackMs` | 250 ms (how far the wall clock may part from the page's monotonic clock between two readings before the guard calls it a step; a smaller difference is jitter or drift, revision 17) | engineering default, above the 100 ms to which a browser may round either clock | the roster |
-| `quotaHoldLeaseMs` | 30 s (how long a hold in the origin's ledger stands when its page stops renewing it, R28; a live page renews it a third of a lease apart, and its writer may begin only until a third before it ends, revision 14; a hold with a living OWNER is not judged by the lease at all, revision 15) | engineering default, far longer than a local write | a page-lifecycle measurement on the roster |
-| `quotaHoldMaxAgeMs` | 10 min (how old a reservation whose writer has not begun may be before its permission to begin is revoked; a writer that has begun is never revoked by it, revision 16) | engineering default, far longer than any save or page commit | the roster |
-| `quotaLedgerWaitMs` | 2 s (how long a save waits for one call of the origin's ledger; a save the ledger has not answered is REFUSED as `unestablished`, R28 revision 15) | engineering default (a tiny IndexedDB record) | the roster |
-| `quotaLedgerAttempts`, `quotaLedgerRetryMs` | 4 tries, 20 ms doubling (how often one reservation asks a ledger that REJECTS the call, and the first wait between two tries; R28 revision 15) | engineering default (a transient failure of one tiny record) | the roster |
-| `stampedRequestTimeoutMs` | 30 s (WEB-08a's) | provisional | P-10: measured here, unchanged |
-| `maxInFlight` | 1 | decision D-18 | P-5 (only 1 is measurable) |
-| `syncLeaderLock` | `atlas-sync-leader` | D 6.1 (a name, not a measurement) | fixed |
-| `snapshotCursorLifetimeMs` | 3,600,000 ms | the backend's one-hour snapshot session (D 4.1 item 3) | the backend contract |
-| `snapshotAdoptMarginMs` | 60,000 ms | engineering default (the client's clock of the capture is earlier than the server's start) | WEB-09c |
-| `syncErrorStopAfter`, `deltaErrorAbandonAfter`, `recoveryAttemptStopAfter` | 3, 3, 3 | the reconciliation's proposed bound ("same order of magnitude") | a cadence decision |
-| `activationWindow` | 500 staged rows per window | engineering default | WEB-09c (activation of dense content inside the 30 s hold) |
-| `recoveryBeginRetryMs`, `recoveryBeginRetryMaxMs` | 1 s, doubling to 60 s | engineering default (the job's look at a session that is not eligible yet) | a cadence decision |
+| Name | Value | Source | Settled by | Desktop evidence (WEB-09c) |
+| --- | --- | --- | --- | --- |
+| `syncLimitMax` | 80 | the design, section 4.2 (B1 unshipped: `SyncPage.batches` has `maxItems` 80) | BE-B1 | P-2, P-11, P-W2 (H9) |
+| `initialLimitUnconstrained`, `initialLimitOther` | 4, 1 | WEB-03 section 3.3d | the device roster | P-2, P-11, P-W2 |
+| `stepUpAfterSuccesses` | `null` (disabled) | not specified anywhere | the device roster | — |
+| `floorAfter` | 3 | the design's proposed three-failure family | the device roster | — |
+| `markerMinBytes` | 256 KiB | engineering default | P-2 and P-4 | P-2, P-4 |
+| `segmentedMaxChanges` | 100 | WEB-09c engineering start (BOUNDED-SYNC-PAGINATION-20261027); BE-Q23's provisional range 4-800 | the tuning handover (`docs/sync-measurements.md`), then the device roster | pending |
+| `segmentedMinApiVersion` | `null` (never opts in) | BE-Q23's contract is not in the pinned API types | BE-Q23's released contract and a reviewed pin | — |
+| `syncApplyWatchdogMs` | 20,000 (was 30,000: kept 10 s inside the persistence hold's bound) | engineering default | P-2 | P-2, P-W2 |
+| `maxResponseBytesFor(limit)` | `limit x 800 x 9 KiB x 1.5 + 64 KiB` | contract maxima; 9 KiB from WEB-03 | the captured W2 | P-W2 |
+| `maxChangeBytes`, `maxValueNodes`, `maxDepth` | 64 KiB, 8,192, 24 | engineering default; WEB-03 for the depth | the largest projection per kind (W6) | P-11 (W6) |
+| `syncIdleMs`, `syncReceiptMs` | 60 s, 2 s | not specified anywhere | a cadence decision | — |
+| `backoffInitialMs`, `backoffMaxMs`, `backoffJitter` | 2 s, 60 s, 20 % | the matrix's schedule for covers | a cadence decision | — |
+| `retrySustainedMs` | 180 s | the design: "a few minutes" | a cadence decision | — |
+| `queueWarnAt`, `queueWorkingSet` | 200, 100 | Q9, WEB-03 | P-5 on a dense queue | P-5, P-5 (dense) |
+| `queueRescanMs` | 5 s, doubling to 60 s | this slice (a departure from "one extra lookup") | P-5 on a dense queue | P-5, P-5 (dense) |
+| `listPage` | 100 | Q9 (100-row list pages); the overlay of a page is read in windows of `queueWorkingSet` | P-5 on a dense list | P-5 |
+| `factsReadRetryMs`, `factsReadRetryMaxMs` | 250 ms, doubling to 10 s | engineering default (the paced re-read of the sync facts after a failed read, R13; also the outbox facade's paced look after a look that could not read every stop record, R55 revision 36) | a cadence decision | P-13 (reads per hint) |
+| `fenceStaleMs` | 120 s | engineering default (longer than the 20 s lock wait) | P-4 | P-4 |
+| `quotaReserveBytes` | 8 MiB (user input refused below half) | engineering default | P-Q on the roster | P-Q, P-Q2 |
+| `quotaEstimateTtlMs` | 5 s (how long one reading of the free space is used, and how long the estimate is ASSUMED to take to show a write that has landed; the landed entry is kept one further lifetime for the readings that began before it ended, revision 17) | engineering default | the roster (a real estimate's lag) | P-Q2 (estimate step) |
+| `quotaClockSlackMs` | 250 ms (how far the wall clock may part from the page's monotonic clock between two readings before the guard calls it a step; a smaller difference is jitter or drift, revision 17) | engineering default, above the 100 ms to which a browser may round either clock | the roster | — |
+| `quotaHoldLeaseMs` | 30 s (how long a hold in the origin's ledger stands when its page stops renewing it, R28; a live page renews it a third of a lease apart, and its writer may begin only until a third before it ends, revision 14; a hold with a living OWNER is not judged by the lease at all, revision 15) | engineering default, far longer than a local write | a page-lifecycle measurement on the roster | — |
+| `quotaHoldMaxAgeMs` | 10 min (how old a reservation whose writer has not begun may be before its permission to begin is revoked; a writer that has begun is never revoked by it, revision 16) | engineering default, far longer than any save or page commit | the roster | — |
+| `quotaLedgerWaitMs` | 2 s (how long a save waits for one call of the origin's ledger; a save the ledger has not answered is REFUSED as `unestablished`, R28 revision 15) | engineering default (a tiny IndexedDB record) | the roster | P-Q2 (ledger) |
+| `quotaLedgerAttempts`, `quotaLedgerRetryMs` | 4 tries, 20 ms doubling (how often one reservation asks a ledger that REJECTS the call, and the first wait between two tries; R28 revision 15) | engineering default (a transient failure of one tiny record) | the roster | — |
+| `stampedRequestTimeoutMs` | 30 s (WEB-08a's) | provisional | P-10: measured here, unchanged | P-10 |
+| `maxInFlight` | 1 | decision D-18 | P-5 (only 1 is measurable) | P-5 |
+| `syncLeaderLock` | `atlas-sync-leader` | D 6.1 (a name, not a measurement) | fixed | — |
+| `snapshotCursorLifetimeMs` | 3,600,000 ms | the backend's one-hour snapshot session (D 4.1 item 3) | the backend contract | — |
+| `snapshotAdoptMarginMs` | 60,000 ms | engineering default (the client's clock of the capture is earlier than the server's start) | WEB-09c | — |
+| `syncErrorStopAfter`, `deltaErrorAbandonAfter`, `recoveryAttemptStopAfter` | 3, 3, 3 | the reconciliation's proposed bound ("same order of magnitude") | a cadence decision | — |
+| `activationWindow` | 500 staged rows per window | engineering default | WEB-09c (activation of dense content inside the 30 s hold) | — |
+| `recoveryBeginRetryMs`, `recoveryBeginRetryMaxMs` | 1 s, doubling to 60 s | engineering default (the job's look at a session that is not eligible yet) | a cadence decision | — |
 
 The session's own two constants for the persistence hold (`SessionConfig.persistenceHoldMs`, 30 s, and `persistenceStallMs`, 10 s) are provisional and unmeasured: the hold's bound is a deadline for the whole commit (queue wait included) and is kept at least 10 s above `syncApplyWatchdogMs`; the stall bound is only when work that is still unresolved after a revocation is traced (`persistence.stalled`), and releases nothing (P-7 and a real freeze are what would tune them).
 

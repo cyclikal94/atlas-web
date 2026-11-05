@@ -3,9 +3,11 @@ import { advanceComposition, advancesComposition } from "../model/composition";
 import { commandKindOf } from "../model/outbox";
 import {
   accountDatabaseName,
+  COMPOSITION_BARRIER_VERSION,
   DECLARED_IDB_VERSION,
   DEXIE_SCHEMA,
   DEXIE_SCHEMA_V1,
+  DEXIE_SCHEMA_V3,
   KEY_PATHS,
   SCHEMA_VERSION,
   SPLIT_BODIES_VERSION,
@@ -497,10 +499,12 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
         });
         db.version(1).stores({ ...DEXIE_SCHEMA_V1 });
         db.version(SPLIT_BODIES_VERSION)
-          .stores({ ...DEXIE_SCHEMA })
+          .stores({ ...DEXIE_SCHEMA_V3 })
           .upgrade(moveDraftCommands);
         // Version 3 (WEB-10a revision 3) changes no store: it is the barrier that closes every connection of an older build, which
         // writes without advancing the composition generation (`model/composition.ts`).
+        db.version(COMPOSITION_BARRIER_VERSION).stores({ ...DEXIE_SCHEMA_V3 });
+        // Version 4 (WEB-09c) adds `delta_staging` (segmented delta delivery) and moves no data; it is a barrier like version 3.
         db.version(SCHEMA_VERSION).stores({ ...DEXIE_SCHEMA });
         db.on("populate", (tx: Transaction) => {
           // Runs inside the versionchange transaction that CREATES the database. A refusal aborts it: the engine discards the new

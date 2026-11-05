@@ -44,6 +44,8 @@ export interface ServerRequest {
   account: AccountId;
   epoch: number;
   key: string | null;
+  /** WEB-09c: the request's `max_changes`, present only when it carried one. */
+  maxChanges?: string;
 }
 export type Answer = Response | Promise<Response> | Error;
 
@@ -82,7 +84,18 @@ export interface LeaderWorld {
   server: (request: ServerRequest) => Answer;
   requests: ServerRequest[];
   pages: Map<string, LeaderPage>;
-  page(id: string, account?: AccountId | null): LeaderPage;
+  /**
+   * `options` (WEB-09c R23-PAIR): what the composition hands the leader beyond the defaults: the DIAGNOSTIC `segmentedCapable` and a
+   * configuration, as the browser composition does for a development-pair page (`DiagnosticSegmentation`). Absent: as production.
+   */
+  page(
+    id: string,
+    account?: AccountId | null,
+    options?: {
+      segmentedCapable?: () => boolean;
+      config?: Partial<typeof DATA_CONFIG>;
+    },
+  ): LeaderPage;
   settle(): Promise<void>;
   advance(ms: number): Promise<void>;
   /** The page goes away: its leader is gone and the platform releases its locks. */
@@ -143,7 +156,7 @@ export function leaderWorld(): LeaderWorld {
             batches: [],
           })
         : out.status(404),
-    page(id, account = A) {
+    page(id, account = A, options = {}) {
       const existing = pages.get(id);
       if (existing) return existing;
       const pageEnv = env.page(id);
@@ -232,6 +245,9 @@ export function leaderWorld(): LeaderWorld {
             account: account_,
             epoch,
             key: request.headers.get("idempotency-key"),
+            ...(url.searchParams.has("max_changes")
+              ? { maxChanges: url.searchParams.get("max_changes") as string }
+              : {}),
           };
           out.requests.push(record);
           const answer = out.server(record);
@@ -327,6 +343,10 @@ export function leaderWorld(): LeaderWorld {
         visible: () => visible,
         publish: (attachment) => attachments.push(attachment),
         elapsed: () => world.time,
+        ...(options.segmentedCapable
+          ? { segmentedCapable: options.segmentedCapable }
+          : {}),
+        ...(options.config ? { config: options.config } : {}),
       });
       const page: LeaderPage = {
         id,

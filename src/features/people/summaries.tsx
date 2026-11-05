@@ -257,6 +257,8 @@ export function useSummary<T>(
   const shown = useRef<{ key: string; value: T; checkedAt: number } | null>(
     null,
   );
+  // The answer shown before is kept only for its own key (it is never shown for another): a view that moved on lets go of it.
+  if (shown.current !== null && shown.current.key !== key) shown.current = null;
   if (key === null || !env.online) {
     shown.current = null;
     return env.online
@@ -283,6 +285,33 @@ export function useSummary<T>(
       ? { value: shown.current.value, checkedAt: shown.current.checkedAt }
       : null;
   return { status: "loading", previous };
+}
+
+/**
+ * Lets go of the summary `key` (R2 and DA-N1 of review 2): its entry is removed from this identity's page memory, so a read still on its way
+ * for it is no longer the query's (`readSummary`'s `current()`): it applies nothing and reads no further page. The compact admission
+ * records (`summaryFloors`, `summaryPreferences`) stay: what is known of a row never goes back.
+ */
+export function releaseSummary(memory: PeopleMemory, key: string): void {
+  memory.summaries.delete(key);
+}
+
+/**
+ * A summary OWNED by one mounted view (R2 of review 2): `key` must be that view's own (never shared with another reader), and the view keeps
+ * only its current query: when `key` changes, or the view unmounts, the earlier entry is released (`releaseSummary`) before the next read
+ * starts. A view mounted again reads afresh. The shared reads (`requests:incoming`, `person:<id>`, the People list) keep `useSummary`.
+ */
+export function useOwnedSummary<T>(
+  key: string | null,
+  walk: (current: () => boolean) => Promise<WalkOutcome<T>>,
+): SummaryView<T> {
+  const memory = usePeopleEnv().memory;
+  // Declared before `useSummary`'s effect: on a change of key React runs this cleanup before that effect asks for the new key.
+  useEffect(() => {
+    if (key === null) return;
+    return () => releaseSummary(memory, key);
+  }, [memory, key]);
+  return useSummary(key, walk);
 }
 
 /** What a view that may show its previous answer meanwhile shows: the answer and its time, or null. */

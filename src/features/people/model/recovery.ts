@@ -331,3 +331,111 @@ export const fieldCodec = (personId: string, fieldId: string | null) => ({
     return { form, touched, snapshot: binding, origin: began, newFieldId };
   },
 });
+
+// ---- WEB-11b (D-11b-13) ------------------------------------------------------------------------------------------------------------
+/**
+ * The New request panel's two forms and the merge dialog's chosen name, for WEB-14a's capture. Each form is its own context, captured
+ * whether shown or hidden (PRODUCT-DECISIONS-20261011 item 2: a hidden form's values are kept); a restore only fills the form and never
+ * sends. Ids are read back only as UUIDs and names only as texts; anything else restores nothing.
+ *
+ *  - Ask to link: `people-request-link:<formId>` — the person (`{id, label}`) and the recipient (`{id, username}`), either may be unset;
+ *  - Ask to merge: `people-request-merge:<formId>` — the two people picked;
+ *  - the merge's name: `people-merge-name:<sourceId>:<targetId>` — which of the two labels was chosen.
+ */
+export const requestLinkContext = (formId: string): string =>
+  `people-request-link:${formId}`;
+export const requestMergeContext = (formId: string): string =>
+  `people-request-merge:${formId}`;
+export const mergeNameContext = (sourceId: string, targetId: string): string =>
+  `people-merge-name:${sourceId}:${targetId}`;
+
+type Picked = { id: string; label: string } | null;
+type Recipient = { id: string; username: string } | null;
+export interface RequestLinkForm {
+  person: Picked;
+  recipient: Recipient;
+}
+export interface RequestMergeForm {
+  first: Picked;
+  second: Picked;
+}
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function pickedOf<K extends string>(
+  value: unknown,
+  name: K,
+): ({ id: string } & Record<K, string>) | null | undefined {
+  if (value === null) return null;
+  const read = texts(value, ["id", name]);
+  if (
+    read === null ||
+    !UUID.test(read.id) ||
+    Object.keys(value as Obj).length !== 2
+  )
+    return undefined;
+  return read as { id: string } & Record<K, string>;
+}
+
+export const requestLinkFields = (
+  form: RequestLinkForm,
+): Record<string, string> => ({
+  form: canonicalBody({ person: form.person, recipient: form.recipient }),
+});
+export const requestMergeFields = (
+  form: RequestMergeForm,
+): Record<string, string> => ({
+  form: canonicalBody({ first: form.first, second: form.second }),
+});
+export const mergeNameFields = (
+  choice: "source" | "target",
+): Record<string, string> => ({ name: choice });
+
+function parsed(
+  fields: Record<string, string>,
+  keys: readonly string[],
+): Obj | null {
+  const text = fields.form;
+  if (typeof text !== "string") return null;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return isObject(value) &&
+      Object.keys(value).length === keys.length &&
+      keys.every((key) => Object.hasOwn(value, key))
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A captured Ask to link read back, or null (nothing is restored). */
+export function restoreRequestLink(
+  fields: Record<string, string>,
+): RequestLinkForm | null {
+  const value = parsed(fields, ["person", "recipient"]);
+  if (value === null) return null;
+  const person = pickedOf(value.person, "label");
+  const recipient = pickedOf(value.recipient, "username");
+  if (person === undefined || recipient === undefined) return null;
+  return { person, recipient };
+}
+
+/** A captured Ask to merge read back, or null (nothing is restored). */
+export function restoreRequestMerge(
+  fields: Record<string, string>,
+): RequestMergeForm | null {
+  const value = parsed(fields, ["first", "second"]);
+  if (value === null) return null;
+  const first = pickedOf(value.first, "label");
+  const second = pickedOf(value.second, "label");
+  if (first === undefined || second === undefined) return null;
+  return { first, second };
+}
+
+/** A captured merge name read back (which label was chosen), or null. */
+export function restoreMergeName(
+  fields: Record<string, string>,
+): "source" | "target" | null {
+  return fields.name === "source" || fields.name === "target"
+    ? fields.name
+    : null;
+}
