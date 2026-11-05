@@ -15,6 +15,15 @@ interface Screen {
   url: string;
   /** Text that must be on the page, so a blank or error page cannot pass. */
   expect: RegExp;
+  /**
+   * `/today?state=` screens only (WEB-14a revision 56, Review 55 F-R55-2, DELEGATED-WEB14A-SYNC-SWEEP-20261105): the surface the screen
+   * has SETTLED on, waited for before axe, the target measurement and the overflow check. The Today route mounts its screen lazily inside
+   * the cache gate (`src/features/today/route.tsx`, an empty Suspense fallback), about 300 ms after the sync banner in every engine, so
+   * without this the sweep measured whichever surface happened to be there. `today`: the gate is open, so the Today screen
+   * (`[data-today-page]`) is attached and not loading. `gate`: the cache is hidden, so the gate's own surface replaces it ("Refreshing your
+   * data", or the floor refusal (b)) and the Today screen never mounts. A wrong declaration fails at the wait, never in a timing window.
+   */
+  settled?: "today" | "gate";
 }
 const SCREENS: Screen[] = [
   {
@@ -66,61 +75,73 @@ const SCREENS: Screen[] = [
     name: "floor-a",
     url: "/today?state=floor-a",
     expect: /Unable to sync on this device\/browser at the moment/,
+    settled: "today",
   },
   {
     name: "floor-b",
     url: "/today?state=floor-b",
     expect: /keeping your protected content hidden/,
+    settled: "gate",
   },
   {
     name: "page-not-saved",
     url: "/today?state=page-not-saved",
     expect: /Couldn't finish saving that page/,
+    settled: "today",
   },
   {
     name: "storage-full-valid",
     url: "/today?state=storage-full-valid",
     expect: /Couldn't finish updating your offline data/,
+    settled: "today",
   },
   {
     name: "storage-full-invalid",
     url: "/today?state=storage-full-invalid",
     expect: /Couldn't finish refreshing your offline data/,
+    settled: "gate",
   },
   {
     name: "storage-not-responding",
     url: "/today?state=storage-not-responding",
     expect: /Local storage isn't responding/,
+    settled: "today",
   },
   {
     name: "compat-unsupported",
     url: "/today?state=compat-unsupported",
     expect: /Sending is paused/,
+    settled: "today",
   },
   {
     name: "compat-missing",
     url: "/today?state=compat-missing",
     expect: /Sending is paused/,
+    settled: "today",
   },
   {
     name: "still-trying-updates",
     url: "/today?state=still-trying-updates",
     expect: /Still trying to update/,
+    settled: "today",
   },
   {
     name: "still-trying-changes",
     url: "/today?state=still-trying-changes",
     expect: /Still trying to send/,
+    settled: "today",
   },
   {
     name: "device-capacity",
     url: "/today?state=device-capacity",
     expect: /This device can't sync right now/,
+    settled: "today",
   },
   {
     name: "unrecognised",
     url: "/today?state=unrecognised",
     expect: /Updates stopped/,
+    settled: "today",
   },
   {
     name: "gate-refreshing",
@@ -142,11 +163,13 @@ const SCREENS: Screen[] = [
     name: "invalidation-write-failed",
     url: "/today?state=invalidation-write-failed",
     expect: /Couldn't finish saving that page/,
+    settled: "gate",
   },
   {
     name: "invalidation-write-quota",
     url: "/today?state=invalidation-write-quota",
     expect: /Couldn't finish refreshing your offline data/,
+    settled: "gate",
   },
 ];
 
@@ -156,14 +179,22 @@ const overflow = (page: Page) =>
 /**
  * Every control a person can press IN THESE SCREENS is at least 44 x 44 (the README's touch-target rule). The shell's own chrome
  * (the rail links, the skip link) is WEB-07's accepted design and is not this slice's to measure.
+ *
+ * WEB-14a revision 56 (DELEGATED-WEB14A-SYNC-SWEEP-20261105): on a `/today?state=` screen the Today screen's own controls
+ * (`[data-today-page]`, another slice's accepted surface: its day buttons and inputs) are not this sweep's subject either and are the only
+ * thing excluded; every other control under `<main>` (the sync banners, their actions, the gate, the update banner) is still measured. The
+ * test checks that the excluded part holds no sync notice and not the screen's own text. Whether the Today screen's controls must meet
+ * 44 px is a product decision deferred to Kieran by that hand-off. Every other screen measures the whole of `<main>`, as before.
  */
-const smallTargets = (page: Page) =>
-  page.evaluate(() => {
+const TODAY_SCREEN = "[data-today-page]";
+const smallTargets = (page: Page, excluded: string | null = null) =>
+  page.evaluate((excluded) => {
     const out: string[] = [];
     const scope = document.querySelector("main") ?? document.body;
     for (const element of scope.querySelectorAll<HTMLElement>(
       'button, [role="tab"], a[href], input, select, textarea, [role="button"]',
     )) {
+      if (excluded !== null && element.closest(excluded) !== null) continue;
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
       if (
@@ -179,7 +210,40 @@ const smallTargets = (page: Page) =>
         );
     }
     return out;
-  });
+  }, excluded);
+
+/** Revision 56 (C-S1): waits for the surface a `/today?state=` screen settles on (`Screen.settled`). */
+async function settle(page: Page, screen: Screen): Promise<void> {
+  if (!screen.url.startsWith("/today")) return;
+  expect(
+    screen.settled,
+    `${screen.name}: a /today screen declares the surface it settles on`,
+  ).toBeDefined();
+  if (screen.settled === "today") {
+    await expect(page.locator(`main ${TODAY_SCREEN}`)).toBeAttached();
+    await expect(
+      page.locator(`main ${TODAY_SCREEN} [data-today-loading]`),
+    ).toHaveCount(0);
+    // What the target measurement leaves out holds nothing of the sync surface: no notice, and not the text this screen is about.
+    await expect(
+      page.locator(
+        `main ${TODAY_SCREEN} [data-notice], main ${TODAY_SCREEN} [data-notices]`,
+      ),
+    ).toHaveCount(0);
+    expect(
+      await page
+        .getByText(screen.expect)
+        .first()
+        .evaluate((node, today) => node.closest(today) === null, TODAY_SCREEN),
+      `${screen.name}: the screen's own text is outside the Today screen`,
+    ).toBe(true);
+  } else
+    await expect(
+      page
+        .locator('main [data-cache-gate], main section[data-notice="floor-b"]')
+        .first(),
+    ).toBeAttached();
+}
 
 for (const scheme of ["dark", "light"] as const) {
   for (const width of WIDTHS) {
@@ -193,6 +257,7 @@ for (const scheme of ["dark", "light"] as const) {
           await page.goto(screen.url);
           if (screen.url.startsWith("/__gate")) await fixturePageReady(page);
           await expect(page.getByText(screen.expect).first()).toBeVisible();
+          await settle(page, screen);
           const violations = await runAxe(page);
           expect(
             violations,
@@ -206,7 +271,10 @@ for (const scheme of ["dark", "light"] as const) {
             ),
           ).toEqual([]);
           expect(
-            await smallTargets(page),
+            await smallTargets(
+              page,
+              screen.url.startsWith("/today") ? TODAY_SCREEN : null,
+            ),
             "controls smaller than 44 px",
           ).toEqual([]);
           expect(await overflow(page), "horizontal scroll").toBeLessThanOrEqual(

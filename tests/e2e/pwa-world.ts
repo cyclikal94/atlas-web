@@ -38,7 +38,33 @@ export interface LogEntry {
   status: number;
   /** null while the response is unfinished; "finished" once sent; "closed" if the connection closed first. */
   end: "finished" | "closed" | null;
+  /** Revision 56 (C-H2): the path is a backend path (`/api`, `/health`, `/ready`, `/auth`, `/oidc` and below). */
+  backend: boolean;
+  /** Revision 56 (C-H2): a request for a document (a navigation), not a read a page made (scripts/serve-generations.mjs). */
+  document: boolean;
+  /** Revision 56 (C-H2): the stub identity was set when the server answered it (false while unanswered). */
+  identity: boolean;
 }
+
+/**
+ * WEB-14a revision 56 (Review 55 F-R55-1, design assessment C-H2): the backend READS a page made that the server answered 404 while the
+ * stub identity was set, as `METHOD path` (query included). The stub answers a fixed set of reads for a seeded account
+ * (scripts/serve-generations.mjs) and the app's set grows with every base merge, so a read the stub does not know is named here, in
+ * every engine: Chromium and WebKit also log such a 404 on the console, without its URL, and Firefox does not log it at all. Not judged:
+ * documents (an exempt probe page's navigation to a backend path is designed to meet the 404), requests answered while signed out (the
+ * identity read's own 404 is the backend's "no session") and anything that is not a GET or HEAD.
+ */
+export const unansweredReads = (entries: readonly LogEntry[]): string[] =>
+  entries
+    .filter(
+      (entry) =>
+        (entry.method === "GET" || entry.method === "HEAD") &&
+        entry.backend &&
+        !entry.document &&
+        entry.identity &&
+        entry.status === 404,
+    )
+    .map((entry) => `${entry.method} ${entry.path}`);
 
 export interface Generations {
   url: string;
@@ -276,6 +302,7 @@ export const test = base.extend<{
       };
     });
     const started = await startGenerations(firstGeneration);
+    let unanswered: string[] = [];
     try {
       await use(started.world);
       // Revision 47 (F-R46-PWA-LOAD): a test that armed a reload receipt joins or cancels it (an unjoined one checked nothing). Only for a
@@ -288,6 +315,8 @@ export const test = base.extend<{
       // The pages go before the server does: a server that stops under a live page fails its requests in flight.
       for (const page of context.pages())
         await page.close().catch(() => undefined);
+      // Revision 56 (C-H2): read once every page is gone, so the whole test is judged. Asserted below, beside the console guard.
+      unanswered = unansweredReads((await started.world.ledger(0)).entries);
     } finally {
       started.stop();
     }
@@ -301,6 +330,12 @@ export const test = base.extend<{
         body: allowed.join("\n"),
         contentType: "text/plain",
       });
+    expect
+      .soft(
+        unanswered,
+        "backend reads answered 404 while the stub identity was set (scripts/serve-generations.mjs answers none of these)",
+      )
+      .toEqual([]);
     expect(problems, "console errors and warnings in any page").toEqual([]);
   },
 });

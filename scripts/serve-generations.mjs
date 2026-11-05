@@ -6,6 +6,8 @@
 //    `/ready` (the `/health` body is set from the control port: the `api_version` gate's fixture cases) and, once set, the stub identity read
 //    `browser-sessions/current`, `me`, `sessions` and empty Today/defaults reads (so a seeded account has a healthy landing without a backend),
 //    and, once set, the CANNED READS below (WEB-14a revision 50: a seeded person's People reads, so a person's page has its backend answers);
+//    after them, for the stub identity, the empty account's pending People requests (`people/requests`, WEB-14a revision 56: accepted WEB-11b's
+//    People list reads it on every mount; a spec's canned set still answers it first);
 //  - `/assets/` files are immutable and a missing one is a 404; the unhashed entry points (index.html, sw.js, manifest.webmanifest, ...) and
 //    every other file revalidate (`no-cache`); a missing file with an extension is a 404; anything else is the shell (history fallback);
 //  - every response carries the production security headers (deploy/nginx/security-headers.conf), the content security policy included;
@@ -36,7 +38,8 @@
 //   POST /reads/hold?path=<p>&on=1|0  WEB-14a revision 55: hold every GET or HEAD of the canned read <p> unanswered from now on, or answer
 //                                 every held one (with the canned body as it then stands) and stop holding it; answers {"path", "hold",
 //                                 "held"}. A server-side barrier, so every engine sees it (Playwright's WebKit routing misses controlled pages).
-//   GET  /log                     every request served so far: [{ "id", "method", "path", "at", "status", "end" }]
+//   GET  /log                     every request served so far: [{ "id", "method", "path", "at", "status", "end", "backend", "document",
+//                                 "identity" }]
 //   POST /log/clear               empties /log only (the ledger below keeps every request)
 //   GET  /ledger?after=<id>       WEB-14a revision 43 (F-FRESH-2): the APPEND-ONLY ledger of every request the app port has received, in
 //                                 arrival order, after request `<id>`: {"high": <latest id>, "entries": [...]}. Nothing clears it.
@@ -45,6 +48,13 @@
 // tie the server's record of a request to the browser's record of the response it got (tests/e2e/request-origin.ts) instead of guessing
 // from a path. `end` is null while the response is unfinished, "finished" once it was sent, "closed" if the connection closed first. No
 // request body, cookie or credential is recorded.
+//
+// WEB-14a revision 56 (Review 55 F-R55-1, design assessment C-H2): each entry also says whether its path is a backend path (`backend`),
+// whether the request was for a document (`document`: `Sec-Fetch-Mode: navigate`, or an `Accept` that starts with `text/html`; Firefox
+// sends `same-origin` for a navigation its worker passes on, every engine sends `text/html` first for a navigation and never for an app
+// read, measured in .agtx/evidence/revision-r56-20261105/c-h2/), and whether the stub identity was set when it was answered (`identity`;
+// false until then). The PWA world fails a test whose pages' backend reads were answered 404 while the stub identity was set
+// (tests/e2e/pwa-world.ts `unansweredReads`): whatever the engine logs, naming each path.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize, resolve } from "node:path";
@@ -146,6 +156,11 @@ const app = createServer((request, response) => {
     at: Date.now(),
     status: 0,
     end: null,
+    backend: BACKEND.test(path),
+    document:
+      request.headers["sec-fetch-mode"] === "navigate" ||
+      /^text\/html/i.test(request.headers.accept ?? ""),
+    identity: false,
   };
   log.push(entry);
   ledger.push(entry);
@@ -157,6 +172,7 @@ const app = createServer((request, response) => {
   });
   const answer = (status, headers, body) => {
     entry.status = status;
+    entry.identity = identity !== null;
     send(
       response,
       status,
@@ -268,6 +284,15 @@ const app = createServer((request, response) => {
     });
     return;
   }
+  // WEB-14a revision 56 (Review 55 F-R55-1, C-H1): accepted WEB-11b's People list reads the reader's pending requests on every mount
+  // (`src/features/people/requests/reads.ts`). The empty account's answer, for the stub identity, AFTER the canned reads (a spec that cans
+  // it answers it its own way); only this exact path (the sent history, `people/requests/sent`, and a request's own reads are not).
+  if (path === "/api/experimental/v1/people/requests" && identity !== null)
+    return answer(
+      200,
+      { "content-type": "application/json", "Cache-Control": "no-store" },
+      JSON.stringify({ items: [] }),
+    );
   if (BACKEND.test(path))
     return answer(
       404,

@@ -110,7 +110,7 @@ const PERSON_READS = {
   },
   [`${API}/people/${PERSON}/duplicates`]: { items: [], next_after: null },
   // Base merge of 5 November 2026: accepted WEB-11b's People screens read the reader's pending requests (`GET /people/requests`, at most
-  // 100); none here (unanswered, the stub's 404 is a console error the world refuses).
+  // 100); none here. Kept although the server now answers it by default (revision 56, C-H1): a canned set is answered first, as a whole.
   [`${API}/people/requests`]: { items: [] },
 };
 const RENAMED = "Ada King, Countess of Lovelace";
@@ -176,8 +176,8 @@ async function peopleOnA(
   context: BrowserContext,
   world: Generations,
 ): Promise<Page> {
-  // Base merge of 5 November 2026: accepted WEB-11b's People list reads the reader's pending requests; none here.
-  await world.reads({ [`${API}/people/requests`]: { items: [] } });
+  // Base merge of 5 November 2026: accepted WEB-11b's People list reads the reader's pending requests; none here. Revision 56: the
+  // generation server answers that empty read for every PWA spec (C-H1), so this setup no longer cans it.
   await seedAccount(context, world, "acct-a", "s1", {
     validCache: "pwa-people-q4",
   });
