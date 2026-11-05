@@ -97,7 +97,8 @@ const BACKEND = /^\/(?:api|health|ready|auth|oidc)(?:\/|$)/;
 const UNHASHED =
   /^\/(?:index\.html|sw\.js|theme-init\.js|noscript\.css|favicon\.svg|manifest\.webmanifest)$/;
 
-let health = { status: 200, body: { status: "ok", api_version: "0.29.0" } };
+// The pinned contract's API version (`contract-pin.json`, `rangeFromPin`: supported `>=0.31.0 <0.32.0` since the API 0.31 adoption).
+let health = { status: 200, body: { status: "ok", api_version: "0.31.0" } };
 let dark = false;
 /** The stub identity read (`GET /api/experimental/v1/browser-sessions/current`), or null for the backend's 404. */
 let identity = null;

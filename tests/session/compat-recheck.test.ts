@@ -22,19 +22,19 @@ const booted = async (apiVersion: string | null) => {
 
 describe("the re-check triggers", () => {
   test("a server upgraded under an open tab is noticed at the next reconnect", async () => {
-    const { f, page } = await booted("0.29.0");
+    const { f, page } = await booted("0.31.0");
     expect(page.session.compat.get().status).toBe("supported");
-    f.server.apiVersion = "0.30.0";
+    f.server.apiVersion = "0.32.0";
     page.goOffline();
     await f.settle();
     page.goOnline();
     await f.settle();
     expect(page.session.compat.get()).toMatchObject({
       status: "unsupported",
-      version: "0.30.0",
+      version: "0.32.0",
     });
     // A later fix (or downgrade) is noticed the same way and resumes without a reload.
-    f.server.apiVersion = "0.29.4";
+    f.server.apiVersion = "0.31.4";
     page.goOffline();
     page.goOnline();
     await f.settle();
@@ -44,9 +44,9 @@ describe("the re-check triggers", () => {
   test.each(["visible", "focus", "pageshow", "resume"] as const)(
     "a return to the page (%s) asks again only after the minimum interval",
     async (event) => {
-      const { f, page } = await booted("0.29.0");
+      const { f, page } = await booted("0.31.0");
       expect(healthCount(f)).toBe(1);
-      f.server.apiVersion = "0.30.0";
+      f.server.apiVersion = "0.32.0";
       await f.world.advance(DEFAULT_CONFIG.compatRecheckMinIntervalMs - 1);
       page.env.emit(event);
       await f.settle();
@@ -61,7 +61,7 @@ describe("the re-check triggers", () => {
   );
 
   test("recheckCompatibility asks at once", async () => {
-    const { f, page } = await booted("0.29.0");
+    const { f, page } = await booted("0.31.0");
     f.server.apiVersion = undefined;
     page.session.recheckCompatibility();
     await f.settle();
@@ -83,7 +83,7 @@ describe("the paced re-check while the answer is not supported", () => {
     expect(healthCount(f)).toBe(2);
     await f.world.advance(1);
     expect(healthCount(f)).toBe(3);
-    f.server.apiVersion = "0.29.0";
+    f.server.apiVersion = "0.31.0";
     await f.world.advance(4 * DEFAULT_CONFIG.compatRetryInitialMs);
     expect(page.session.compat.get()).toMatchObject({ status: "supported" });
     const settled = healthCount(f);
@@ -93,7 +93,7 @@ describe("the paced re-check while the answer is not supported", () => {
   });
 
   test("the pace is capped at compatRetryMaxMs", async () => {
-    const { f } = await booted("0.30.0");
+    const { f } = await booted("0.32.0");
     // 30 s, 60 s, 120 s, 240 s, 480 s, then 600 s each.
     await f.world.advance(30_000 + 60_000 + 120_000 + 240_000 + 480_000);
     expect(healthCount(f)).toBe(6);
@@ -107,7 +107,7 @@ describe("the paced re-check while the answer is not supported", () => {
     const { f, page } = await booted(null);
     await f.world.advance(30_000 + 60_000);
     expect(healthCount(f)).toBe(3);
-    f.server.apiVersion = "0.30.0";
+    f.server.apiVersion = "0.32.0";
     await f.world.advance(120_000);
     expect(healthCount(f)).toBe(4);
     expect(page.session.compat.get().status).toBe("unsupported");
@@ -132,7 +132,7 @@ describe("the paced re-check while the answer is not supported", () => {
   });
 
   test("dispose stops the paced re-check", async () => {
-    const { f, page } = await booted("0.30.0");
+    const { f, page } = await booted("0.32.0");
     page.session.dispose();
     await f.world.advance(DEFAULT_CONFIG.compatRetryMaxMs * 3);
     expect(healthCount(f)).toBe(1);
@@ -141,7 +141,7 @@ describe("the paced re-check while the answer is not supported", () => {
 
 describe("one check in flight", () => {
   test("a reconnect during a check asks exactly once more after it, and the later answer stands", async () => {
-    const { f, page } = await booted("0.29.0");
+    const { f, page } = await booted("0.31.0");
     f.server.addRule({
       match: (r) => r.path === "/health",
       delay: "unbounded",
@@ -151,7 +151,7 @@ describe("one check in flight", () => {
     await f.settle();
     expect(healthCount(f)).toBe(2);
     // The server is upgraded while the first answer (taken before the upgrade) is on its way.
-    f.server.apiVersion = "0.30.0";
+    f.server.apiVersion = "0.32.0";
     page.goOffline();
     page.goOnline();
     page.goOffline();
@@ -169,7 +169,7 @@ describe("one check in flight", () => {
   });
 
   test("a return to the page while a check is in flight asks nothing more", async () => {
-    const { f, page } = await booted("0.29.0");
+    const { f, page } = await booted("0.31.0");
     await f.world.advance(DEFAULT_CONFIG.compatRecheckMinIntervalMs);
     f.server.addRule({
       match: (r) => r.path === "/health",
@@ -209,13 +209,13 @@ describe("a reconnect admits nothing until its own answer (R1)", () => {
   };
 
   test.each([
-    ["matching", "0.29.0", "supported"],
-    ["mismatched", "0.30.0", "unsupported"],
+    ["matching", "0.31.0", "supported"],
+    ["mismatched", "0.32.0", "unsupported"],
     ["missing", null, "missing"],
   ] as const)(
     "%s answer: `supported` is withdrawn at the online event and only the fresh answer decides",
     async (_name, version, final) => {
-      const { f, page } = await booted("0.29.0");
+      const { f, page } = await booted("0.31.0");
       expect(page.session.compat.get().status).toBe("supported");
       page.goOffline();
       await f.settle();
@@ -240,7 +240,7 @@ describe("a reconnect admits nothing until its own answer (R1)", () => {
   );
 
   test("an answer asked BEFORE the reconnect is dropped, even a matching one; the rerun asked after it decides", async () => {
-    const { f, page } = await booted("0.29.0");
+    const { f, page } = await booted("0.31.0");
     f.server.addRule({
       match: (r) => r.path === "/health",
       delay: "unbounded",
@@ -252,7 +252,7 @@ describe("a reconnect admits nothing until its own answer (R1)", () => {
     // The answer on its way says `supported` (the server before the upgrade); the server is upgraded and the page reconnects meanwhile.
     page.goOffline();
     page.goOnline();
-    f.server.apiVersion = "0.30.0";
+    f.server.apiVersion = "0.32.0";
     f.server.addRule({
       match: (r) => r.path === "/health",
       delay: "unbounded",
@@ -269,13 +269,13 @@ describe("a reconnect admits nothing until its own answer (R1)", () => {
     await f.world.runUntilIdle();
     expect(page.session.compat.get()).toMatchObject({
       status: "unsupported",
-      version: "0.30.0",
+      version: "0.32.0",
     });
     expect(seen).toEqual(["unsupported"]);
   });
 
   test("a second reconnect while the first one's check is in flight drops that check's answer too", async () => {
-    const { f, page } = await booted("0.29.0");
+    const { f, page } = await booted("0.31.0");
     page.goOffline();
     f.server.addRule({
       match: (r) => r.path === "/health",
@@ -299,11 +299,11 @@ describe("a reconnect admits nothing until its own answer (R1)", () => {
   });
 
   test("a pause is not lifted by a reconnect: it stays until the fresh answer", async () => {
-    const { f, page } = await booted("0.30.0");
+    const { f, page } = await booted("0.32.0");
     expect(page.session.compat.get().status).toBe("unsupported");
     page.goOffline();
     await f.settle();
-    f.server.apiVersion = "0.29.0";
+    f.server.apiVersion = "0.31.0";
     f.server.addRule({
       match: (r) => r.path === "/health",
       delay: "unbounded",

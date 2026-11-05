@@ -34,7 +34,7 @@ export type HealthAnswer =
   | { kind: "version"; version: string | null }
   | { kind: "status"; status: number }
   | { kind: "abort" };
-export const SUPPORTED: HealthAnswer = { kind: "version", version: "0.29.0" };
+export const SUPPORTED: HealthAnswer = { kind: "version", version: "0.31.0" };
 
 interface PageGate {
   holding: boolean;
