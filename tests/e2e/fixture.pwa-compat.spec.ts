@@ -75,7 +75,21 @@ test("case 2, matching: no pause, the ordinary entry", async ({
   generations,
 }) => {
   const page = await openSignedOut(context, generations);
+  // WEB-14a revision 56 (Q-M2): judged after the session's VERDICT, not at the first paint. While `/health` is unanswered the signed-out
+  // page is the sign-in page (no refusal yet), so "the entry is visible" alone passes whatever version the server reports when the page
+  // paints before the answer is applied (WebKit did, with the server's default at 0.29.0). The harness page's own compatibility store says
+  // when the answer has been applied.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () => window.__atlasFixture?.session?.compat()?.status ?? null,
+        ),
+      { message: "the session's API compatibility verdict" },
+    )
+    .toBe("supported");
   await expect(page.getByText(ENTRY)).toBeVisible();
+  await expect(page.locator('[data-compatibility="api"]')).toHaveCount(0);
   const health = (await generations.log()).filter(
     (entry) => entry.path === "/health",
   );
