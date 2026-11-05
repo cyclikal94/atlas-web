@@ -925,7 +925,11 @@ describe("R-1: a refresh keeps the timeline's tree (keyboard and screen reader a
       childList: true,
       subtree: true,
     });
-    // Another device edits Email: a newer event about another field arrives on the refresh.
+    // Another device edits Email: a newer event about another field arrives on the refresh. The cached read whose targets now include
+    // Email is a new live query: it says nothing (loading) until it first answers, as Dexie's does.
+    const readsEmail = (input: Record<string, unknown>) =>
+      Array.isArray(input.ids) && input.ids.includes(F(3));
+    w.holdReads("data.readResourcesById", readsEmail);
     w.api.activity.events.set(P, [
       activityEvent(200, "field_edited", email),
       ...events,
@@ -935,18 +939,30 @@ describe("R-1: a refresh keeps the timeline's tree (keyboard and screen reader a
     });
     await waitFor(() => expect(shownIds()[0]).toBe(eventId(200)));
     await until("ready");
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    });
-    watcher.disconnect();
+    await waitFor(() => expect(w.gated.some(readsEmail)).toBe(true));
+    // While that read is loading: every item that stayed keeps its node, its link and the focus; Email's own row is not known yet.
     expect(shownIds().indexOf(eventId(50))).toBe(50);
+    expect(item(50)).toBe(fiftieth);
+    expect(document.activeElement).toBe(link);
+    expect(
+      item(1)?.querySelector(`[data-activity-link="${F(1)}"]`),
+    ).not.toBeNull();
+    expect(
+      item(200)?.querySelector(`[data-activity-link="${F(3)}"]`),
+    ).toBeNull();
+    act(() => {
+      w.releaseReads();
+    });
+    await waitFor(() =>
+      expect(
+        item(200)?.querySelector(`[data-activity-link="${F(3)}"]`),
+      ).not.toBeNull(),
+    );
+    watcher.disconnect();
     expect(item(50)).toBe(fiftieth);
     expect(document.activeElement).toBe(link);
     // Only the oldest, pushed beyond the 100 shown, left; no link flashed out of an item that stayed.
     expect(removed).toEqual([`item ${eventId(100)}`]);
-    expect(
-      item(200)?.querySelector(`[data-activity-link="${F(3)}"]`),
-    ).not.toBeNull();
   });
 
   test("the rules that drop the earlier answer still drop it: a failed re-read shows no rows and no controls", async () => {
