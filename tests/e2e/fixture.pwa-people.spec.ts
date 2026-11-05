@@ -109,6 +109,9 @@ const PERSON_READS = {
     preferences_version: 1,
   },
   [`${API}/people/${PERSON}/duplicates`]: { items: [], next_after: null },
+  // Base merge of 5 November 2026: accepted WEB-11b's People screens read the reader's pending requests (`GET /people/requests`, at most
+  // 100); none here (unanswered, the stub's 404 is a console error the world refuses).
+  [`${API}/people/requests`]: { items: [] },
 };
 const RENAMED = "Ada King, Countess of Lovelace";
 

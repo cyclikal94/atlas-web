@@ -1,7 +1,7 @@
 {
   "_": "Size budgets and recorded baselines. check-budgets.mjs fails above a shared `budget` figure or more than `tolerance` above the build baseline, and refuses the retired `provisional`/`provisional_by_build` keys. The figures are WEB-09c's reasoned successor (C11, FB-20261010, revision 8): `budget_basis` gives the measurement, the rationale, the effective bounds and the named obligations. Size guards, not performance targets.",
   "budget": {
-    "initial_js_gzip": 289142,
+    "initial_js_gzip": 334696,
     "css_gzip": 8078,
     "fonts": 92110
   },
@@ -365,6 +365,14 @@
         },
         "standing_authority": "STANDING-FRONTEND-BUDGETS-20261030 (approval/standing-frontend-budgets-20261030.json a2dc401135e97ab2aef838b59418de768f91ed71b3904e625614afe2167dc3ad): WEB-14a production 111,300 B and fixture 300,100 B for all revisions; later candidate-only fixture ceilings 302,500 B (approval/web14a-integration-budget-20261102.json), 303,100 B (approval/web14a-r51-fixture-budget-20261103.json 88d61eb9041a3cec5f172f3a21a5e70681425ee8b7efdc53b9c8adf64962c1cb) and 303,600 B (WEB14A-R53-FIXTURE-BUDGET-20261103, in-session, no orchestrator record) were per-build ceilings of the retired provisional format.",
         "integration": "Base merge of accepted main 546bc791b45108c1eb4868ef5e997d0062c72a70 (WEB-09c and WEB-11b integrations) into WEB-14a on 5 November 2026 under REVISION-BASE-INTEGRATION-20261105 and LOCAL-FEATURE-HISTORY-20261011. The shared successor budget, both build baselines and the 10% tolerance are main's, unchanged; WEB-14a's retired per-build figures and their authorities above are history only. No combined allowance, ceiling increase or baseline reset is made by this merge. The combined-build measurement and any decision it needs are recorded in .agtx/execute.md and .agtx/evidence/revision-r55-20261105/."
+      },
+      "web14a_r55_od2_application_20261105": {
+        "decision": "WEB14A-R55-OD2-BUDGET-20261105 (Kieran, 5 November 2026, in the WEB-14a revision-55 Running session, the agent question mechanism; no orchestrator approval record yet: the coordinator reconciles it at integration). Exact answer: \"Apply OD-2's own rule to this merged candidate rather than a one-off: re-record the dist-fixture baseline at the measured 304,269 B with check-budgets --record, and set the shared ceiling to round(304,269 x 1.10) = 334,696 B. Production keeps its own baseline plus 10 % guard, unchanged. This stands for all WEB-14a revisions under STANDING-FRONTEND-BUDGETS-20261030; do not ask again for the same ceiling. Record the ~15 KB eager recovery code as accepted growth with the OD-2 reading (about 1.5 ms slow-4G FCP per kB). The coordinator reconciles the shared figure at integration; WEB-09c's policy is being applied, not reset.\"",
+        "rule": "OD-2 as stated in `rule` above, applied to the merged WEB-14a candidate: ceiling = round(dist-fixture measurement x (1 + tolerance)) = round(304,269 x 1.10) = 334,696 B for initial_js_gzip; css_gzip and fonts ceilings unchanged; tolerance 0.10 unchanged; the production baseline (109,809 / 7,512 / 83,736) and its 10 % guard unchanged.",
+        "measurement": "dist-fixture of WEB-14a revision 55 (base merge 3d51c9e of accepted main 546bc79, merge corrections 632dfdc and the MU-8C-11/D-P8 correction, revision-55 checkpoint 5c1d599): 304,269 / 7,548 / 83,736 (check-budgets gzip level 9; .agtx/evidence/revision-r55-20261105/budget/fixture.json). The merge alone measured 304,184 B (+656 B over revision 53's 303,528 B from accepted WEB-09c/WEB-11b), the F-R54 corrections +85 B. Production 110,710 / 7,548 / 83,736 passes its own guard.",
+        "composition": "Clean: 30 initial files, 395 mapped sources, no module in two initial chunks, no package in two copies, 16 form-recovery modules (.agtx/evidence/revision-r55-20261105/budget/composition.json).",
+        "accepted_growth": "About 15 KB gzip of WEB-14a's eagerly loaded form-recovery code (recoverable models, sessions, look, focus arbiter, notices) over the signed-in shell WEB-09c measured; by OD-2's own reading about 1.5 ms of emulated slow-4G first contentful paint per kB, so roughly 22 ms. Accepted growth by this decision; no performance target is claimed.",
+        "baseline": "dist-fixture baseline re-recorded with `node scripts/check-budgets.mjs dist-fixture --record` (the maintained command) on the build measured above."
       }
     },
     "follow_up": [
@@ -382,8 +390,8 @@
       "fonts": 83736
     },
     "dist-fixture": {
-      "initial_js_gzip": 262856,
-      "css_gzip": 7344,
+      "initial_js_gzip": 304269,
+      "css_gzip": 7548,
       "fonts": 83736
     }
   },
