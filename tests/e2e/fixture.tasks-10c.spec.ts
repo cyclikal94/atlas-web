@@ -4096,3 +4096,237 @@ test.describe("E-TM7/E-S3: a retained page follows its windows (revision 19: rev
     ).toMatchObject({ started_at: Math.floor((base + 20_000) / 1000) });
   });
 });
+
+test.describe("E-S4: a strip whose local read did not complete is never shown as current (revision 20: review 22's R42)", () => {
+  // REAL IndexedDB on the production session: the fault is the occurrence walk's cursor on the `cache.parent_id` index for the task's
+  // execution (an UnknownError, as a failing database raises), below every plan; `heal()` ends it. The page's clock (`Date.now`, which the
+  // production clock reads) is scripted and moved 20 s past a boundary: a deterministic scripted boundary, not device sleep or a duration
+  // measurement. Wakes deliver ONE event (`focus`): in WebKit a focus and a visibilitychange in one turn ask twice and the second read can
+  // pass a one-shot fault. Offline at the boundary, so the server's figures ("Shown when you're online") offer no control of their own.
+  const at = async (context: BrowserContext, now: number) => {
+    await context.addInitScript((start) => {
+      const w = window as unknown as { __r20now: number };
+      w.__r20now = start;
+      Date.now = () => w.__r20now;
+    }, now);
+  };
+  const move = (page: Page, now: number, wake: boolean) =>
+    page.evaluate(
+      ({ now, wake }) => {
+        (window as unknown as { __r20now: number }).__r20now = now;
+        if (wake) window.dispatchEvent(new Event("focus"));
+      },
+      { now, wake },
+    );
+  const windowed = (
+    n: number,
+    boundary: "open" | "close",
+    base: number,
+    ahead: number,
+  ) =>
+    buildTask({
+      n,
+      title: "Stale strip",
+      carry: "close_incomplete",
+      opensAt: boundary === "open" ? base / 1000 + ahead : base / 1000 - 100,
+      closesAt: boundary === "close" ? base / 1000 + ahead : base / 1000 + 3600,
+      action: { outcome: "incomplete", amount: null, checked: [] },
+    });
+  const executionOf = (task: BuiltTask) =>
+    (task.upserts as Array<{ resource: { kind: string; id: string } }>).find(
+      (u) => u.resource.kind === "execution",
+    )?.resource.id as string;
+  const strip = (page: Page) =>
+    page
+      .locator("[data-strip-state]")
+      .evaluateAll((ns) => ns.map((x) => x.getAttribute("data-strip-state")));
+  /** Fails the occurrence walk's cursor (the first `times` walks, or every walk while `times` is null) and counts every walk. */
+  const faultWalk = (page: Page, execution: string, times: number | null) =>
+    page.evaluate(
+      ({ execution, times }) => {
+        const w = window as unknown as {
+          __r20walk: { attempts: number; failures: number; on: boolean };
+        };
+        w.__r20walk = { attempts: 0, failures: 0, on: true };
+        const original = IDBIndex.prototype.openCursor;
+        IDBIndex.prototype.openCursor = function (
+          this: IDBIndex,
+          range?: IDBKeyRange | IDBValidKey | null,
+          direction?: IDBCursorDirection,
+        ) {
+          if (
+            this.objectStore.name === "cache" &&
+            this.name === "parent_id" &&
+            (range as IDBKeyRange | null)?.lower === execution
+          ) {
+            w.__r20walk.attempts += 1;
+            if (
+              w.__r20walk.on &&
+              (times === null || w.__r20walk.failures < times)
+            ) {
+              w.__r20walk.failures += 1;
+              throw new DOMException(
+                "E-S4 injected occurrence walk failure",
+                "UnknownError",
+              );
+            }
+          }
+          return original.call(this, range as IDBKeyRange, direction);
+        } as typeof IDBIndex.prototype.openCursor;
+      },
+      { execution, times },
+    );
+  const walks = (page: Page) =>
+    page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __r20walk: { attempts: number; failures: number };
+          }
+        ).__r20walk,
+    );
+  const heal = (page: Page) =>
+    page.evaluate(() => {
+      (window as unknown as { __r20walk: { on: boolean } }).__r20walk.on =
+        false;
+    });
+  const notice = (page: Page) => page.locator("[data-streak-stale]");
+  /** The stale presentation: the marker, both copy lines and exactly one Try again inside the notice. */
+  const expectMarked = async (page: Page) => {
+    await expect(notice(page)).toHaveAttribute("data-streak-stale", "failed");
+    await expect(notice(page)).toContainText(
+      "Atlas couldn't read the tasks saved on this device.",
+    );
+    await expect(notice(page)).toContainText(
+      "Showing what was last read on this device.",
+    );
+    await expect(
+      notice(page).getByRole("button", { name: "Try again", exact: true }),
+    ).toHaveCount(1);
+    await expect(page.locator("[data-streak-local-error]")).toHaveCount(0);
+  };
+  const open = async (context: BrowserContext, task: BuiltTask) => {
+    const { page } = await setup(context, `/tasks/${task.taskId}/streak`, [
+      task,
+    ]);
+    await goOfflineAtBoundary(page);
+    await expect(
+      page.locator("[data-streak-strip],[data-streak-empty]"),
+    ).toBeVisible();
+    return page;
+  };
+
+  for (const boundary of ["open", "close"] as const)
+    test(`E-S4 ${boundary} by focus, a fault that stays: the kept strip is marked with its own Try again; Try again with the fault gone is current`, async ({
+      context,
+    }) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      await at(context, base);
+      const task = windowed(
+        boundary === "open" ? 9931 : 9932,
+        boundary,
+        base,
+        10,
+      );
+      const page = await open(context, task);
+      const before = boundary === "open" ? [] : ["open"];
+      await expect
+        .poll(() => strip(page), {
+          message: "precondition: before the boundary",
+        })
+        .toEqual(before);
+      await faultWalk(page, executionOf(task), null);
+      await move(page, base + 20_000, true);
+      await expect
+        .poll(async () => (await walks(page)).failures, {
+          message: "precondition: the re-read failed",
+        })
+        .toBeGreaterThan(0);
+      await expectMarked(page);
+      expect(await strip(page), "the last complete strip is kept").toEqual(
+        before,
+      );
+      await expect(
+        page.locator("[data-streak-empty]"),
+        "unknown is not empty",
+      ).toHaveCount(0);
+      await heal(page);
+      await notice(page)
+        .getByRole("button", { name: "Try again", exact: true })
+        .click();
+      await expect
+        .poll(() => strip(page), { timeout: 5_000 })
+        .toEqual(boundary === "open" ? ["open"] : ["missed"]);
+      await expect(notice(page)).toHaveCount(0);
+    });
+
+  test("E-S4 close scheduled, ONE failed re-read: marked, then the first paced attempt makes it current with no event", async ({
+    context,
+  }) => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    await at(context, base);
+    const task = windowed(9933, "close", base, 1);
+    const page = await open(context, task);
+    await expect.poll(() => strip(page)).toEqual(["open"]);
+    await faultWalk(page, executionOf(task), 1);
+    // The page's own boundary wait (real, about one second) finds the clock past the closure; its re-read fails once.
+    await move(page, base + 20_000, false);
+    // Marked for about two seconds, until the paced attempt: wait for the marking itself, then check what caused it.
+    await expect(notice(page)).toHaveAttribute("data-streak-stale", "failed", {
+      timeout: 6_000,
+    });
+    expect(
+      (await walks(page)).failures,
+      "precondition: the scheduled re-read failed",
+    ).toBe(1);
+    await expectMarked(page);
+    await expect
+      .poll(() => strip(page), {
+        timeout: 6_000,
+        message:
+          "the paced attempt (2 s) reads it again; no event is delivered",
+      })
+      .toEqual(["missed"]);
+    await expect(notice(page)).toHaveCount(0);
+    expect((await walks(page)).attempts).toBe(2);
+  });
+
+  test("E-S4 close by focus, a fault that stays then ends: a later focus with the fault gone is current", async ({
+    context,
+  }) => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    await at(context, base);
+    const task = windowed(9934, "close", base, 10);
+    const page = await open(context, task);
+    await expect.poll(() => strip(page)).toEqual(["open"]);
+    await faultWalk(page, executionOf(task), null);
+    await move(page, base + 20_000, true);
+    await expect
+      .poll(async () => (await walks(page)).failures)
+      .toBeGreaterThan(0);
+    await expectMarked(page);
+    await heal(page);
+    await move(page, base + 20_000, true);
+    await expect
+      .poll(() => strip(page), { timeout: 5_000 })
+      .toEqual(["missed"]);
+    await expect(notice(page)).toHaveCount(0);
+  });
+
+  test("E-S4 close by focus: CONTROL (healthy re-read, never marked)", async ({
+    context,
+  }) => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    await at(context, base);
+    const task = windowed(9935, "close", base, 10);
+    const page = await open(context, task);
+    await expect.poll(() => strip(page)).toEqual(["open"]);
+    await faultWalk(page, executionOf(task), 0);
+    await move(page, base + 20_000, true);
+    await expect
+      .poll(() => strip(page), { timeout: 5_000 })
+      .toEqual(["missed"]);
+    await expect(notice(page)).toHaveCount(0);
+    expect((await walks(page)).attempts).toBeGreaterThan(0);
+  });
+});

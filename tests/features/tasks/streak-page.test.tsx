@@ -1,4 +1,10 @@
-import { act, cleanup, fireEvent, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  within,
+} from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import type { CacheRow } from "../../../src/data";
@@ -27,7 +33,11 @@ import {
   slotOn,
   windows,
 } from "../../../src/features/tasks/model/time";
-import { STREAK_COPY } from "../../../src/features/tasks/streak/StreakPage";
+import {
+  EXPIRY_RETRIES_MS,
+  expiryRetryDelay,
+  STREAK_COPY,
+} from "../../../src/features/tasks/streak/StreakPage";
 import { installMatchMedia } from "../../helpers/match-media";
 import { cacheRow, draftRow } from "../../support/data/rows";
 import {
@@ -1080,4 +1090,700 @@ describe("R41: the strip follows period windows on a retained page", () => {
       JSON.stringify(["missed", "none"]),
     ]);
   }, 15_000);
+});
+
+/**
+ * Revision 20 (Review 22's R42; design assessment of 5 November 2026, S1-S9 and Q1-Q7): a strip whose local read did not complete is never
+ * shown as current. With nothing retained the read's failure is shown with its Try again; with a strip retained, the strip is kept and marked
+ * as what was last read ("Showing what was last read on this device.") with a Try again of its own that reads the strip again, as Today, the
+ * detail, the lists and the form do (WEB-10a decision 31). After a re-read of a LAPSED strip fails, paced attempts (2 s, 10 s, 60 s) ask again
+ * with no event; a wake, a commit and Try again still do. Faults are injected at the store boundary (`service.store.run`): the occurrence
+ * list (`data.readResourceList`, kind occurrence), the task read (`data.readResourcesById`) and the local basis (`data.readLocalBasis`). The
+ * injected clock (`env.now`) moves 20 s past a boundary: a scripted clock move, not device sleep or duration evidence; production waits are
+ * unchanged and measured with `performance.now()`. FIXTURE evidence.
+ */
+describe("R42: a strip whose local read did not complete is never shown as current", () => {
+  const states = () =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>("[data-strip-state]"),
+    ).map((x) => x.dataset.stripState);
+  const marker = () =>
+    document
+      .querySelector("[data-streak-stale]")
+      ?.getAttribute("data-streak-stale") ?? null;
+  const notice = () =>
+    document.querySelector("[data-streak-stale]") as HTMLElement | null;
+  const localError = () =>
+    document.querySelector("[data-streak-local-error]") as HTMLElement | null;
+  const tryAgains = () =>
+    screen.queryAllByRole("button", { name: copy.TRY_AGAIN });
+  const DAILY = {
+    start_date: TODAY,
+    time: null,
+    timezone: "UTC",
+    repeat: { frequency: "daily" as const, interval: 1 },
+  };
+  const incomplete = {
+    action: { outcome: "incomplete" as const, amount: null, checked: [] },
+    period: { outcome: "incomplete" as const, amount: null, checked: [] },
+  };
+  /** A period that opens (`open`) or closes (`close`) `ahead` seconds after `base`; the other end is an hour away or in the past. */
+  const windowed = (boundary: "open" | "close", base: number, ahead: number) =>
+    seededTask({
+      title: "Stale streak",
+      definition: { carry: "close_incomplete", schedule: DAILY },
+      occurrence:
+        boundary === "open"
+          ? { opens_at: base / 1000 + ahead, closes_at: base / 1000 + 3600 }
+          : { opens_at: base / 1000 - 100, closes_at: base / 1000 + ahead },
+      progress: incomplete,
+    });
+  /** Another saved period of the same task, the day after the seeded one, opened 50 s before `base` (it joins the strip as "none"). */
+  const later = async (
+    task: Awaited<ReturnType<typeof seededTask>>,
+    base: number,
+  ) => {
+    const slot = slotOn(
+      task.data.definition.schedule,
+      addDays(task.data.slot.date as string, 1),
+    );
+    return cacheRow({
+      id: await occurrenceId(task.taskId, slot.key),
+      kind: "occurrence",
+      parent_id: task.executionId,
+      label: "Occurrence",
+      value: {
+        ...task.data,
+        slot,
+        opens_at: base / 1000 - 50,
+        closes_at: base / 1000 + 3600,
+      } as never,
+    });
+  };
+  const mountAt = async (
+    rows: CacheRow[],
+    taskId: string,
+    clock: { at: number },
+    options: { online?: boolean; api?: ReturnType<typeof fakeApi> } = {},
+  ) => {
+    const t = await mountTasks({
+      path: `/tasks/${taskId}/streak`,
+      rows,
+      ...(options.api ? { api: options.api } : {}),
+      env: { online: options.online ?? false, now: () => clock.at },
+    });
+    await t.until(
+      () =>
+        document.querySelector("[data-streak-strip],[data-streak-empty]") !==
+        null,
+    );
+    await t.settle();
+    return t;
+  };
+  type Seam = "occurrence" | "byId" | "basis";
+  /**
+   * Rejects the reads of `seam` at the store boundary (`times` of them, or every one while `times` is null) and counts every read of it.
+   * `restore()` ends the fault and the count.
+   */
+  const fault = (t: Mounted, seam: Seam, times: number | null) => {
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const store = service.store as { run: typeof service.store.run };
+    const original = store.run.bind(service.store);
+    const log = { attempts: 0, failures: 0, on: true };
+    store.run = ((plan, input, options) => {
+      const hit =
+        seam === "occurrence"
+          ? plan.name === "data.readResourceList" &&
+            (input as { kind?: string }).kind === "occurrence"
+          : seam === "byId"
+            ? plan.name === "data.readResourcesById"
+            : plan.name === "data.readLocalBasis";
+      if (hit) {
+        log.attempts += 1;
+        if (log.on && (times === null || log.failures < times)) {
+          log.failures += 1;
+          return Promise.reject(new Error("R42 injected local read failure"));
+        }
+      }
+      return original(plan, input, options);
+    }) as typeof service.store.run;
+    return {
+      log,
+      /** The fault ends; the count goes on. */
+      heal: () => {
+        log.on = false;
+      },
+      restore: () => {
+        store.run = original;
+      },
+    };
+  };
+  /**
+   * The page's own `unstable` (the strip evaluated at one instant is overtaken at every attempt: a clock that moves on and back). Each
+   * occurrence walk moves the clock between `a` and `b` while `on`; `end(at)` stops and leaves the clock at `at`.
+   */
+  const seesaw = (t: Mounted, clock: { at: number }, a: number, b: number) => {
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const store = service.store as { run: typeof service.store.run };
+    const original = store.run.bind(service.store);
+    const log = { walks: 0, on: true };
+    store.run = ((plan, input, options) => {
+      if (
+        log.on &&
+        plan.name === "data.readResourceList" &&
+        (input as { kind?: string }).kind === "occurrence"
+      ) {
+        log.walks += 1;
+        clock.at = clock.at === a ? b : a;
+      }
+      return original(plan, input, options);
+    }) as typeof service.store.run;
+    return {
+      log,
+      end: (at: number) => {
+        log.on = false;
+        store.run = original;
+        clock.at = at;
+      },
+    };
+  };
+  const wake = (how: "focus" | "visibilitychange" | "pageshow") => {
+    if (how === "focus") fireEvent(window, new Event("focus"));
+    if (how === "visibilitychange")
+      fireEvent(document, new Event("visibilitychange"));
+    if (how === "pageshow") fireEvent(window, new Event("pageshow"));
+  };
+  /** Settles until `ready()` holds or `ms` of REAL time pass (production waits run unshortened). */
+  const realWait = async (t: Mounted, ready: () => boolean, ms: number) => {
+    const end = performance.now() + ms;
+    while (!ready() && performance.now() < end) await t.settle();
+  };
+  /** The stale presentation: both copy lines and exactly one Try again inside the notice. */
+  const expectMarked = (kind: "failed" | "unstable") => {
+    expect(marker(), "the kept strip is marked as last read").toBe(kind);
+    const box = notice() as HTMLElement;
+    expect(box).toHaveTextContent(
+      kind === "unstable" ? copy.LOCAL_UNSTABLE : copy.LOCAL_FAILED,
+    );
+    expect(box).toHaveTextContent(copy.SHOWING_LAST_READ);
+    expect(
+      within(box).getAllByRole("button", { name: copy.TRY_AGAIN }),
+    ).toHaveLength(1);
+    expect(localError(), "a kept strip is not the no-value error").toBeNull();
+  };
+  const localTryAgain = () =>
+    within(notice() as HTMLElement).getByRole("button", {
+      name: copy.TRY_AGAIN,
+    });
+
+  // ---- Q1: the status rule --------------------------------------------------------------------------------------------------------
+  test.each(["occurrence", "byId", "basis"] as const)(
+    "R42 first read (%s fault): with nothing retained the local error is shown with its Try again, never a skeleton or 'Nothing to show yet.'; Try again with the fault gone shows the strip",
+    async (seam) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: base };
+      const task = await windowed("close", base, 3600);
+      const t = await mountAt(task.rows, task.taskId, clock);
+      // CONTROL: the healthy first read of the same task.
+      expect(states(), "control: a healthy first read shows the strip").toEqual(
+        ["open"],
+      );
+      const f = fault(t, seam, null);
+      try {
+        // Another identity is another scope: nothing of the first is kept, so its first read is a FIRST read, and it fails.
+        t.rerender(
+          tasksEnv(t.api, {
+            online: false,
+            now: () => clock.at,
+            identity: `${ME}:2`,
+          }),
+        );
+        await t.until(() => localError() !== null);
+        await t.settle();
+        expect(
+          f.log.failures,
+          "precondition: the first read failed",
+        ).toBeGreaterThan(0);
+        expect(localError()).toHaveTextContent(copy.LOCAL_FAILED);
+        expect(marker()).toBeNull();
+        expect(states()).toEqual([]);
+        expect(document.querySelector("[data-streak-empty]")).toBeNull();
+        expect(page()).not.toHaveTextContent(STREAK_COPY.loading);
+        expect(tryAgains()).toHaveLength(1);
+        f.heal();
+        fireEvent.click(tryAgains()[0] as HTMLElement);
+        await t.until(() => states().length === 1);
+        await t.settle();
+        expect(states()).toEqual(["open"]);
+        expect(localError()).toBeNull();
+        expect(marker()).toBeNull();
+      } finally {
+        f.restore();
+      }
+    },
+    15_000,
+  );
+
+  test("R42 first read unstable (a clock moving on and back at every attempt): the local error says it kept changing, never empty", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 10);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    const s = seesaw(t, clock, base, base + 20_000);
+    try {
+      t.rerender(
+        tasksEnv(t.api, {
+          online: false,
+          now: () => clock.at,
+          identity: `${ME}:2`,
+        }),
+      );
+      await t.until(() => localError() !== null);
+      expect(s.log.walks, "precondition: every attempt was overtaken").toBe(3);
+      expect(localError()).toHaveTextContent(copy.LOCAL_UNSTABLE);
+      expect(document.querySelector("[data-streak-empty]")).toBeNull();
+    } finally {
+      s.end(base);
+    }
+  }, 15_000);
+
+  test.each([false, true])(
+    "R42 retained strip, a committed change's re-read fails: the cells are kept and marked as last read with the strip's own Try again; Try again with the fault gone is current (CONTROL healthy re-read %s)",
+    async (control) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: base };
+      const task = await windowed("close", base, 3600);
+      const t = await mountAt(task.rows, task.taskId, clock);
+      expect(states()).toEqual(["open"]);
+      const f = fault(t, "occurrence", control ? 0 : null);
+      try {
+        await t.commitSync([await later(task, base)]);
+        await t.settle();
+        if (control) {
+          expect(states(), "control: the healthy re-read is current").toEqual([
+            "open",
+            "none",
+          ]);
+          expect(marker()).toBeNull();
+          return;
+        }
+        expect(
+          f.log.failures,
+          "precondition: the re-read failed",
+        ).toBeGreaterThan(0);
+        expect(states(), "the last complete strip is kept").toEqual(["open"]);
+        expectMarked("failed");
+        f.heal();
+        fireEvent.click(localTryAgain());
+        await t.until(() => states().length === 2);
+        await t.settle();
+        expect(states()).toEqual(["open", "none"]);
+        expect(marker(), "a complete read ends the marking").toBeNull();
+      } finally {
+        f.restore();
+      }
+    },
+    15_000,
+  );
+
+  test("R42 retained strip, a committed change's re-read keeps changing (unstable): marked with the unstable copy; Try again on a steady clock is current", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 10);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    // The closure (10 s away) lies between the two instants: each attempt is overtaken, forward or back, and none is published.
+    const s = seesaw(t, clock, base, base + 20_000);
+    try {
+      await t.commitSync([await later(task, base)]);
+      await t.until(() => marker() !== null);
+      expect(s.log.walks).toBe(3);
+      expect(states()).toEqual(["open"]);
+      expectMarked("unstable");
+    } finally {
+      s.end(base);
+    }
+    fireEvent.click(localTryAgain());
+    await t.until(() => states().length === 2);
+    await t.settle();
+    expect(states()).toEqual(["open", "none"]);
+    expect(marker()).toBeNull();
+  }, 15_000);
+
+  // ---- Q2: liveness -----------------------------------------------------------------------------------------------------------------
+  test("R42 the paced attempts are finite: 2 s, 10 s and 60 s, then none", () => {
+    expect(EXPIRY_RETRIES_MS).toEqual([2_000, 10_000, 60_000]);
+    expect([0, 1, 2, 3, 4, -1].map(expiryRetryDelay)).toEqual([
+      2_000,
+      10_000,
+      60_000,
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  test("R42 scheduled boundary, ONE failed re-read: the lapsed strip is marked at once and the first paced attempt (2 s) makes it current with no wake", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 1);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    const f = fault(t, "occurrence", 1);
+    try {
+      // The page's own boundary wait (real, about 1 s) finds the clock past the closure; its re-read fails once.
+      clock.at = base + 20_000;
+      await realWait(t, () => f.log.failures === 1 && marker() !== null, 5_000);
+      expect(f.log.failures, "precondition: the scheduled re-read failed").toBe(
+        1,
+      );
+      expect(states(), "the lapsed strip is kept").toEqual(["open"]);
+      expectMarked("failed");
+      const failedAt = performance.now();
+      await realWait(t, () => JSON.stringify(states()) === '["missed"]', 4_000);
+      const waited = performance.now() - failedAt;
+      expect(
+        states(),
+        "the first paced attempt reads it again, no event",
+      ).toEqual(["missed"]);
+      expect(marker()).toBeNull();
+      expect(f.log.attempts).toBe(2);
+      expect(waited, "paced, not at once").toBeGreaterThan(1_500);
+    } finally {
+      f.restore();
+    }
+  }, 20_000);
+
+  test("R42 scheduled boundary, a fault that stays: the strip stays marked with its Try again and the paced attempts are bounded (2 reads in the first 5 s)", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 1);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    const f = fault(t, "occurrence", null);
+    try {
+      clock.at = base + 20_000;
+      await realWait(t, () => f.log.failures >= 1 && marker() !== null, 5_000);
+      expect(f.log.failures, "precondition: the scheduled re-read failed").toBe(
+        1,
+      );
+      const first = performance.now();
+      while (performance.now() - first < 5_000) await t.settle();
+      expect(
+        f.log.attempts,
+        "the scheduled read and the 2 s attempt; the next is 10 s later",
+      ).toBe(2);
+      expect(states()).toEqual(["open"]);
+      expectMarked("failed");
+      f.heal();
+      fireEvent.click(localTryAgain());
+      await t.until(() => JSON.stringify(states()) === '["missed"]');
+      expect(states()).toEqual(["missed"]);
+      expect(marker()).toBeNull();
+    } finally {
+      f.restore();
+    }
+  }, 20_000);
+
+  for (const boundary of ["open", "close"] as const)
+    test.each(["focus", "visibilitychange", "pageshow"] as const)(
+      `R42 %s after a ${boundary === "open" ? "period opened" : "period closed"} with a fault: the kept strip is marked at once (never 'Nothing to show yet.'); a later wake with the fault gone is current`,
+      async (how) => {
+        const base = Math.floor(Date.now() / 1000) * 1000;
+        const clock = { at: base };
+        const task = await windowed(boundary, base, 10);
+        const t = await mountAt(task.rows, task.taskId, clock);
+        const before = boundary === "open" ? [] : ["open"];
+        expect(states(), "precondition: before the boundary").toEqual(before);
+        const f = fault(t, "occurrence", null);
+        try {
+          clock.at = base + 20_000;
+          wake(how);
+          await t.until(() => f.log.failures >= 1 && marker() !== null);
+          const failedAt = performance.now();
+          expect(states(), "the last complete strip is kept").toEqual(before);
+          expectMarked("failed");
+          expect(
+            document.querySelector("[data-streak-empty]"),
+            "unknown is not empty",
+          ).toBeNull();
+          f.heal();
+          wake(how);
+          const after = boundary === "open" ? ["open"] : ["missed"];
+          // The wake itself reads again: recovered before the first paced attempt (2 s after the failure) could stand in for it.
+          await realWait(
+            t,
+            () => JSON.stringify(states()) === JSON.stringify(after),
+            Math.max(0, 1_500 - (performance.now() - failedAt)),
+          );
+          expect(
+            states(),
+            "the wake read the strip again, before any paced attempt was due",
+          ).toEqual(after);
+          expect(marker()).toBeNull();
+        } finally {
+          f.restore();
+        }
+      },
+      15_000,
+    );
+
+  // ---- Q3: what a failed read keeps -------------------------------------------------------------------------------------------------
+  test.each([false, true])(
+    "R42 a clock gone back before the strip's instant with a fault: marked, then the recovered read selects again (CONTROL healthy %s)",
+    async (control) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: base };
+      const task = await seededTask({
+        title: "Stale streak",
+        definition: { carry: "close_incomplete", schedule: DAILY },
+        occurrence: {
+          opens_at: base / 1000 - 10,
+          closes_at: base / 1000 + 3600,
+        },
+        progress: incomplete,
+      });
+      const t = await mountAt(task.rows, task.taskId, clock);
+      expect(states()).toEqual(["open"]);
+      const f = fault(t, "occurrence", control ? 0 : null);
+      try {
+        clock.at = base - 20_000;
+        wake("focus");
+        await t.settle();
+        if (!control) {
+          await t.until(() => marker() !== null);
+          expect(states()).toEqual(["open"]);
+          expectMarked("failed");
+          f.heal();
+          wake("focus");
+          await t.until(() => marker() === null);
+          await t.settle();
+        }
+        expect(states(), "the period has not opened at this clock").toEqual([]);
+        expect(marker()).toBeNull();
+      } finally {
+        f.restore();
+      }
+    },
+    15_000,
+  );
+
+  test("R42 a read a boundary overtakes, then a failed attempt: the overtaken cells are never published and the kept cells are marked", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 10);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const store = service.store as { run: typeof service.store.run };
+    const original = store.run.bind(service.store);
+    // The first walk is overtaken by the closure; every later walk fails, until healed.
+    let walks = 0;
+    let failing = true;
+    store.run = ((plan, input, options) => {
+      if (
+        plan.name === "data.readResourceList" &&
+        (input as { kind?: string }).kind === "occurrence"
+      ) {
+        walks += 1;
+        if (walks === 1) clock.at = base + 20_000;
+        else if (failing)
+          return Promise.reject(new Error("R42 injected local read failure"));
+      }
+      return original(plan, input, options);
+    }) as typeof service.store.run;
+    const seen: string[] = [];
+    const note = () => {
+      const now = JSON.stringify({ cells: states(), marker: marker() });
+      if (seen[seen.length - 1] !== now) seen.push(now);
+    };
+    note();
+    const observer = new MutationObserver(note);
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+    try {
+      await t.commitSync([await later(task, base)]);
+      await t.until(() => marker() !== null);
+      await act(async () => undefined);
+      expect(
+        walks,
+        "precondition: overtaken, then a failed attempt",
+      ).toBeGreaterThanOrEqual(2);
+      expect(seen).toEqual([
+        JSON.stringify({ cells: ["open"], marker: null }),
+        JSON.stringify({ cells: ["open"], marker: "failed" }),
+      ]);
+      failing = false;
+      fireEvent.click(localTryAgain());
+      await t.until(() => states().length === 2);
+      await t.settle();
+      expect(states()).toEqual(["missed", "none"]);
+      expect(marker()).toBeNull();
+    } finally {
+      observer.disconnect();
+      store.run = original;
+    }
+  }, 15_000);
+
+  // ---- Q4: ownership and lifetime ---------------------------------------------------------------------------------------------------
+  test.each(["identity", "task"] as const)(
+    "R42 another %s while a paced attempt is due: the old scope's attempt never runs; nothing more is read after the new scope's first read",
+    async (change) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: base };
+      const task = await windowed("close", base, 1);
+      const other = await seededTask({
+        title: "Other streak",
+        definition: { carry: "close_incomplete", schedule: DAILY },
+        occurrence: {
+          opens_at: base / 1000 - 100,
+          closes_at: base / 1000 + 3600,
+        },
+        progress: incomplete,
+      });
+      const t = await mountAt(
+        [...task.rows, ...other.rows],
+        task.taskId,
+        clock,
+      );
+      expect(states()).toEqual(["open"]);
+      const f = fault(t, "occurrence", null);
+      try {
+        clock.at = base + 20_000;
+        await realWait(t, () => marker() !== null, 5_000);
+        expect(
+          f.log.failures,
+          "precondition: the scheduled re-read failed",
+        ).toBe(1);
+        // A paced attempt is now due 2 s after that failure. The scope changes before it, with the fault gone.
+        f.heal();
+        if (change === "identity")
+          t.rerender(
+            tasksEnv(t.api, {
+              online: false,
+              now: () => clock.at,
+              identity: `${ME}:2`,
+            }),
+          );
+        else
+          await act(async () => {
+            await t.router.navigate({
+              to: "/tasks/$taskId/streak",
+              params: { taskId: other.taskId },
+            });
+          });
+        await t.until(() => states().length === 1 && marker() === null);
+        await t.settle();
+        const settled = f.log.attempts;
+        const from = performance.now();
+        while (performance.now() - from < 3_000) await t.settle();
+        expect(
+          f.log.attempts,
+          "no attempt of the old scope after the change",
+        ).toBe(settled);
+        expect(marker()).toBeNull();
+      } finally {
+        f.restore();
+      }
+    },
+    20_000,
+  );
+
+  test("R42 leaving the page while a paced attempt is due: nothing more is read", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 1);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    const f = fault(t, "occurrence", null);
+    try {
+      clock.at = base + 20_000;
+      await realWait(t, () => marker() !== null, 5_000);
+      expect(f.log.failures).toBe(1);
+      t.unmount();
+      const left = f.log.attempts;
+      const from = performance.now();
+      while (performance.now() - from < 3_000)
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 50));
+        });
+      expect(f.log.attempts).toBe(left);
+    } finally {
+      f.restore();
+    }
+  }, 20_000);
+
+  test.each(["offline", "ready", "error"] as const)(
+    "R42 figures %s: the stale strip has exactly one Try again of its own, apart from the figures', and it reads the strip again",
+    async (figures) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: base };
+      const task = await windowed("close", base, 3600);
+      const api = fakeApi({
+        readStreak: async () =>
+          figures === "error"
+            ? { ok: false, kind: "uncertain", requestId: "req-5xx" }
+            : streak(1, 1),
+      });
+      const t = await mountAt(task.rows, task.taskId, clock, {
+        online: figures !== "offline",
+        api,
+      });
+      await t.until(() => scope("personal")?.dataset.streakState === figures);
+      expect(scope("personal")?.dataset.streakState).toBe(figures);
+      expect(states()).toEqual(["open"]);
+      const f = fault(t, "occurrence", null);
+      try {
+        await t.commitSync([await later(task, base)]);
+        await t.until(() => marker() !== null);
+        await t.settle();
+        expectMarked("failed");
+        const theirs = within(scope("personal") as HTMLElement).queryAllByRole(
+          "button",
+          { name: copy.TRY_AGAIN },
+        );
+        expect(theirs).toHaveLength(figures === "error" ? 1 : 0);
+        expect(tryAgains()).toHaveLength(figures === "error" ? 2 : 1);
+        f.heal();
+        fireEvent.click(localTryAgain());
+        await t.until(() => states().length === 2);
+        await t.settle();
+        expect(states(), "the strip's Try again read the strip").toEqual([
+          "open",
+          "none",
+        ]);
+        expect(marker()).toBeNull();
+      } finally {
+        f.restore();
+      }
+    },
+    15_000,
+  );
+
+  // ---- Q7: no database on this device -----------------------------------------------------------------------------------------------
+  test("R42 no database on this device: the page says the task is not on this device; never a skeleton for ever or 'Nothing to show yet.'", async () => {
+    const t = await mountTasks({
+      path: "/tasks/task-nowhere/streak",
+      database: false,
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector("[data-streak-absent]") !== null,
+    );
+    await t.settle();
+    expect(document.querySelector("[data-streak-absent]")).toHaveTextContent(
+      STREAK_COPY.absent,
+    );
+    expect(page()).not.toHaveTextContent(STREAK_COPY.loading);
+    expect(document.querySelector("[data-streak-empty]")).toBeNull();
+    expect(localError()).toBeNull();
+    expect(marker()).toBeNull();
+  });
 });

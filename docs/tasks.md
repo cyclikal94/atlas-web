@@ -815,6 +815,12 @@ are focused evidence, never integration acceptance.*
   current and best runs (both scopes for a shared task: "Shared" and "You"); a joint null is "Withheld — someone keeps their part private",
   a personal null "Unknown", never 0; the last 30 opened periods of MY result from this device, oldest first, five states each with a mark and a
   word (Done, Missed, Still open, No record, Skipped), and "Last 30 {unit}: {done}/{total}, {missed} missed".
+  Revision 20 (review 22's R42): a local read that failed or kept changing is shown whether or not a strip is kept. With none kept, the
+  read's failure and its Try again; with one kept, the strip stays, marked "Showing what was last read on this device." with a Try again of
+  its own (the figures' Try again stays theirs), exactly as Today, the detail, the lists and the form (decision 31); an empty kept strip is
+  then not "Nothing to show yet.". When the kept strip's re-read at a boundary or a wake does not complete, paced attempts ask again after
+  2 s, 10 s and 60 s with no event (one coherent read each), then only a wake, a commit or Try again; a complete read starts them afresh and
+  a scope change or leaving the page ends them. With no database on this device the page says "This task isn't on this device."
 
 ## Public interface added
 
@@ -1063,6 +1069,7 @@ no longer pass for a commit (E-T15, E-T17, E-T20, E-T21, E-T22, E-T41); self-qua
 | "Your timers" in the task list and the timer block; "Restricted — sharing changed since this session" | `/tasks/timers` (native E-TM1) |
 | Rota labels ("You", usernames, "Someone (abcd…)"), "Take turns on this task", the conflict without the other person's name, "Left open", "Projected" | `/tasks/<id>` of an Anyone task (jsdom `rota.test.tsx`, native E-R1) |
 | Streak tiles "Shared" and "You", unit words, five strip states including "Skipped", no run dates, "On this device" offline | `/tasks/<id>/streak` (jsdom `streak-page.test.tsx`, native E-S2) |
+| Revision 20: the streak strip kept after a local read failed or kept changing: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Showing what was last read on this device." and its own "Try again" in "Day by day"; with no database on this device "This task isn't on this device." (existing copy, reused) | `/tasks/<id>/streak` with a failing occurrence read (jsdom `streak-page.test.tsx` R42 block, native E-S4) |
 | Revision 7: "This timer may already have ended. Nothing was saved." when Stop, Discard or a 7-day choice meets a retirement stored before the save | `/tasks/<id>` of a seconds task, or `/tasks/timers`, after another page recorded the session finished (jsdom `timer-block.test.tsx`; not rendered natively) |
 
 ## Limits

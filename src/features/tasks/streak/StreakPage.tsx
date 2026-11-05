@@ -240,6 +240,19 @@ async function readLocal(
 const CAP = 6 * 3_600_000;
 /** Attempts of one local read whose result a boundary overtook while it was read (each is evaluated afresh at its own instant). */
 const CURRENT_ATTEMPTS = 3;
+/**
+ * The paced attempts after a re-read of a strip that is no longer current did not complete (revision 20, review R42): one coherent read
+ * each, after these waits in turn; then none until a return to the page, a committed change or Try again. A complete read starts again.
+ */
+export const EXPIRY_RETRIES_MS: readonly number[] = [2_000, 10_000, 60_000];
+/** The wait before the `step`-th paced attempt (0-based), or null once they are spent: the ladder is finite. */
+export const expiryRetryDelay = (step: number): number | null =>
+  step >= 0 && step < EXPIRY_RETRIES_MS.length
+    ? (EXPIRY_RETRIES_MS[step] as number)
+    : null;
+
+/** How the strip's local read stands: the last finished read's outcome, or `reading` while one is in progress or due. */
+type LocalOutcome = "reading" | "complete" | "failed" | "unstable" | "other";
 
 /**
  * When the shown strip stops being current (revision 19, review R41): at its next boundary (plus 50 ms; a wait capped at six hours re-arms
@@ -247,15 +260,24 @@ const CURRENT_ATTEMPTS = 3;
  * against the strip's OWN evaluation instant, so a boundary crossed while the page slept, or a clock that went back before it, is seen
  * without any data change; offline as online. Each expiry calls `expire`, which asks the local read again; the last complete strip stays as it
  * was until that read completes.
+ *
+ * Revision 20 (review R42): a re-read that does not complete leaves the same strip retained (the page marks it stale), so nothing here waits
+ * for a new strip to go on. While the retained strip is no longer current and the last read failed or kept changing, the paced attempts of
+ * `EXPIRY_RETRIES_MS` ask again on their own; they start afresh with each complete strip and end with the scope (the effects' cleanup).
+ * The return-to-page listeners stay armed for as long as a strip is retained, whatever its reads did, so a wake always asks again.
  */
 function useLocalExpiry(
   read: () => number,
   value: { at: number; next: number | null } | null,
+  outcome: LocalOutcome,
   expire: () => void,
 ): void {
   const latest = useRef({ read, expire });
   latest.current = { read, expire };
+  /** The next paced attempt's place in `EXPIRY_RETRIES_MS`; 0 again for each complete strip. */
+  const step = useRef(0);
   useEffect(() => {
+    step.current = 0;
     if (value === null) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const arm = () => {
@@ -283,6 +305,19 @@ function useLocalExpiry(
       window.removeEventListener("pageshow", resume);
     };
   }, [value]);
+  useEffect(() => {
+    if (value === null) return;
+    if (outcome !== "failed" && outcome !== "unstable") return;
+    // A strip that is still current waits for its boundary like a healthy one; only one that has lapsed is asked again on its own.
+    if (localCurrent(value, latest.current.read())) return;
+    const delay = expiryRetryDelay(step.current);
+    if (delay === null) return;
+    const timer = setTimeout(() => {
+      step.current += 1;
+      latest.current.expire();
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [value, outcome]);
 }
 
 // ---- the server's figures ---------------------------------------------------------------------------------------------------------
@@ -645,7 +680,24 @@ export function StreakPage({ taskId }: { taskId: string }) {
     !noDatabase,
   );
   const value = local.complete?.value ?? null;
-  useLocalExpiry(env.now, value, () => setExpired((n) => n + 1));
+  // How the last local read ended, read with the retained strip exactly as Today does (revision 20, review R42): a read that failed or kept
+  // changing is shown as such whether or not an earlier strip is kept, and a kept strip is then marked as what was last read, never as current
+  // (also while the next attempt is in progress: only a complete read ends the marking).
+  const localError = noDatabase
+    ? null
+    : local.latest === "failed" || local.latest === "unstable"
+      ? local.latest
+      : null;
+  const stale = value !== null && localError !== null;
+  const outcome: LocalOutcome = local.reading
+    ? "reading"
+    : local.latest === "complete" ||
+        local.latest === "failed" ||
+        local.latest === "unstable"
+      ? local.latest
+      : "other";
+  useLocalExpiry(env.now, value, outcome, () => setExpired((n) => n + 1));
+  const retryLocal = () => setAttempt((n) => n + 1);
   const definition = value?.definition ?? null;
   const shared = definition !== null && definition.participation !== "personal";
   const figures = useStreakFigures(taskId, shared);
@@ -655,9 +707,8 @@ export function StreakPage({ taskId }: { taskId: string }) {
   const cells = value?.cells ?? [];
   const counts = tally(cells);
   const title = value?.title ?? null;
-  const failed =
-    value === null &&
-    (local.latest === "failed" || local.latest === "unstable");
+  // Nothing retained: the read's failure is all there is to show.
+  const failed = value === null && localError !== null;
   return (
     <article
       className="flex max-w-[760px] flex-col gap-6"
@@ -685,12 +736,11 @@ export function StreakPage({ taskId }: { taskId: string }) {
               : copy.LOCAL_FAILED}
           </p>
           <span>
-            <Button onClick={() => setAttempt((n) => n + 1)}>
-              {copy.TRY_AGAIN}
-            </Button>
+            <Button onClick={retryLocal}>{copy.TRY_AGAIN}</Button>
           </span>
         </div>
-      ) : value !== null && value.title === null ? (
+      ) : noDatabase || (value !== null && value.title === null) ? (
+        // No database on this device (revision 20, Q7): nothing of the task was ever saved here, which is what "absent" says.
         <p className="text-[13.5px] text-ink-2" data-streak-absent="">
           {STREAK_COPY.absent}
         </p>
@@ -729,7 +779,22 @@ export function StreakPage({ taskId }: { taskId: string }) {
           {STREAK_COPY.dayByDay}
           {env.online ? "" : ` · ${STREAK_COPY.onDevice}`}
         </h2>
-        {value === null && !failed ? (
+        {stale ? (
+          // The kept strip is what was last read, not the current one (revision 20, review R42): its own Try again reads the strip again; the
+          // figures' Try again is theirs.
+          <div className="flex flex-col gap-1" data-streak-stale={localError}>
+            <p className="text-[13px] text-ink-2">
+              {localError === "unstable"
+                ? copy.LOCAL_UNSTABLE
+                : copy.LOCAL_FAILED}
+            </p>
+            <p className="text-[12.5px] text-ink-2">{copy.SHOWING_LAST_READ}</p>
+            <span>
+              <Button onClick={retryLocal}>{copy.TRY_AGAIN}</Button>
+            </span>
+          </div>
+        ) : null}
+        {noDatabase || failed ? null : value === null ? (
           <div aria-busy="true" className="flex flex-wrap gap-1">
             <span className="sr-only">{STREAK_COPY.loading}</span>
             {[0, 1, 2, 3, 4, 5].map((n) => (
@@ -737,9 +802,12 @@ export function StreakPage({ taskId }: { taskId: string }) {
             ))}
           </div>
         ) : cells.length === 0 ? (
-          <p className="text-[13px] text-ink-2" data-streak-empty="">
-            {STREAK_COPY.nothing}
-          </p>
+          // Unknown is not empty: a kept empty strip whose re-read failed says so above, never "Nothing to show yet." (as Today, R9).
+          stale ? null : (
+            <p className="text-[13px] text-ink-2" data-streak-empty="">
+              {STREAK_COPY.nothing}
+            </p>
+          )
         ) : (
           <>
             <p className="text-[13px] text-ink-1" data-streak-tally="">

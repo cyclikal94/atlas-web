@@ -4835,6 +4835,157 @@ export const UNIT_10C = [
     expect: /a clock that goes back before a shown period opened selects again/,
     patch: (t) => sub(t, "  nowMs >= value.at && (", "  (true) && ("),
   },
+  // Revision 20 (review 22 R42; design assessment of 5 November 2026, Q1-Q4 and Q7): the strip's failed or unstable read with a strip retained,
+  // the paced attempts after a lapsed strip's re-read did not complete, their ownership, and the no-database presentation.
+  {
+    id: "MU-3356",
+    title:
+      "R42: WEB-10c A6 (review 22): the old status rule: a failed or unstable read is shown only when no strip is retained (a kept strip is shown as current)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 retained strip, a committed change's re-read fails: the cells are kept and marked as last read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const localError = noDatabase\n    ? null\n",
+        "  const localError =\n    noDatabase || local.complete !== null\n    ? null\n",
+      ),
+  },
+  {
+    id: "MU-3357",
+    title:
+      "R42: WEB-10c A6 (review 22): the stale strip's Try again asks the server's figures again instead of reading the strip",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 figures (offline|ready|error): the stale strip has exactly one Try again of its own/,
+    patch: (t) =>
+      sub(
+        t,
+        "{copy.SHOWING_LAST_READ}</p>\n            <span>\n              <Button onClick={retryLocal}>",
+        "{copy.SHOWING_LAST_READ}</p>\n            <span>\n              <Button onClick={figures.retry}>",
+      ),
+  },
+  {
+    id: "MU-3358",
+    title:
+      "R42: WEB-10c A6 (review 22): no paced attempt after a lapsed strip's re-read failed (the actively viewed page stays stale until a wake)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 scheduled boundary, ONE failed re-read: the lapsed strip is marked at once and the first paced attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const delay = expiryRetryDelay(step.current);\n",
+        "    const delay = null as number | null;\n",
+      ),
+  },
+  {
+    id: "MU-3359",
+    title:
+      "R42: WEB-10c A6 (review 22): the paced attempts are not paced (each is asked at once: the occurrence walk repeated back to back)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 scheduled boundary, (a fault that stays: .*the paced attempts are bounded|ONE failed re-read: .*first paced attempt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      latest.current.expire();\n    }, delay);\n",
+        "      latest.current.expire();\n    }, 0);\n",
+      ),
+  },
+  {
+    id: "MU-3360",
+    title:
+      "R42: WEB-10c A6 (review 22): a paced attempt does not advance the ladder (the first wait repeats for ever while the fault stays)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 scheduled boundary, a fault that stays: the strip stays marked with its Try again and the paced attempts are bounded/,
+    patch: (t) =>
+      sub(
+        t,
+        "      step.current += 1;\n      latest.current.expire();\n",
+        "      latest.current.expire();\n",
+      ),
+  },
+  {
+    id: "MU-3361",
+    title:
+      "R42: WEB-10c A6 (review 22): the ladder never ends (after the last wait the longest one repeats for ever)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /R42 the paced attempts are finite: 2 s, 10 s and 60 s, then none/,
+    patch: (t) =>
+      sub(
+        t,
+        "  step >= 0 && step < EXPIRY_RETRIES_MS.length\n",
+        "  step >= 0 && step < EXPIRY_RETRIES_MS.length + Number.MAX_SAFE_INTEGER\n",
+      ),
+  },
+  {
+    id: "MU-3362",
+    title:
+      "R42: WEB-10c A6 (review 22): a failed re-read detaches the return-to-page listeners (a later wake no longer reads the strip again)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 (focus|visibilitychange|pageshow) after a period (opened|closed) with a fault: .*a later wake with the fault gone is current/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    step.current = 0;\n    if (value === null) return;\n",
+          '    step.current = 0;\n    if (value === null || outcome === "failed") return;\n',
+        ),
+        "  }, [value]);\n",
+        "  }, [value, outcome]);\n",
+      ),
+  },
+  {
+    id: "MU-3363",
+    title:
+      "R42: WEB-10c A6 (review 22): a due paced attempt is not cancelled when the scope changes (another identity or task reads again for it)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 another (identity|task) while a paced attempt is due: the old scope's attempt never runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return () => clearTimeout(timer);\n  }, [value, outcome]);\n",
+        "    void timer;\n  }, [value, outcome]);\n",
+      ),
+  },
+  {
+    id: "MU-3364",
+    title:
+      "R42: WEB-10c A6 (review 22): a kept empty strip whose re-read failed says 'Nothing to show yet.' (unknown shown as empty)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 (focus|visibilitychange|pageshow) after a period opened with a fault: the kept strip is marked at once/,
+    patch: (t) =>
+      sub(t, "          stale ? null : (\n", "          false ? null : (\n"),
+  },
+  {
+    id: "MU-3365",
+    title:
+      "R42: WEB-10c A6 (review 22, Q7): with no database on this device the strip shows its loading skeleton for ever",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 no database on this device: the page says the task is not on this device/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {noDatabase || failed ? null : value === null ? (\n",
+        "        {failed ? null : value === null ? (\n",
+      ),
+  },
 ];
 
 /** Real-engine mutants (all three engines on macOS, one job with its control; `grep` names the native case written for each). */
@@ -4980,6 +5131,37 @@ export const ENGINE_10C = [
         t,
         "      ? await readPosition(item.taskId, permit)\n      : { answer: UNSENT, zone: null };\n",
         "      ? await readPosition(item.taskId, permit)\n      : { answer: UNSENT, zone: null };\n    await new Promise<void>((r) => setTimeout(r, 0));\n",
+      ),
+  },
+  // Revision 20 (review 22 R42; design assessment Q6): the stale strip's status rule and its paced attempt over real IndexedDB.
+  {
+    id: "MU-3366",
+    title:
+      "N-10C-R20a: WEB-10c A6 (review 22's R42): (REAL ENGINE) the old status rule: a kept strip whose re-read failed is shown as current (no stale marking, no local Try again)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-S4 close by focus, a fault that stays",
+    expect: /E-S4 close by focus, a fault that stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const localError = noDatabase\n    ? null\n",
+        "  const localError =\n    noDatabase || local.complete !== null\n    ? null\n",
+      ),
+  },
+  {
+    id: "MU-3367",
+    title:
+      "N-10C-R20b: WEB-10c A6 (review 22's R42): (REAL ENGINE) no paced attempt after a lapsed strip's re-read failed (an actively viewed page stays stale until a wake)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-S4 close scheduled, ONE failed re-read",
+    expect: /E-S4 close scheduled, ONE failed re-read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const delay = expiryRetryDelay(step.current);\n",
+        "    const delay = null as number | null;\n",
       ),
   },
 ];
