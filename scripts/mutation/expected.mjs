@@ -1,8 +1,8 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2680;
-export const EXPECTED_ENGINE = 322;
+export const EXPECTED_UNIT = 2705;
+export const EXPECTED_ENGINE = 326;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
@@ -70,8 +70,16 @@ export const EXPECTED_ENGINE = 322;
 // WEB-11b revision 2 (review 2, R7 and R2, and DA-N1): +7 unit (MU-4151..MU-4157); MU-4135, MU-4148 and MU-4150 re-anchored (same defects); +1 real-engine (MU-4158 over E-R18).
 // WEB-11b revision 3 (review 3, R7: failed-read Try again): +10 unit (MU-4159..MU-4168) and +2 real-engine (MU-4169, MU-4170 over E-R20).
 // WEB-11b revision 4 (review 4, R1: sender name-choice ownership): +7 unit (MU-4171..MU-4177) and +1 real-engine (MU-4178 over E-R21).
+// WEB-19 (the People activity timeline): +17 unit (MU-6101..MU-6117) and +3 real-engine (MU-6151..MU-6153 over E-AC8, E-AC4, E-AC5) in
+// `catalogue-web19.mjs`.
+// WEB-19 revision 1 (review 1, R-1: a refresh remounted the timeline): +8 unit (MU-6118..MU-6125) and +1 real-engine (MU-6154 over E-AC9);
+// MU-6114 and MU-6152 re-anchored (the same defect: the withholding test now sits two spaces further in, in the one flat list).
 // WEB-10c maintenance merge of accepted main 2c4e7fb (5 November 2026): base a7e0b7d (2235 unit, 296 engine) plus WEB-10c (343 unit, 11 engine) plus
 // WEB-11b (63 unit, 12 engine) = 2641 unit, 319 engine, counted from the merged catalogue; IDs do not overlap (MU-3001..MU-3368 against MU-4101..MU-4178).
 // WEB-18: +33 unit (MU-7001..MU-7025, MU-7027..MU-7034; MU-7026 not created: identical to MU-3017) and +3 real-engine (MU-7101..MU-7103) in
 // `catalogue-web18.mjs`; WEB-10c's MU-3018 re-anchored (the same fault over the editor's new start).
 // WEB-18 revision 1 (review 1, F-R2..F-R4): +6 unit (MU-7036..MU-7041; MU-7035 was withdrawn in Running and is not reused).
+// WEB-19 maintenance merge of accepted main 3f8fdf94 (5 November 2026): base 2c4e7fb (2298 unit, 308 engine) plus WEB-19 (25 unit, 4 engine) plus
+// WEB-10c (343 unit, 11 engine) = 2666 unit, 323 engine, counted from the merged catalogue; IDs do not overlap (MU-6101..MU-6154 against MU-3001..MU-3368).
+// WEB-18 revision 2 base merge of accepted main 74b0bac (6 November 2026): base 74b0bac (2666 unit, 323 engine) plus WEB-18 (39 unit,
+// 3 engine) = 2705 unit, 326 engine, counted from the merged catalogue; IDs do not overlap (MU-7001..MU-7103 against MU-6101..MU-6154).
