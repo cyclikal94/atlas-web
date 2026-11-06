@@ -214,6 +214,8 @@ export type EnqueueResult =
    * `source_changed`: a hand-off's form copies are not stored as its caller read them, or a draft already has its local id (`transferDraft`).
    * `denied`: a target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`); nothing was written.
    * `expired`: the request stated the cache's history (`continuity`), and this transaction read another; nothing was written.
+   * `timer_ended`: the request ends a timer session (`expectTimer`) that, as this transaction read it, no longer stands or was observed in
+   * another database incarnation; nothing was written (WEB-10c revision 7, review R32).
    */
   | {
       kind: "refused";
@@ -226,7 +228,8 @@ export type EnqueueResult =
         /** The request's `expectPredecessor` is not the save stored now (`predecessorStands`); nothing was written. */
         | "predecessor_changed"
         | "denied"
-        | "expired";
+        | "expired"
+        | "timer_ended";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -260,6 +263,8 @@ interface EnqueueReads {
   handed: Array<FormRecoveryRow | undefined>;
   /** The draft under `expectPredecessor.localId`, read by key (undefined: none, or the request names none). */
   predecessor: DraftRow | undefined;
+  /** Every draft that targets the session a timer end names (`expectTimer`), or null when the request names none. */
+  timer: DraftRow[] | null;
 }
 
 /** The observation a request states, read again inside the writing transaction (WEB-13a revision 2), or null when it states none. */
@@ -330,6 +335,16 @@ const enqueueSpec = {
         input.request.expectPredecessor === undefined
           ? undefined
           : await reader.get("drafts", input.request.expectPredecessor.localId),
+      // A timer end's precondition (revision 7, R32) is given every draft of the session it names (its start and ends: a short list). The
+      // save's own draft is among them only for a retry of a save already made, which is recognised before the precondition is asked.
+      timer: input.request.expectTimer
+        ? await collectIndex(
+            reader,
+            "drafts",
+            "index_targets",
+            range.only(input.request.expectTimer.session),
+          )
+        : null,
     };
   },
   decide: ({
@@ -397,6 +412,18 @@ const enqueueSpec = {
     // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.
     if (!stillObserved(input.request, reads.observed))
       return { result: { kind: "refused", reason: "changed" } };
+    // So does a timer end: what the person acted on must still stand as stored now, in THIS incarnation (`admit`); one admitted before a
+    // retirement was stored stands, one after it is refused, in any tab (revision 7, R32).
+    const timer = input.request.expectTimer;
+    if (
+      timer &&
+      !timer.admit({
+        incarnationId: input.incarnationId,
+        sync,
+        drafts: reads.timer ?? [],
+      })
+    )
+      return { result: { kind: "refused", reason: "timer_ended" } };
     const over = overBound(input, {
       draft: planned.draft,
       command: planned.command,

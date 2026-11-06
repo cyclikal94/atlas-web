@@ -1,4 +1,4 @@
-# Today and tasks (WEB-10a)
+# Today and tasks (WEB-10a, WEB-10c)
 
 *Written by WEB-10a, 12 October 2026, against the pinned contract `v0.28.0-rc.1`. Consumers: WEB-10b (lists), WEB-10c (materialisation,
 dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people names). Fixture-stage work: `integration_passed` is false.*
@@ -749,7 +749,328 @@ Each can be reproduced with the fixture states of `tests/e2e/fixture.tasks.spec.
 No fixed-recurrence task gets a second occurrence until WEB-10c's `materialise` exists: the server makes only the start-date slot at
 `create_task`. At the connected-app checkpoint recurring tasks would show only on their first day, with the `pending_tasks` notice. The options
 are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal catch-up here by a scope change). Nothing here adds
-`materialise`.
+`materialise`. **Resolved by WEB-10c below** (Today catches listed tasks up automatically).
+
+# Dependencies, timers, rotas, catch-up and streaks (WEB-10c)
+
+*Written by WEB-10c, 25 October 2026, against the pinned contract `v0.29.0-rc.1` (API 0.29, `backend_commit` 4396c99). Fixture-stage work:
+`integration_passed` is false; BE-Q1, BE-B6 and BE-CH1 have no completion record. The released-backend cases (`integration.tasks-10c.spec.ts`)
+are focused evidence, never integration acceptance.*
+
+## What WEB-10c adds
+
+- **Catch-up (materialisation; WEB-04 §3.2/§5.8, WF-TODAY-01 C, CM-350/432–434/440/441, TASK-5a/13/13a).** Today brings every task its current
+  `/daily` answer lists in `pending_tasks` up to date AUTOMATICALLY, one at a time, through the page's runner (`catchup/runner.ts`,
+  `catchup/useCatchUp.ts`), and the banner (`today/CatchUpBanner.tsx`, still `data-pending-tasks`) says so: "Bringing n repeating tasks up to
+  date…", each stop with its reason and "Try again", or, while the app is not compatible with the server, that it waits. A sequence is one
+  task through one day in the task's zone; each `materialise` asks for 16 slots and is followed by the task's position read
+  (`GET /tasks/{id}`'s `materialisation`). It stops (kept, shown, resumed only by "Try again") after 8 counted calls (`bound`), a call that did
+  not move the position (`no_progress`; also a device clock behind the server's), a day beyond today + 31 (`horizon`, nothing sent), a
+  definite refusal (`rejected`: the archived task's `422` is terminal, never "no progress"), `503 slice_capacity` (`capacity`) or three
+  consecutive uncertain answers (`unreachable`, its attempt kept for Try again). The streak's `409 materialisation_required` uses the same
+  runner (trigger `streak`) and reads the streak ONCE more; a second 409 in the visit is a stop. The command path (a queued task command
+  refused with `materialisation_required`) asks the page's catch-up service, held by every task screen, for what the command needs (its
+  task through the day it names, or a day's own task through that day's date) and is retried with its own key under the back-off; it is
+  fixture-only: the released backend raises that code on no command. A stopped catch-up is also shown on the task's own detail
+  (revision 1).
+- **Dependencies (WF-TASK-04, CM-354/423/424, TASK-14/14a).** The detail's "What needs doing first" (`detail/Dependencies.tsx`): the day's
+  preview (`GET /occurrences/{id}/dependencies`, online, one per identity and day, read again on Refresh, on opening the dialog and when this
+  device's own dependency drafts of the day are answered); the dialog's ORDERED LIST (no tree: no edges are published) with Done / To do pills,
+  "You can't tick this off here", the private and strict lines, and a radio group of modes ("Wait until everything's done", "Tick the others off
+  as well" = `complete_prerequisites`, "Start anyway" = `advisory_override`, each disabled with its reason; "Mark done" = `require_satisfied`
+  once everything is done). The record card's gate: online, with something still open, evidence that would complete the day opens the dialog
+  instead of a plain record (the server would refuse it); its entered evidence is kept while "Wait" is chosen and settled only by a successful
+  save of what was submitted. The editor ("Set what this waits for") replaces the WHOLE direct list: it reads the preview again when it opens
+  and admits a save only on that answer (or a later one), online, while the person may edit the day and nothing is private; it starts EMPTY,
+  and saves the chosen list (≤32, unique, never the day itself) with the strict rule. "Keep editing" of a refused set is admitted by the same
+  conditions (revision 1, review R4). Conflicts are
+  said from what the server holds: a refused completion re-reads the preview and says why ("Everything it waits for is done now", …) with
+  "Review and send again" (a supersession) and Discard; a record or a timer's stop refused because something is still open says "This can't be
+  marked done until “X” is"; a refused `set_dependencies` says "Couldn't set what this waits for as sent." (never naming an edge) with "Keep
+  editing" from the SUBMITTED list.
+- **Timers under B6 (WF-TASK-01, CM-355/394/422, TASK-6/6a/25).** For a goal measured in seconds only (`detail/Timer.tsx`): Start (queued,
+  offline-capable), the running session with its elapsed time, Stop and Discard, the 7-day choice ("Record the first 7 days" / "Discard the
+  session"), a closed `close_incomplete` day recorded up to its close, the cause-neutral conflict block ("This timer action couldn't be
+  completed as sent.") and the day's sessions (online, 50 a page). One running session per person per DAY: another day's timer never
+  withholds Start. "Your timers" (`/tasks/timers`, `timers/TimersPage.tsx`, linked from the task list and the timer block): running first, then
+  earlier sessions, a restricted row with its times only, Stop and Discard while `can_modify` (with the detail's 7-day choice and closed-day
+  rule, one act at a time, and no second Stop for a session whose stop is on its way: revision 1, review R3); offline, the kept copy of the
+  last running read (W29), each copied row titled only while its day is still in this device's cache. A current complete read of the day's
+  sessions supersedes an older copy: a copied session it does not list (cancelled) is not running (review R2).
+- **Rotas (WF-TASK-05, CM-356, TASK-15/29/32).** On an Anyone task's participation (`detail/Rota.tsx`): "This turn: {You | username | Someone
+  (abcd…) | Nobody yet}", "Take turns on this task" (`rota_consent`, online only, needs my enrolment: "Join this task first") and, for an
+  editor of the task's details, "Turn order…": the ordered roster (Move up/down, Remove; "n of 8"), who could be added (`eligible_participants`),
+  what that gives ("Already set" from this device's days, "Projected" for the next days, as the server dates them from the schedule's own
+  start, a missing month-day skipped; "Left open" for someone who has not agreed, an editor's empty eligibility list meaning nobody has), and
+  "Save order" (`set_rota`, online only). Both access commands use WEB-10a's attempt model (one key per body, the same key on Try again).
+  Revision 8 (review 8 R33): the page holds each command's attempt (`memory.ts` `startRota`/`settleRota`, per identity), and an answer
+  settles only the attempt it answers, so an earlier change's late answer never ends a later one sent after the person went away and came
+  back. The same change asked again while it is pending joins it (no second request); the screen showing the task when it is answered shows
+  it (and reads the rota again after a success, or a consent conflict); a saved order closes the dialog only if it consumed the order the
+  person is at; Try again is disabled with its reason while the page cannot write. Revision 9 (review 9 R34): each order attempt carries the
+  input it was saved from (the kept editor's key, session and revision, `RotaOrigin`), kept through an uncertain answer; Try again resends
+  the attempt's body and key and consumes the editor's input only if that is still the input it was saved from, so an order edited since
+  stays open, unsaved, with "Your earlier order was saved. Your newer changes aren't saved yet." (provisional copy).
+- **Streak (WF-TASK-06, CM-368/395, TASK-5).** `/tasks/$taskId/streak` (`streak/StreakPage.tsx`, the detail's "Streak" link): the server's
+  current and best runs (both scopes for a shared task: "Shared" and "You"); a joint null is "Withheld — someone keeps their part private",
+  a personal null "Unknown", never 0; the last 30 opened periods of MY result from this device, oldest first, five states each with a mark and a
+  word (Done, Missed, Still open, No record, Skipped), and "Last 30 {unit}: {done}/{total}, {missed} missed".
+  Revision 20 (review 22's R42): a local read that failed or kept changing is shown whether or not a strip is kept. With none kept, the
+  read's failure and its Try again; with one kept, the strip stays, marked "Showing what was last read on this device." with a Try again of
+  its own (the figures' Try again stays theirs), exactly as Today, the detail, the lists and the form (decision 31); an empty kept strip is
+  then not "Nothing to show yet.". When the kept strip's re-read at a boundary or a wake does not complete, paced attempts ask again after
+  2 s, 10 s and 60 s with no event (one coherent read each), then only a wake, a commit or Try again; a complete read starts them afresh and
+  a scope change or leaving the page ends them. With no database on this device the page says "This task isn't on this device."
+
+## Public interface added
+
+| Export / module | What it is |
+| --- | --- |
+| `model/contract.ts` | `DependencyPreview`, `DependencyItem`, `TimerSession`/`TimerPage`, `AccountTimerSession`/`AccountTimerPage`, `RotaState`, `TaskStreak`, `TaskResult` and their strict parsers (`parseDependencyPreview`, `parseTimerPage`, `parseAccountTimerPage`, `parseAccountTimer`, `parseRotaState`, `parseStreak`, `parseTaskResult`). |
+| `api.ts` | `readDependencies`, `readTimers`, `readAccountTimers`, `readRota`, `readStreak`, `materialise(command, key)` (the runner only) and `access(command, key)` (`/task-access-commands`; `enrol` is a call of it). `uncertain` may carry the Atlas code of a 5xx (`slice_capacity`). |
+| `model/commands.ts` | `setDependencies`, `completeDependencies`, `startTimer`, `stopTimer`, `cancelTimer`; `QUEUED_KINDS` gains the five kinds; `pendingEvidenceListOf` (a record's evidence, and a queued completion's evidence on each day it completes, under the SERVER's entry ids); `pendingOn` (my pending evidence on a day without what its synced stream lists). |
+| `model/ids.ts` | `completionEntryId(operation, occurrence, actor)` and `uuidV5Sync` (revision 1): the server's id of a completion's entry, computed synchronously. |
+| `catchup/useCatchUp.ts` | `useCatchUpService()` (revision 1): the page's catch-up service, held by every task screen. |
+| `model/materialise.ts`, `dependencies.ts`, `timers.ts`, `rota.ts`, `streak.ts` | The pure models (each unit-tested). |
+| `register.ts` | Descriptions and stored-draft admission for the five kinds; no `readCurrent` or `rebuild` (WF-QUEUE-02 offers discard; the detail offers the review). |
+
+### Obligations of a consumer
+
+- A queued dependency or timer command goes through the builders here (their targets and version bases are the server's: a stop is checked
+  against the SESSION's version; a start, stop and discard raise my stream; a completion raises my streams of the days it completes).
+- `set_rota`, `rota_consent` and `materialise` are never queued; an access command is sent online with one key per body.
+- Only the page's runner sends `materialise` (`runnerOf`/`useCatchUp`): another caller would bypass the account's lock and the W28 record.
+
+## Decisions taken (D-10c-1 … D-10c-12, from the approved plan) and what Running added
+
+1. **D-10c-1** The catch-up is an online feature service, not outbox drafts; the attempt (key and body) is written durably BEFORE it is sent
+   (`submitting`), so an uncertain answer, a reload or a takeover resends the same key; after a success only the position is read
+   (`awaiting_position_read`), never another `materialise`. A sequence adopted in `awaiting_position_read` takes the first read the new page
+   makes as its position read (it was asked after the call was answered): one read, no POST (I-10C-M4).
+2. **D-10c-2** W28's compare-and-set plans (data layer, no task semantics); every write is guarded like a response (INC, CLS, EPO through
+   `AccountService.commit`), the person's Try again included (stronger than the plan's INC-only, for the same identity guarantees).
+3. **D-10c-3** One runner per account: Web Lock `atlas-materialise:<account>`, REQUESTED AND WAITED FOR (not `ifAvailable`): a page that does
+   not hold it shows the durable records and takes over when the holder goes. Never `locks.query()`. Note (found natively): the session layer
+   answers one window's requests while another window's request is in flight, so a held `materialise` also holds another tab's reads.
+4. **D-10c-4** The running-timer copy (W29) is the last complete FIRST page of `GET /timer-sessions?state=running`, per account database
+   (revision 2: ordered by the database's observation order, not the clock, and corrected by a day's own read; see below).
+   Running added: the detail also keeps, in page memory per identity and day, the last complete read of the day's own sessions, so a session
+   seen running stays shown offline ("Last checked …") after its start was acknowledged (found by I-10C-TM3; jsdom regression test).
+5. **D-10c-5** Today catches up automatically; "Later" is not offered; at most one automatic sequence per `(task, day)` per page; offline
+   Today shows no banner (WEB-10a decision 16: the day is the device's), and the runner waits for the connection.
+6. **D-10c-6** An ordered list, not a tree (no edges published); a decorative `aria-hidden` chain from 1280 px.
+7. **D-10c-7** The editor replaces the whole list, opens only with nothing private, starts empty.
+8. **D-10c-8** The strip is mine and from this device; run dates are not shown.
+9. **D-10c-9** Rota writes use the attempt model, online only.
+10. **D-10c-10** Prerequisites are ordering targets; a completion raises the streams it writes. A prerequisite stream this device does not
+    hold has no known base and is NOT a target (an enqueue would be refused `no_base`); the next sync brings its version.
+11. **D-10c-11** Rota labels: "You", usernames from the sharing defaults' households, else "Someone (abcd…)" (WEB-11a replaces them).
+12. **D-10c-12** `/tasks/timers` under the task routes; entry points are the task list and the timer block.
+
+Also: a discarded or rejected timer draft's version record of its session is removed by the existing recompute (no other draft targets it,
+nothing cached), so a later stop seeds from the authoritative version; no new data-layer retention rule was needed (plan §4.3 "Retention").
+The `materialisation_required` handler is registered when the task screens load (`screens.tsx`); the fixture outbox decides `409`s with its
+own registry, so the command path has jsdom evidence only (its journey over the production dispatcher: `catchup-conflicts.test.ts`).
+
+### Revision 1 (independent review of 25 October 2026, R1–R9)
+
+- **R1, paused work resumes.** A sequence whose work stops part-way for a reason that can clear (offline, not compatible, the session held,
+  a write not applied, a thrown read or store) is PARKED with its key and taken up again by `kick()` (connectivity, compatibility or the
+  binding moved), by `ensure()` of the task (Today's next read) or by "Try again": the stored attempt is resent with its own key, or only its
+  position is read. A genuine stop is never parked, so it is never restarted.
+- **R2, a complete read and the copy.** A current COMPLETE read of the day's sessions (issued no earlier than the copy's read) supersedes the
+  copy: a copied session it does not list is not running (the server omits a cancelled one). A copy taken after the read, a partial read or
+  none (offline) leaves the copy standing; this device's unsettled start stays until its draft settles.
+- **R3, the account list's Stop.** The detail's rules at the list's entry point: beyond 7 days it asks ("Record the first 7 days" / "Discard
+  the session") and queues nothing first; a closed day (its occurrence on this device) records up to its close and says so; one act at a
+  time; a session whose stop or discard is on its way shows its mark and is offered no second one.
+- **R4, one admission for every save of the editor.** As above: a fresh preview read when the editor opens, for a new list and "Keep editing".
+- **R5, the server's dates.** `nextDates` derives every candidate from the schedule's own start (`schedule.rs` `slots`), skipping a day that
+  does not exist (31 April) instead of clamping; the maintained oracle is the backend's own test (`domain.rs`).
+- **R6, a completion's entries by the server's ids.** UUIDv5(operation key = the draft's `local_id`, "dependency-completion:<occurrence>:<me>"),
+  computed synchronously (`uuidV5Sync`, cross-checked against WebCrypto and Python's `uuid5`). A landed completion is counted once on the row,
+  the history and the streak strip (`pendingOn`), as WEB-10a's F4 requires; the earlier synthetic ids are gone.
+- **R7, a known empty eligibility list.** For an editor (who alone sees the turn order) an empty `eligible_participants` means nobody has
+  joined and agreed now: every projected turn is "Left open".
+- **R8, the command path on every task screen.** The catch-up service is held by Today, the task list and detail, the editors, the streak and
+  the account's timers; an occurrence-level command's need is its day's task through that day's date (from the cache; a day not held cannot be
+  derived and keeps the generic rule); the command is resent under the dispatcher's own back-off, after the sequence completes, with the SAME
+  key; a stop is shown on the task's detail with "Try again" and is never restarted by a resend.
+- **R9, coverage.** I-10C-TM5 (a first Anyone timer and a completion, each held for a defaults review, against the released backend),
+  I-10C-SU1 check 6 (another participant's completion on a stream the schedule's owner cannot see triggers no successor through a whole
+  reconciliation; control: once that stream is shared, exactly one, dated from it, as the server's own test), a late rota answer across an
+  identity change (jsdom, screen and hook level) and the native E-D1/E-R1 identity schedules with their controls. The earlier claims that
+  I-TM5 was folded into another case and that `catchup-conflicts.test.ts` covered E-M3's journey were wrong and are corrected.
+- **Found by I-10C-TM5 (generic data layer).** A draft that SEEDED a version-checked target (a first Anyone stream: a `record`'s primary, a
+  `start_timer`'s or `complete_dependencies`' side effect) and was refused `defaults_changed` could not be confirmed: the supersession
+  retires the draft's contribution, and the rebuilt targets (`targetsOf`) carried no seed, so it was refused `no_base` and could only be
+  discarded (present at the accepted base for WEB-10a's first Anyone record too). Each rebuilt target now carries the draft's own base as its
+  seed (`docs/data-layer.md`).
+
+### Revision 2 (independent Review 2 of 25 October 2026, R10–R13; the design assessment's DA-T1, DA-T2, DA-M1, DA-H1)
+
+- **R10, one read owns what a timer screen shows.** The detail's day sessions (`useDaySessions`) and each section of "Your timers"
+  (`useSection`, running and earlier sessions separately) have an owner: a new read (mount, another identity, day or connection, an answered
+  draft, Retry, a change of mine) takes over at once, so an earlier read's answer, success or failure, is dropped before it reaches the
+  screen, the detail's page memory or the copy; a further page (Load more) is accepted only for the read and cursor that asked for it, one
+  at a time. The page memory keeps the read issued last on the page (a remounted block cannot displace it). "Your timers" also reads again
+  when a timer draft of mine moves on or leaves the outbox (this tab's or another's).
+- **R11, what a partial page lists is known.** Every session the detail accepted, on a first page or a later one, counts at once: one listed
+  running withholds Start and offers Stop and Discard; one listed finished is not running whatever the copy says. Only ABSENCE needs the
+  complete list (R2's rule). Offline the page memory keeps the last accepted read, complete or not, with "Last checked".
+- **DA-T2 / R10, an order that is not the clock.** Every timer read that may change the kept copy (W29) is given its place in the database's
+  observation order before it is sent (`issueTimerOrder`, a counter in its own transaction), and the copy carries its read's place, so two
+  tabs never tie and a clock that goes back decides nothing. `read_at` is shown ("Last checked"), never compared. A complete day read
+  supersedes the copy only when it was issued after it (R2 now compares these places).
+- **DA-T1, the kept copy is corrected by the day's read.** Each accepted page of the detail's read corrects W29 under its place: a session it
+  lists finished leaves the copy; once complete and later than the copy, a session of that day it does not list leaves it too; and the
+  copy's fence moves to the read's place, so an account read issued earlier can no longer restore it (in this tab, another or after a
+  reload). A copy written before revision 2 (format 1) reads as place 0: the first ordered read replaces or corrects it.
+- **R12, the completion's mode is admitted on the current preview.** One rule (`admittedMode`) decides the choice shown, the button and
+  the send: a mode remembered from a refused draft ("Start anyway" now strict, "Tick the others off as well" now private or not completable,
+  a plain completion once something is open again) is shown as "Wait" with its reason and never sent. The dialog acts only on the answer of
+  the read it asked when it opened (before it: "Checking what it waits for…"), and the send checks again after its own awaits: a newer
+  preview, another identity or binding, or the connection lost meanwhile queues and replaces nothing ("What this waits for changed while
+  saving. Check it and choose again."), keeping the entered evidence and the refused draft. The editor's "answer of the opening read" uses
+  the same comparison.
+- **R13 / DA-M1, a stopped discovery stays stopped.** The first read of a task's catch-up (its zone and position, before a day is known)
+  keeps its failures and its stop in W28's discovery entry (`sync_state.materialise_discovery`), written before the next read: a pause, a
+  reload or another tab's turn carries on from the count reached, and a stop (three uncertain answers, or a definite refusal) admits no
+  automatic read or send, whichever trigger asks (Today's list, the streak, a command's retry, a kick). "Try again" alone admits a fresh
+  budget, once: it is made under the account's lock against the stop it was pressed on, so a second press (here or in another tab) adds
+  nothing. A stop whose record cannot be written is kept in this page's memory and refuses automatic work alike. The stop is shown on Today,
+  the task's detail and its streak from the record (any page's); the streak does not read past it as if the catch-up had finished. A
+  genuine pause (offline, not compatible, the session held) is not a stop: it resumes (R1).
+- **Retry policy (for the product/design owner, not decided here).** WEB-04 §5.11 lets a genuine `online` event resume a transient-duration
+  pause; this card keeps the stricter rule the review requires: three uncertain first reads (network, 5xx or an unreadable answer alike) stop
+  until Try again. Whether those three should be told apart is open.
+- **DA-H1, harness.** The maintained "a read that is not complete decides nothing" case used a page the released endpoint never answers
+  (an empty page with a cursor); it now uses a contract-valid full page (checked by `parseTimerPage`), then a failed and a completed last page.
+
+## Tests
+
+jsdom: `materialise-model`, `catchup-runner` (bound, no progress, horizon, uncertain with one key, a reload in each phase, two runners and
+one lock, an identity that ends, offline), `catchup-banner`, `catchup-conflicts`, `streak-model`, `streak-page`, `dependency-model`,
+`dependency-dialog`, `commands-10c`, `timer-block`, `timer-model` (revision 1), `timers-page`, `rota`, `ids`; data: `materialise-plans`
+(W28/W29), `outbox-defaults-review` (the seeded supersession, revision 1). Native (fixture, three engines): `fixture.tasks-10c.spec.ts` E-M1,
+E-M2 (two), E-M4, E-S1, E-S2 (390, 1180, 1440), E-D1 (1440, 390, 1180), E-TM1, E-R1, and (revision 1) E-D1/E-R1 identity with their two
+controls. Released backend: `integration.tasks-10c.spec.ts` (20 cases, in the `tasks` stack: revision 1 adds I-10C-TM5's two and I-10C-SU1
+check 6). Mutants: `scripts/mutation/catalogue-web10c.mjs` (MU-3001…MU-3035 unit, MU-3051/3052/3054 real-engine; revision 1 adds
+MU-3036…MU-3050 and MU-3060…MU-3065, one or more per correction; revision 2 adds MU-3066…MU-3084; MU-10C-25, MU-10C-30 and N-10C-03 retired
+with their reasons). Revision 2: the reviewer's T1/T2/T3/D1/D2/M1 ported into `timer-block`, `timers-page`, `dependency-dialog` and
+`catchup-runner` with their controls, the caller schedules of the design assessment (partial pages, old continuations and failures, the
+copy's order and corrections, the opening read and the send's preparation, discovery pauses, reloads, two Try agains, a failed record), and
+native E-M5 and E-TM2. Revision 3 (Review 3 R14–R18, design assessment DA-T3): the reviewer's T4, D3, M2, M3, R4 and R4-P ported with
+their controls into `timer-block`, `dependency-dialog`, `catchup-runner` and `rota`; the observation rule in both directions (`timer-model`),
+the day scopes, bounds, floor and admission (`materialise-plans`), root admission at every entry point, discovery admission and binding
+schedules, rota read ownership; native E-TM3 (another tab's day read reaches this tab's kept read); MU-3085…MU-3101. Revision 4 (Review 4
+R19–R22): the reviewer's T5, T6, M4, M5 and S1 ported with their controls into `timers-page`, `timer-block`, `catchup-runner`,
+`catchup-banner` and `streak-page`; the one timer authority (`stillRunning` in `timer-model`; the live list, the page's own history, a
+retirement while an act waits), the sequence revision and the combined lift, the latest row by task and the authority snapshot
+(`materialise-plans`), Try again naming the stop shown, the streak read's ownership across offline and reconnect; native E-TM4 (another
+tab's day read retires the live account row), E-M6 (two real tabs, one real lock: one fresh budget) and E-M7 (a stop behind 100 other
+tasks' rows in real IndexedDB); MU-3102…MU-3120. Revision 5 (Review 5 R23–R26, design assessment of 28 October 2026): the reviewer's T7,
+T8, M6 and M7 ported verbatim and M8 with its displayed token built as the screens build it, each with its control, into `timers-page`,
+`catchup-banner` and `catchup-runner`; the account's complete observation surviving a partial page, history pages (restricted rows, a
+later page) as finished evidence offline, an act re-checking what is STORED after its waits, the detail judging alike (`timer-block`,
+`timer-model`), the finished record's bound, refusal and loss (`materialise-plans`); exact-day recovery on Today, the detail and the
+streak, retention until a position covers a row's own day, admission of a new row, another day of a task as its own work, and
+non-repeating Try again identities (discovery claim, the discovery stop beside a day's stop, a memory stop's id, "none", a claim given to
+an older stop); MU-3121…MU-3145. Revision 6 (Review 6 R27–R30, design assessment of 28 October 2026): the reviewer's T9 and M11 ported verbatim, M9 and
+M10 with labelled adaptations (M9 presses "Show earlier days"; M10 scripts the resumed day's resend and its position read), each with its
+control, into `timer-block`, `catchup-banner` and `catchup-runner`; the inclusive terminal loss at its boundaries for both resolvers
+(`timer-model`), the account's list at the loss boundary (`timers-page`), refusal, eviction, a day read's refusal at the high-water and
+the settlement of older records (`materialise-plans`); exact selected and asked days, the longer window and its focus, Today's link to the
+task page; another day asked while work is parked or active, the same day coalesced, a press leaving other paused work, the stop of a
+refused row naming its day; the absence a press saw, before the press and under the lock; MU-3146…MU-3166. Revision 7 (Review 7 R31/R32,
+design assessment of 28 October 2026): the reviewer's T11 and T10 ported (formatting and a type-only option removed), each with its control,
+into `timer-block`; a failed first page asked again keeping the accepted read's order, offline and a remount after a retirement, a read of
+another bound incarnation hidden and read again (a store-level double); every end entry (Discard, a closed day, both 7-day choices) against
+a stored retirement, an end already queued by another page, this device's unsettled start, and a retirement stored while the save waits
+for its admission (`timer-block`, `timers-page`); the list's own re-check still deciding that a session beyond 7 days recorded finished is not
+asked about (`timers-page`, keeping MU-3132 observable); `endStands`, `RunningSession.order` and `withEndExpectation` (another incarnation,
+another session, a start; `timer-model`); the transactional precondition, its refusal writing nothing, the retry of a save already made,
+every re-admission and the snapshot (`tests/data/outbox-timer-expectation.test.ts`); MU-3167…MU-3182. Revision 8 (Review 8 R33, design
+assessment of 28 October 2026): the reviewer's T13 (consent) and T15 (order) ported into `rota.test.tsx`, each with its pending and
+uncertain controls, the order's conflict, refusal and uncertain answers added; the screen showing the task told of an answer to a change
+another mount sent (and its success control read again); an answer given before the screen mounted not said again, its uncertain change
+keeping its key; the same change asked again while pending joined; a save edited past while pending (and its unedited control); Try again
+while the page cannot write; the owner's own transitions (an answer settles its attempt, not a body; another identity and a later activation;
+one command beside the other); MU-3183…MU-3193, MU-3026 re-anchored. Revision 9 (Review 9 R34/R35, design assessment of 28 October 2026):
+the reviewer's R34 witness and its three controls ported into `rota.test.tsx` (with the reopen observation), repeated uncertainty, an edit
+while Try again is on its way, an edit away and back (and an explicit Save of the same order, one key), a visit to the sync screens, and the
+owner's origin transitions; native E-R3 (`fixture.tasks-10c.spec.ts`: witness and unchanged control, close/reopen, a full reload sending
+nothing); MU-3194…MU-3199, MU-3188 re-anchored. R35 (harness): `fixture.tasks.spec.ts`'s `commitDelta` publishes its page on the fixture
+server (`tests/e2e/published-delta.ts`: the answer to every poll from a cursor before it, until the writer asks from its own) and waits for
+the writer's commit (its applied revision; for `commitProgress`, the exact progress row), so a page lost to a competing empty answer can
+no longer pass for a commit (E-T15, E-T17, E-T20, E-T21, E-T22, E-T41); self-qualified in `tests/static/published-delta.test.ts`.
+
+## Limits (WEB-10c)
+
+- **No dependency edges and no direct-list read (E-1, E-2).** The map, "Needs X too" and the hierarchy keys cannot be built; the editor
+  cannot show the current direct list and replaces it whole.
+- **Expansion limit.** Over 200 preview nodes the released backend answers a generic `500` (`ExpansionLimit` has no error mapping; E-7);
+  shown as "Couldn't show what this waits for" with the request ID.
+- **Request cost** (not profiled here; WEB-09c): one preview read per day shown, two streak reads per visit, up to 16 calls and reads per
+  pending task, one session read per timer day shown.
+- **Command path fixture-only (E-8)**; TASK-30 checks 3 and 5 are backend-internal (E-9). A command on a day this device does not hold
+  cannot have its need derived (its task and date come from the cache): it is retried under the back-off as before, with nothing asked.
+- **Revision 3 bounds.** A day's timer observation is kept for at most 100 days and 100 sessions each way; beyond them (and when the
+  quota ledger refuses the record) the floor retires older day reads seen running instead, so a page kept open for very long may show a
+  running session as not running offline until it reads again (the conservative side). A task's catch-up record is admitted before its
+  first read: on a device the quota ledger refuses, the task shows "This device is short of storage space…" with Try again and nothing is
+  sent. Pages without Web Locks each admit the read they send; the later admission wins and the other's answer records nothing.
+- **Revision 4.** Every running timer row, wherever shown, is judged by the day scopes and the floor of one snapshot: while that snapshot
+  is not read (a moment at mount, or a store that fails), no ordered server session is offered, and below the floor the account list and
+  the detail both hide a copied session (the conservative side) until a newer read. A "Try again" lifts only the stop it was pressed on; a
+  stop that came back meanwhile shows again and needs its own press. Today, the detail and the streak read each task's own latest catch-up
+  record, in reads of at most 100 tasks.
+- **Revision 5.** A session any read listed finished (the account's history, a day's read) is not shown running anywhere, online, offline
+  or after a reload; at most 200 such sessions are kept, and once one goes, a session of unknown order is not offered either (the
+  conservative side). An act re-checks what is stored after its waits, so a Stop of a session recorded finished meanwhile queues
+  nothing. A catch-up record is kept until a position read covers its own day, so a task stopped on many days keeps one record per day; a
+  new day's record is admitted first (on a device the quota ledger refuses, "This device is short of storage space…" with Try again, and
+  nothing is sent). Today and the streak show the stop of the task's own today once this page has read the task, else its latest days as
+  read; the detail shows every retained stop of its latest eight days and today, each for its day. A Try again names the stop shown by
+  identities that never recur; one pressed on a stop no longer standing exactly so does nothing (the screen shows what stands now).
+- **Revision 6.** Once a finished session could not be kept, no server session read at or before the order it was recorded at is offered
+  (the conservative side, also for unrelated sessions read then: a loss names no session) until a later read. The detail shows its
+  latest eight days, the selected day and the days a command asked for; while the task holds more, "Show earlier days" shows eight more
+  each time, until every retained day is shown, each with its own Try again. Today offers the task's page while the task's day is not
+  known and it holds more days than were read. Resuming a task's paused work never stands in for another day asked of it. A Try again on
+  a day's stop that saw no discovery stop does nothing if one was recorded meanwhile (the screen then shows it).
+- **Revision 7.** A day's sessions that failed to load (a further page, or the first page read again) leave what was read before as it
+  was read: a session a later complete observation retired stays retired. A read of a database that is no longer the one bound is not
+  shown; the day is read again. Stop, Discard and the 7-day choices, on the detail and the account list, are admitted by the save itself
+  against what is stored at that moment: one pressed on a session recorded finished (or no longer confirmable) by another page, before this
+  screen heard of it, saves nothing and says "This timer may already have ended. Nothing was saved." (provisional copy); an end already on
+  its way refuses another. This device's own unsettled start can still be stopped or discarded.
+- **Revision 8.** A rota change's attempt is page memory, per identity (as before): a reload or another identity forgets it, and nothing is
+  resent automatically; separate tabs hold separate attempts. A change answered before the task screen mounted is not said again there (an
+  uncertain one is still sent with its key when the same change is made again). An order saved while the person had edited it further
+  leaves the dialog open on the newer edit (it is not merged; Save then meets the saved order's version).
+- **Revision 9.** The same holds after Try again: its success consumes only the order the attempt was saved from (an edit since, an edit
+  away and back included, stays open, unsaved, and says so). The origin is page memory with the attempt: a reload forgets both (no request
+  is resent and the newer order is not recovered).
+- **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
+  compatibility are those last rendered (a pause is taken up again when a task screen renders).
+
+## Deviations and additions for the connected-app checkpoint (WEB-10c)
+
+| Item | Route and fixture state |
+| --- | --- |
+| The catch-up banner's words and reasons; no "Later" | `/today` with `pending_tasks` (jsdom `catchup-banner.test.tsx`, native E-M1) |
+| "What needs doing first" row, mode labels, disabled reasons, "A task not on this device yet", the strict line | `/tasks/<id>` with a preview (jsdom `dependency-dialog.test.tsx`, native E-D1) |
+| The editor's replace wording, "Don't allow starting early", "n of 32" | `/tasks/<id>` → Set what this waits for |
+| Timer words ("Not used for this task…", the 7-day and closed-day choices, the conflict block, "Last checked …") | `/tasks/<id>` of a seconds task (jsdom `timer-block.test.tsx`) |
+| Revision 2: the dependency dialog's "Checking what it waits for…" until its opening read answers, and "What this waits for changed while saving. Check it and choose again." | `/tasks/<id>` → See what needs doing first (jsdom `dependency-dialog.test.tsx`) |
+| Revision 3: "Mark done: Record this day's progress on its card first." (and "Start anyway: …" the same) when the day's own progress is not entered | `/tasks/<id>` of a numeric task → See what needs doing first (jsdom `dependency-dialog.test.tsx`) |
+| Revision 3: the catch-up reason "This device is short of storage space, so Atlas couldn't keep track of catching up. Free some space, then try again." | `/today` with `pending_tasks` and a refusing quota ledger (the runner state in jsdom `catchup-runner.test.ts`; the words themselves are rendered by no test, nor natively) |
+| "Your timers" in the task list and the timer block; "Restricted — sharing changed since this session" | `/tasks/timers` (native E-TM1) |
+| Rota labels ("You", usernames, "Someone (abcd…)"), "Take turns on this task", the conflict without the other person's name, "Left open", "Projected" | `/tasks/<id>` of an Anyone task (jsdom `rota.test.tsx`, native E-R1) |
+| Streak tiles "Shared" and "You", unit words, five strip states including "Skipped", no run dates, "On this device" offline | `/tasks/<id>/streak` (jsdom `streak-page.test.tsx`, native E-S2) |
+| Revision 20: the streak strip kept after a local read failed or kept changing: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Showing what was last read on this device." and its own "Try again" in "Day by day"; with no database on this device "This task isn't on this device." (existing copy, reused) | `/tasks/<id>/streak` with a failing occurrence read (jsdom `streak-page.test.tsx` R42 block, native E-S4) |
+| Revision 7: "This timer may already have ended. Nothing was saved." when Stop, Discard or a 7-day choice meets a retirement stored before the save | `/tasks/<id>` of a seconds task, or `/tasks/timers`, after another page recorded the session finished (jsdom `timer-block.test.tsx`; not rendered natively) |
 
 ## Calendar anchors and review moves (WEB-13b)
 

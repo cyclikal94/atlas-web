@@ -312,11 +312,13 @@ export const UNIT_13B_R1 = [
     file: TASKS_API,
     tests: [T_SECTION],
     expect: /a held read answered not_sent while the person leaves the task/,
+    // Re-anchored at the base merge of main 74b0bac (6 November 2026): `get` takes WEB-10c's `admitted` before `live`, so the call names
+    // both; the same defect (the binding read made without its caller's lifetime).
     patch: (t) =>
       sub(
         t,
-        '      get("/tasks/{id}/anchor", { path: { id: taskId } }, parseBinding, live),\n',
-        '      get("/tasks/{id}/anchor", { path: { id: taskId } }, parseBinding),\n',
+        "        parseBinding,\n        undefined,\n        live,\n      ),\n",
+        "        parseBinding,\n      ),\n",
       ),
   },
   {

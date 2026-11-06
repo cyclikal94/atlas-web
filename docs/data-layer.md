@@ -116,6 +116,12 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
 | W27 | `stageDeltaSegment` (WEB-09c: one non-final segment of a delta revision into `delta_staging`; the final segment and the activation are W1's) | INC, CLS, CAS, GEN, OWN, EPO |
+| W28 | `writeMaterialiseSequence`, `deleteSatisfiedSequences` (revision 5; it replaces revision 1's `pruneMaterialiseSequences`) (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key, and since revision 4 its `revision`; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop; revision 3: and its admitted read's `attempt`, a new task's entry admitted as a cache write); `liftMaterialiseStops` (revision 4: "Try again" over a stopped discovery entry and the day's stopped sequence as ONE compare-and-set); revision 5: a NEW row is admitted as a cache write, and a row is removed only when a position read covers its own day | INC, CLS, EPO |
+| W29 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; revision 3: the day's observation in `sync_state.timer_scopes`, admitted as a cache write, or the floor; revision 4: the correction applies whatever the fence; revision 5: the account's latest complete observation in `sync_state.timer_account` and the finished sessions in `sync_state.timer_ended`); `recordTimerEnded` (revision 5: the account history's finished sessions, admitted as a cache write) | INC, CLS, EPO |
+
+WEB-10c's writers were W27 (the catch-up sequences) and W28 (the timer copy) until the base merge of 5 November 2026: WEB-09c's segmented
+delivery reached the accepted base first as W27, so WEB-10c's became W28 and W29 with no change to what they write or how they are
+guarded. WEB-10c reports and reviews written before that merge use the earlier numbers.
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -845,6 +851,144 @@ the current epoch is shown with no request, one persisted for another epoch is n
   otherwise). Only a supersession built on a reviewed read passes it.
 * **Departure (D-10a-2).** WEB-04 D's `by_kind_date` stays empty: no key deriver is registered for tasks (one registered now would leave existing caches
   inconsistent without a backfill). The offline day is the bounded walk above.
+
+## The catch-up sequences and the running-timer copy (WEB-10c)
+
+*Added by WEB-10c, 25 October 2026. Generic records: the data layer stores and compares them and knows no task semantics. The consumer is
+`docs/tasks.md` (WEB-10c).*
+
+* **W28, `plans/materialise.ts`.** The reserved `materialise_sequences` store (created empty by WEB-08c, key `[task_id+through_date]`)
+  holds one row per task and day being caught up (`MaterialiseSequenceRow`: generation, phase, attempt `{key, body}`, counters, last known
+  position, stop). `writeMaterialiseSequence` is a COMPARE-AND-SET: it applies only while the stored row is the one the caller decided on
+  (`SequenceExpectation`: absent, or the row's generation, phase, `read_seq` and attempt key) and otherwise writes nothing and answers
+  `stale` with what is stored, so two runners, a reload or a late answer never overwrite a newer decision. The read is wrapped (`{ row }`)
+  so that `guardedPlan`'s "an undefined read is a drop" rule does not drop the write of a row that is absent. `pruneMaterialiseSequences`
+  removes a task's rows for earlier days that are not running. Read plans `readMaterialiseSequence` and `readMaterialiseSequences` (at most
+  `SEQUENCE_WINDOW` = 100). Every write goes through `AccountService.commit` with INC, CLS and EPO, the person's "Try again" included.
+  Revision 1 classed the write fixed-size because rows were pruned; revision 5 keeps unsatisfied rows, so a new row is admitted (below).
+* **W29, `plans/timer-copy.ts`.** `sync_state.timer_copy` (optional, no migration; the precedent of W14's `sync_state.defaults`): ONE
+  record `{ format: 1, read_at, complete, running }` (format 2 adds `order` since revision 2) holding at most `TIMER_COPY_ROWS` = 50 opaque rows, the last COMPLETE first page of
+  `GET /timer-sessions?state=running`. Response-derived (INC, CLS, EPO); its growth is admitted like a cache page (the caller reserves the
+  record's bytes, `ADMITTED`), and a copy of an earlier read than the one applied is not written over it (revision 2: by the
+  observation order below, no longer by `read_at`). `parseTimerCopy` reads it
+  strictly; the task slice parses each row again.
+* **Revision 2: order, fence and correction (W29; Review 2's R10, design assessment DA-T1/DA-T2).** `issueTimerOrder` hands a timer read
+  its place in the database's observation order BEFORE it is sent (`sync_state.timer_order`, moved in its own transaction: two tabs never
+  share a place, and no clock decides). The copy is format 2 (`{ format: 2, order, read_at, complete, running }`): `order` is its read's place
+  and `read_at` is display only. `sync_state.timer_fence` is the latest place applied to the copy: `writeTimerCopy` refuses a replacement of
+  that place or an earlier one (removal keeps the fence). `reconcileTimerCopy` is a day read's correction: it removes the rows the slice's
+  `drop(row, newer)` names (`newer`: the read was issued after the copy's own) and moves the fence to its place (a later page of the same
+  read, which keeps its first page's place, may still correct). It only removes rows, so it is not admitted through the quota ledger. A
+  format-1 copy (or an order that does not read) is place 0, older than every ordered read. A read given no place (no service, another
+  identity, a store failure) neither replaces nor corrects the copy.
+* **Revision 2: the discovery entries (W28; Review 2's R13, design assessment DA-M1).** `sync_state.materialise_discovery[task]` =
+  `{ retry, failures, stop }` for a catch-up whose first read (before a day, so before any sequence row) has failed: written before the next
+  read, so a pause, a reload or another tab carries on from the count; a stop is read by every caller. `writeMaterialiseDiscovery` is a
+  compare-and-set on the entry decided on (absent, or its `retry`, `failures` and whether it is stopped; `stale` otherwise); the person's
+  "Try again" moves `retry`. A success removes its entry. Read by `readMaterialiseDiscovery` (`useMaterialiseDiscovery`,
+  `readMaterialiseDiscoveryNow`).
+* **Revision 3: admission and attempts (W28; Review 3's R16/R17).** Revision 2's fixed limit of `SEQUENCE_WINDOW` entries (`full`) is gone:
+  it refused the record only AFTER the read had been sent, so its stop lived in page memory and a reload read again. Now a first read is
+  ADMITTED before it is sent: the slice writes the entry with a fresh `attempt` (never reused), and records each answer only over that very
+  attempt (`attempt` is part of the compare-and-set; an entry without one, from revision 2, compares as `null` and keeps its count and
+  stop). An entry that ADDS a task grows the singleton, so `commitMaterialiseDiscovery` admits it through the quota ledger first
+  (`DISCOVERY_ENTRY_BYTES`, its outcome's bounded size, including a request id of at most `DISCOVERY_REQUEST_ID` characters): a refusal or
+  a lapsed hold is `refused`, nothing written and nothing sent. Replacing a task's entry is not growth. The slice commits every answer
+  through the service it began the work under (its binding), never the one displayed when the answer lands.
+* **Revision 3: what a day's reads observed (W29; Review 3's R14, design assessment DA-T3).** `reconcileTimerCopy` also records the day's
+  observation in `sync_state.timer_scopes[occurrence]` = `{ seen, order, running, ended, ended_at }` (`TimerScopeRecord`, read tolerantly):
+  the order of the day's latest COMPLETE read and the sessions it listed running, and sessions any read of the day listed finished, each
+  under the day's own order whatever the copy's fence. Bounded: `TIMER_SCOPES` = 100 days (the one seen longest ago is evicted) and
+  `TIMER_SCOPE_IDS` = 100 sessions each way. Whatever is not kept (an evicted day, a list beyond the bound, a scope that does not read, a
+  growth the quota ledger refused or a hold that lapsed) raises `sync_state.timer_scope_floor` instead: a day's read issued below the
+  floor is no longer trusted for a session it saw running. Read by `readTimerScope` (`useTimerScope`). The record's growth is admitted
+  as a cache write by `commitTimerCorrection`; a refusal still corrects the copy and raises the floor.
+* **Revision 4: revisions, lifts and recovery reads (W28; Review 4's R20/R21).** Every write of a sequence row stamps `revision` = the
+  replaced row's + 1 (1 for a new row; a row of an earlier build, or one whose revision does not read, counts as 0; one at the end of the
+  safe-integer range is never overwritten), and the compare-and-set compares it, so a stop that returns to the same generation, phase, read
+  and attempt key after another press's budget is still not the row an earlier decision saw. `liftMaterialiseStops` writes the lift of a
+  stopped discovery entry (an EXISTING entry: never added) and of the day's stopped sequence together, or nothing (`stale`).
+  `readLatestSequences` returns the latest day's row of each NAMED task (at most `SEQUENCE_WINDOW` tasks per read; each found by a count of
+  its key range and one row at its end), replacing the account-prefix read the screens used: no other task's rows can hide a stop.
+* **Revision 4: one authority (W29; Review 4's R19).** `reconcileTimerCopy` corrects the copy whatever the fence (the fence is the latest
+  order of ANY read; whether a row may be decided by absence is judged against the copy's own order) and never moves the fence back. A
+  scopes map that is present but not a map raises the floor to every order handed out so far, on read and on the next correction.
+  `readTimerAuthority` reads the copy, every readable scope and the floor (raised by every scope that does not read) in ONE transaction
+  (`TimerAuthorityRecord`, `useTimerAuthority`): the task slice judges every server-derived running session (the copy, the account's live
+  list, a day's read now or kept) by one rule against it, so the floor is the copy's rule too.
+* **Revision 5: retention, exact days and growth (W28; Review 5's R24/R25, WEB-04 §5.8).** A row is never removed because a later day
+  of its task begins: revision 1's `pruneMaterialiseSequences` deleted a task's earlier stopped or ready rows when a later day's sequence
+  began, which lost unsatisfied stops and their uncertain attempts (R25). It is replaced by `deleteSatisfiedSequences`: it removes rows of
+  ONE task that the caller established SATISFIED (a position read covering each row's own day; the slice's `satisfied`, so a future day
+  needs the position itself and `pending: false` covers only today or earlier), each only while it still matches the caller's expectation
+  (revision included), at most `SEQUENCE_WINDOW` per call. Rows therefore grow with unsatisfied days, so `writeMaterialiseSequence` admits
+  a NEW row through the quota ledger (`SEQUENCE_ROW_BYTES`, `leaseLive`; `refused` when not admitted, nothing written; replacing or
+  deleting a row is not growth): it moved from `FIXED_SIZE` to `ADMITTED` in `plan-inventory.test.ts`. `readTaskSequences` replaces
+  revision 4's `readLatestSequences`: for each named task (at most `TASK_SEQUENCE_TASKS` = 25 per read) the row of the exact day asked for
+  (`target`: `null` absent), its latest `TASK_SEQUENCE_ROWS` = 8 rows and whether those are all of them (`complete`), so a later day (a
+  horizon stop) never hides the day a screen works for (R24).
+* **Revision 5: the complete account observation and finished sessions (W29; Review 5's R23).** `writeTimerCopy` also keeps the latest
+  COMPLETE copy's order and session ids in `sync_state.timer_account` (`TimerAccountRecord`, only when every row names its session), which
+  a later partial copy replaces never. `sync_state.timer_ended` (`TimerEndedRecord` = `{ lost, ids: [id, order recorded at][] }`, at most
+  `TIMER_ENDED_IDS` = 200) keeps every session a read listed FINISHED: `recordTimerEnded` (a page of the account's history, stamped at its
+  issue, growth admitted as a cache write) records them and takes them out of the copy in the same transaction; `reconcileTimerCopy`
+  records a day read's finished sessions too (under the scope's reservation). Beyond the bound the one recorded longest ago goes, the
+  floor rises to the order handed out when it was recorded and `lost` is set; a refused growth takes the sessions out of the copy and
+  records the loss at every order issued so far. A record that does not read is a loss of every order issued. `readTimerAuthority` returns
+  `account`, `ended` and `endedLost` with the copy, scopes and floor: a finished session never runs again, whatever order a positive of it
+  has, and once one was lost a positive of unknown order is not trusted.
+* **Revision 6: two kinds of loss (W29; Review 6's R27).** What a lost record could contradict differs. A lost complete observation's
+  ABSENCE at order a retires only positives issued before a, so it stays exclusive (`timer_scope_floor`). A lost FINISHED session may be
+  contradicted by any positive issued up to and including the high-water when it was recorded (the counter, or the copy's fence where a
+  copy was stored above it; a read already in flight included), so `TimerEndedRecord` gains `through` (inclusive; 0: none lost):
+  eviction from the bound sets it to the evicted session's recorded order, a refused or lapsed `recordTimerEnded` to the high-water, and a
+  refused `reconcileTimerCopy` with finished sessions to the high-water too (never only the day read's own order; a complete-absence-only
+  refusal keeps the exclusive floor at its order). The terminal paths still raise the exclusive floor to the same order, so an older tab
+  that knows only the floor keeps its protection. A record written before revision 6 (no `through`) that lost a session, or one that
+  does not read, is read as lost through every order handed out so far and is settled ONCE by the next `issueTimerOrder` (so the bound
+  never moves with each read); an older tab rewriting the record drops `through`, which then reads conservatively the same way.
+  `readTimerAuthority` returns `endedThrough`; `readTimerScope` returns `through`. The slice applies both kinds through one predicate
+  (`positiveTrusted`) in both resolvers.
+* **Revision 6: further exact days, a longer window and the absence a press saw (W28; Review 6's R28/R30).** `readTaskSequences` takes, per
+  task, further exact days by key (`days`, at most `TASK_SEQUENCE_DAYS` = 8: a selected day, days a command asked for; each `null` when
+  absent) and how many latest rows (`rows`, default `TASK_SEQUENCE_ROWS`): the count and the latest rows are read in one transaction, so a
+  longer window is never a page that shifted. `complete` still says whether the window holds every row; incomplete is never "no stop".
+  `liftMaterialiseStops` takes a tagged discovery EXPECTATION (`DiscoveryExpectation`: `stopped` with the entry and its replacement, or
+  `no_stop`) and compares it in the same transaction as the sequence: a stopped discovery entry recorded while a press that saw none waited
+  makes the whole lift stale, so neither record changes.
+* **Revision 7: a timer's end is admitted by its writing transaction (W2 + W29; Review 7's R32).** `EnqueueRequest.expectTimer`
+  (`TimerExpectation`: the session the request ends and the caller's PURE `admit`) is asked by `enqueueDraft` inside the enqueue
+  transaction, AFTER a retry of a save already made under the same local id is recognised (so a save whose answer was lost is never
+  refused by a retirement stored since) and after `observed`. `admit` is given the transaction's own database incarnation, the singleton
+  as stored then (whose timer evidence the caller decodes with `timerAuthorityOf`, the one decoder `readTimerAuthority` also uses; it is
+  exported through `ui/task-records.ts` so it stays out of the initial chunk) and every draft of the session (an `index_targets` read,
+  windowed; the request's own only for a retry already recognised). A false answer refuses with the new `RefusalReason` `timer_ended`
+  and writes nothing (no draft, body, version record or singleton change). Every quota re-admission and fence retry runs the transaction
+  again, so a retirement stored during the waits refuses too; one stored after the write does not rewrite what was admitted.
+  `snapshotRequest` copies the expectation. The data layer decides nothing about what a session's state means: the task slice builds the
+  request (`withEndExpectation`: the session is the request's own version-checked `timer_session` target, the incarnation the acted-on
+  observation was ordered in must be the transaction's, then `endStands`). Enqueue only (end commands are never edited or superseded).
+  The additions cost 78 B of the fixture's initial JavaScript (279,894 B against the one-off 279,900 B ceiling).
+* **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `commitMaterialiseSequence`,
+  `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision 3: quota reserves in
+  `commitTimerCorrection` and `commitMaterialiseDiscovery`; revision 4: `useLatestSequences` (by task, in reads of `SEQUENCE_WINDOW`
+  tasks, ready once every read is), `useTimerAuthority` and `commitMaterialiseLift`, replacing `useMaterialiseSequences`, `useTimerCopy` and
+  `useTimerScope`; revision 5: `useTaskSequences` (exact days and latest days by task, in reads of `TASK_SEQUENCE_TASKS`) replacing
+  `useLatestSequences`, `clearSatisfiedSequences` and `readTaskSequencesNow` replacing `pruneOlderSequences`, `commitMaterialiseSequence`'s
+  quota reserve for a new row, `commitTimerEnded` (with its quota reserve) and `readTimerAuthorityNow`; revision 6: `useTaskSequences`
+  merges every ask of a task (its exact day, every further day, the longest window asked).
+  `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
+* **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
+  (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.
+* **The defaults-review confirmation of a draft that seeded its target (WEB-10c revision 1; found by I-10C-TM5 against the released
+  backend).** `confirmDefaultsReview`'s supersession retires the refused draft's own contribution to the version records first, then
+  rebuilds its targets from the stored header (`model/review-confirmation.ts`, `targetsOf`). The rebuild re-seeded only primaries that are
+  not version-checked, so a draft that had SEEDED a version-checked target (the stream a first Anyone `record`, `start_timer` or
+  `complete_dependencies` creates: a checked primary or a side effect with `seedIfUntracked`) was refused `no_base`, and the reviewed command
+  could only be discarded; WEB-10a's first Anyone record had the same defect. Every rebuilt target now carries the draft's OWN recorded base
+  as its seed. `resolveTargets` uses a seed only when nothing tracks or caches the target, i.e. when this draft seeded it; a base tracked or
+  cached meanwhile wins, and the rebuild's `build` still refuses any base other than the stored one (`rebuild_refused`), so no command is
+  sent on a version it was not composed against (`tests/data/outbox-defaults-review.test.ts`, MU-3064/3065).
 
 ## Snapshot, production leadership and recovery (WEB-09b)
 

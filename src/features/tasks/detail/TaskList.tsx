@@ -10,6 +10,7 @@ import { patched } from "../view";
 export const LIST_COPY = {
   heading: "Your tasks",
   newTask: "New task",
+  timers: "Your timers",
   lists: "Lists",
   showArchived: "Archived",
   showActive: "Active",
@@ -66,7 +67,15 @@ export function TaskList({ selected }: { selected?: string }) {
         <h2 id={heading} className="text-[15px] font-medium text-ink-1">
           {LIST_COPY.heading}
         </h2>
-        <span className="flex gap-2">
+        <span className="flex flex-wrap items-center gap-2">
+          {/* WEB-10c (D-10c-12, E-4): the account's timers, from the Tasks screens rather than the shell's first load. */}
+          <Link
+            to="/tasks/timers"
+            className="atlas-transition inline-flex min-h-11 items-center text-[13px] text-ink-2 hover:text-ink-1"
+            data-your-timers=""
+          >
+            {LIST_COPY.timers}
+          </Link>
           {/* WEB-10b (D-10b-1): Lists live under the Tasks destination, reached from here (no rail or tab item of their own). */}
           <Link
             to="/tasks/lists"

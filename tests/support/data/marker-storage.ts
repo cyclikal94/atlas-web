@@ -89,6 +89,11 @@ export class FakeMarkerStorage implements MarkerStorage {
   failGets = false;
   /** When set, `getItem` of a key it accepts throws (one record unreadable while the others can be read). */
   failGetsFor: ((key: string) => boolean) | null = null;
+  /**
+   * WEB-10c revision 18 (review 19's R36-L): when set, `removeItem` of a key it accepts throws (the store refuses that removal, every
+   * page's alike), as a `localStorage` that has become unwritable does. `null` (the default): removals succeed.
+   */
+  failRemovesFor: ((key: string) => boolean) | null = null;
   /** How many times the enumeration (`length`, `key`) was used (the listing is the first witness of a failure since revision 34, R55). */
   enumerations = 0;
   /** When true any use of the enumeration throws a recognisable error: the listing cannot be completed, and a read that needs it says `unknown`. */
@@ -237,6 +242,8 @@ export class FakeMarkerStorage implements MarkerStorage {
 
   private write(page: string, key: string, value: string | null): void {
     if (value === null) {
+      if (this.failRemovesFor?.(key) === true)
+        throw new DOMException("removal refused", "SecurityError");
       if (!this.items.has(key)) return;
       this.items.delete(key);
     } else {

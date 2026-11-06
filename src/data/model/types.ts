@@ -286,6 +286,40 @@ export interface SyncStateRow {
   composition_seq?: number;
   draft_fence: DraftFence | null;
   defaults: unknown | null;
+  /**
+   * WEB-10c (W29, D-10c-4): a bounded copy of the last COMPLETE first page of the displayed account's running timer sessions
+   * (`GET /timer-sessions?state=running`), so a reload offline can still show what was running. Read tolerantly (`readTimerCopy`):
+   * absent (a database created before it) or damaged is "no copy". Optional, so no migration.
+   */
+  timer_copy?: unknown | null;
+  /**
+   * WEB-10c revision 2 (W29): the last place handed out in the timer observation order (`issueTimerOrder`), and the latest order
+   * already applied to `timer_copy` (an earlier read's replacement or correction is refused). Absent: 0.
+   */
+  timer_order?: number;
+  timer_fence?: number;
+  /**
+   * WEB-10c revision 3 (W29, review R14, design assessment DA-T3): what reads of each day observed (`TimerScopeRecord` by occurrence,
+   * read tolerantly), and the order below which a day's read is no longer trusted for a session it saw running (what was not kept).
+   * Absent: none, 0.
+   */
+  timer_scopes?: Record<string, unknown>;
+  timer_scope_floor?: number;
+  /**
+   * WEB-10c revision 5 (W29, review R23): the latest COMPLETE observation of the account's running sessions (`TimerAccountRecord`: its
+   * order and the sessions it listed), kept apart from `timer_copy` so a later partial first page never erases what it proved; and the
+   * sessions any read listed FINISHED (the account's history, a day's read), which never run again (`timer_ended`, bounded). Read
+   * tolerantly; absent: none.
+   */
+  timer_account?: unknown;
+  timer_ended?: unknown;
+  /**
+   * WEB-10c revision 2 (W28, review R13, design assessment DA-M1): the catch-up DISCOVERY of each task (its first read, before its day is
+   * known) that has failed: the consecutive uncertain answers it met and, once they reached the bound or a definite refusal came, its
+   * stop. Kept across reloads and tabs, so the budget never starts again by itself; only the person's "Try again" (a new `retry`) does.
+   * Removed when the discovery succeeds. Absent: none.
+   */
+  materialise_discovery?: Record<string, MaterialiseDiscovery>;
   device_id: string | null;
   device_verified: boolean;
   device_verified_for: { account_id: AccountId; epoch: Epoch } | null;
@@ -346,6 +380,100 @@ export interface SyncStateRow {
    * Absent or null: none. In force only while `cursor` is the continuation it stored (`stageOf`).
    */
   delta_stage?: DeltaStage | null;
+}
+
+/**
+ * WEB-10c (W28, D-10c-1/2): one catch-up sequence of a task's occurrences through a day, in the store `materialise_sequences` that
+ * WEB-09a reserved (key `[task_id+through_date]`, version 1: no schema change). The data layer knows its shape and its compare-and-set,
+ * never what the phases mean: the task slice's pure state machine decides every transition.
+ */
+export interface MaterialiseSequenceRow {
+  task_id: string;
+  /** `YYYY-MM-DD` in the task's zone. */
+  through_date: string;
+  /** A fresh UUID per incarnation of the key: an answer read under an earlier one never applies. */
+  sequence_generation: string;
+  phase: "ready" | "submitting" | "awaiting_position_read" | "stopped";
+  /** The `materialise` attempt in flight or uncertain: its key and canonical body, written BEFORE it is sent. */
+  attempt: { key: string; body: string } | null;
+  /** +1 on each move to `awaiting_position_read`: a position read applies only to the move it was asked after. */
+  read_seq: number;
+  /** Counted successful calls of this run (the unattended budget). */
+  successful_calls: number;
+  /** `materialisation.last_date` as last read. */
+  last_known_position: string | null;
+  /** ms, the device clock: display only. */
+  started_at: number;
+  /** Consecutive uncertain answers (a send or a read). */
+  read_failures: number;
+  /**
+   * Revision 4 (review R20): +1 on EVERY write of the row, stamped by W28 itself, so a row never comes back to an identity a caller saw
+   * before (a "Try again" pressed on one stop cannot lift a later stop that looks the same). Absent on rows of earlier builds: 0.
+   */
+  revision?: number;
+  stop: null | {
+    reason:
+      | "bound"
+      | "no_progress"
+      | "horizon"
+      | "capacity"
+      | "rejected"
+      | "unreachable";
+    request_id?: string;
+  };
+  trigger: "daily" | "streak" | "draft";
+  /**
+   * Revision 10 (Decision B): the retry schedule of the caller the phase names (`submitting`: the `materialise` command; awaiting its
+   * position: the position read), or `null` (no failure or issue outstanding). ABSENT on a row of an earlier build: its uncertainty has no
+   * trustworthy schedule (the task slice migrates it).
+   */
+  schedule?: MaterialiseRetry | null;
+}
+
+/**
+ * Revision 10 (Decision B, WEB-04 §5.11): one catch-up caller's durable retry schedule, written BEFORE each transmission (`issued`) and
+ * with each answer, so a reload or another tab's turn carries on from it. Times are ms of the device clock. The data layer stores and
+ * compares it; the task slice's pure reducer (`model/retry.ts`) decides every value.
+ */
+export interface MaterialiseRetry {
+  v: 1;
+  caller: "discovery" | "command" | "position";
+  /** The admitted transmission whose answer is not recorded yet, or null. */
+  issued: number | null;
+  /** The first failure of the episode (its window's start), or null: none since the caller's own success or a reset. */
+  since: number | null;
+  /** Consecutive failures in the episode (the pacing). */
+  failures: number;
+  /** The earliest next transmission (0: any time). */
+  next: number;
+  /** A server deadline (`Retry-After`) still to respect, or null. */
+  server: number | null;
+  cause: "transient" | "transport" | "rate_limited" | "unrecognised" | null;
+  /** Consecutive unrecognised answers of a read (never reset by a recognised transient one). */
+  unknown: number;
+  /** The latest time written (a clock that goes back before it pauses). */
+  seen: number;
+  /** Why automatic transmission stopped (the record's stop shows it), or null. */
+  pause: null | "window" | "unrecognised" | "clock" | "legacy";
+}
+
+/** WEB-10c revision 2 (W28): one task's failed catch-up discovery (`sync_state.materialise_discovery`). */
+export interface MaterialiseDiscovery {
+  /** The person's "Try again" moves it: an answer decided under an earlier one never applies. */
+  retry: number;
+  /** Consecutive uncertain first reads. */
+  failures: number;
+  stop: null | { reason: "unreachable" | "rejected"; request_id?: string };
+  /**
+   * Revision 3 (reviews R16, R17): the identity of the first read admitted last (written BEFORE it is sent, never reused), or null
+   * (none since the entry was made or lifted; an entry of revision 2 has none). An answer is recorded only over its own attempt.
+   */
+  attempt?: string | null;
+  /**
+   * Revision 10 (Decision B): the discovery read's retry schedule. Absent on an entry of an earlier build; revision 11 (review R36): `null`
+   * when nothing is outstanding (written explicitly, so an absent one is never this build's).
+   */
+  schedule?: MaterialiseRetry | null;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

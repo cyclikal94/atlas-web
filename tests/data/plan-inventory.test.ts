@@ -15,6 +15,8 @@ import "../../src/data/plans/profile";
 import "../../src/data/plans/sync-writers";
 import "../../src/data/plans/retry-state";
 import "../../src/data/plans/recovery-writers";
+import "../../src/data/plans/materialise";
+import "../../src/data/plans/timer-copy";
 
 /**
  * F-S7 and lint rule R18 (plan 5.2.4): the writer inventory is the authority. Every registered plan must belong to a writer of
@@ -133,6 +135,21 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
     guards: ["INC", "CLS", "CAS", "GEN", "OWN", "EPO"],
     durability: "default",
   },
+  // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
+  // Revision 2: the discovery entries (W28, in the singleton) and the timer observation order and its corrections (W29, fixed-size).
+  // The base merge of 5 November 2026 renumbered them W28 and W29 (WEB-09c's segmented delivery took W27 first in the accepted base).
+  W28: {
+    // Revision 5 (reviews R24/R25): satisfied rows are deleted by an expectation-checked plan; nothing prunes by date any more.
+    name: "writeMaterialiseSequence / deleteSatisfiedSequences / writeMaterialiseDiscovery / liftMaterialiseStops",
+    guards: ["INC", "CLS", "EPO"],
+    durability: "strict",
+  },
+  W29: {
+    // Revision 5 (review R23): the account history's finished sessions.
+    name: "writeTimerCopy / issueTimerOrder / reconcileTimerCopy / recordTimerEnded",
+    guards: ["INC", "CLS", "EPO"],
+    durability: "default",
+  },
 };
 
 /**
@@ -166,6 +183,8 @@ const PRESENT_WRITERS: readonly string[] = [
   "W25",
   "W26",
   "W27",
+  "W28",
+  "W29",
 ];
 
 describe("F-S7: the writer inventory", () => {
@@ -332,6 +351,17 @@ describe("F-S7: the writer inventory", () => {
       "data.writeDefaults",
       // WEB-09c: a staged segment is admitted like a delta page, by the engine (or the recovery job's catch-up) that commits it.
       "data.stageDeltaSegment",
+      // WEB-10c: the running-timer copy is server-sized (up to 50 rows with titles), admitted as a cache write by its caller.
+      "data.writeTimerCopy",
+      // WEB-10c revision 3: a day's timer observation (W29's scope, DA-T3) grows the singleton, admitted as a cache write by its caller.
+      "data.reconcileTimerCopy",
+      // WEB-10c revision 3: a NEW task's discovery entry grows the singleton (no fixed cap now, R16), admitted by the runner before its read.
+      "data.writeMaterialiseDiscovery",
+      // WEB-10c revision 5 (R25): rows are kept until their own need is satisfied, so a NEW catch-up row grows the store: admitted by the
+      // runner before it is written (it was a fixed-size write while a later day pruned the earlier ones).
+      "data.writeMaterialiseSequence",
+      // WEB-10c revision 5 (R23): the account history's finished sessions grow the singleton, admitted by the timers page.
+      "data.recordTimerEnded",
     ];
     // A fixed few hundred bytes, once per page context and form (the writer claim) or in place in the singleton `sync_state` row (the
     // verified name and the device id): no caller-sized growth, covered by the reserve's slack and the allowance each save carries.
@@ -339,6 +369,8 @@ describe("F-S7: the writer inventory", () => {
       "data.claimFormWriter",
       "data.writeProfile",
       "data.recordDeviceVerification",
+      // WEB-10c revision 4 (review R20): "Try again" replaces that row and an EXISTING discovery entry in one compare-and-set (no growth).
+      "data.liftMaterialiseStops",
     ];
     expect(
       listPlans()
@@ -347,9 +379,9 @@ describe("F-S7: the writer inventory", () => {
         .sort(),
     ).toEqual([...ADMITTED, ...FIXED_SIZE].sort());
   });
-  test("the table is exactly W1 to W27 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026; W27 is WEB-09c's segmented delivery)", () => {
+  test("the table is exactly W1 to W29 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026; W27 is WEB-09c's segmented delivery; W28 and W29 are WEB-10c's)", () => {
     expect(Object.keys(WRITER_TABLE)).toEqual(
-      Array.from({ length: 27 }, (_, i) => `W${i + 1}`),
+      Array.from({ length: 29 }, (_, i) => `W${i + 1}`),
     );
   });
 });

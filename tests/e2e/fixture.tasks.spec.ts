@@ -28,6 +28,7 @@ import {
   waitForState,
 } from "./data-sync-helpers";
 import { runAxe } from "./helpers";
+import { progressCommitted, publishDelta } from "./published-delta";
 import {
   API,
   type BuiltTask,
@@ -2166,23 +2167,80 @@ test.describe("E-T14: another tab commits while Today's local read is between it
 
 // ---- WEB-10a revision 4 (R9, R10, R11; design assessment C1, C3, C4: J1, E1, D7) ------------------------------------------------------
 
-/** Commits one delta page through the fixture leader of `writer` (the page that holds it). */
+/** The revision `writer`'s store has applied for the account (its sync state; null before any). */
+const appliedOf = (writer: Page): Promise<number | null> =>
+  writer.evaluate(
+    async (acct) =>
+      (
+        (await window.__atlasData?.syncState(acct)) as {
+          applied_revision?: number;
+        } | null
+      )?.applied_revision ?? null,
+    ACCOUNT,
+  );
+
+/**
+ * Commits one delta page through the fixture leader of `writer` (the page that holds it).
+ *
+ * Revision 9, R35 (harness, labelled; the assertions of every caller unchanged): the page is PUBLISHED on the fixture server
+ * (`published-delta.ts`: the answer to every poll from a cursor before it, until the writer asks from its own), not handed to one poll,
+ * and this returns only once the writer has COMMITTED it: its applied revision, below `revision` before (asserted, so the barrier is not
+ * vacuous), reaches it, and `landed` (given) holds of ONE snapshot of the writer's cache. A one-shot answer could go to the poll whose
+ * answer W1 discards (its cursor compare-and-set lost to a competing empty page: WebKit E-T20, revision 8 run 4), and the page was
+ * never committed while the test went on to assert what a reader made of it. The writer is woken while it has not committed (a wake
+ * during a poll is absorbed by it, WEB-09a). What was served to which cursor is recorded as a `published-delta` annotation.
+ */
 async function commitDelta(
   writer: Page,
   net: SyncStub,
   revision: number,
   changes: unknown[],
+  landed?: {
+    what: string;
+    holds: (rows: Array<Record<string, unknown>>) => boolean;
+  },
 ): Promise<void> {
-  net.script.push(() => ({
-    status: 200,
-    body: JSON.stringify({
-      phase: "delta",
-      batches: [{ revision, changes }],
-      next_cursor: `cursor-r4-${revision}`,
-      has_more: false,
-    }),
-  }));
+  const before = await appliedOf(writer);
+  expect(
+    before ?? 0,
+    `the writer has not applied revision ${revision} before it is published`,
+  ).toBeLessThan(revision);
+  const published = publishDelta(net, revision, changes);
   await writer.evaluate(() => window.__atlasData?.nudgeSync());
+  try {
+    await expect
+      .poll(
+        async () => {
+          const applied = await appliedOf(writer);
+          const done =
+            applied !== null &&
+            applied >= revision &&
+            (landed === undefined ||
+              landed.holds(
+                (await rowsOf(writer, "cache")) as Array<
+                  Record<string, unknown>
+                >,
+              ));
+          if (!done)
+            await writer.evaluate(() => window.__atlasData?.nudgeSync());
+          return done;
+        },
+        {
+          message: `the writer committed revision ${revision}${landed === undefined ? "" : ` (${landed.what})`}`,
+          timeout: 10_000,
+        },
+      )
+      .toBe(true);
+  } finally {
+    test.info().annotations.push({
+      type: "published-delta",
+      description: JSON.stringify({
+        revision,
+        own: published.own,
+        served: published.served,
+      }),
+    });
+  }
 }
 
 /**
@@ -3870,7 +3928,11 @@ function journalRoute(journal: LiveJournal) {
 }
 type JournalRoute = ReturnType<typeof journalRoute>;
 
-/** Commits version `version` of my progress stream (the journal's current tail) through the fixture leader of `writer`. */
+/**
+ * Commits version `version` of my progress stream (the journal's current tail) through the fixture leader of `writer`, and returns once the
+ * writer's store holds EXACTLY that row (revision 9, R35): the progress id at `version`, with the journal's entry count and recent tail
+ * (ids, in order), read in one snapshot. A row with the right id but another version, count or tail is not the commit.
+ */
 async function commitProgress(
   writer: Page,
   net: SyncStub,
@@ -3878,20 +3940,32 @@ async function commitProgress(
   journal: LiveJournal,
   version: number,
 ): Promise<void> {
-  await commitDelta(writer, net, version, [
-    {
-      kind: "upsert",
-      resource: {
-        ...progress,
-        version,
-        value: {
-          ...(progress.value as object),
-          recent_entries: journal.tail(),
-          entry_count: journal.count(),
+  const tail = journal.tail();
+  const count = journal.count();
+  await commitDelta(
+    writer,
+    net,
+    version,
+    [
+      {
+        kind: "upsert",
+        resource: {
+          ...progress,
+          version,
+          value: {
+            ...(progress.value as object),
+            recent_entries: tail,
+            entry_count: count,
+          },
         },
       },
+    ],
+    {
+      what: `progress ${String(progress.id)} at version ${version}, ${count} entries`,
+      holds: (rows) =>
+        progressCommitted(rows, progress.id, version, tail, count),
     },
-  ]);
+  );
 }
 
 /**

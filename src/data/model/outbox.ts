@@ -180,6 +180,12 @@ export interface EnqueueRequest {
    * the content the later save was built over). Judged inside the writing transaction.
    */
   expectLatest?: boolean;
+  /**
+   * For a request that ENDS a timer session (WEB-10c revision 7, review R32): what the person acted on must still stand when the save is
+   * written. Checked inside the enqueue transaction, after a retry of a save already made is recognised and on every re-admission;
+   * `false` refuses the request (`timer_ended`) and nothing is written. Enqueue only.
+   */
+  expectTimer?: TimerExpectation;
 }
 
 /** `EnqueueRequest.expectPredecessor`: the reviewed save a new one follows. */
@@ -194,6 +200,28 @@ export interface ExpectedPredecessor {
 export interface Continuity {
   readonly incarnationId: string;
   readonly invalidations: number;
+}
+
+/**
+ * A timer end's precondition (WEB-10c revision 7, review R32). The timer evidence (W29) and the drafts are both in this database, so the
+ * writing transaction is the ONE point where a retirement stored by any page, before it, refuses the end, and one stored after it does not
+ * rewrite what was admitted. The data layer never decides what a session's state means: `admit` is the caller's.
+ */
+export interface TimerExpectation {
+  /** The session the request ends (`endExpectation` takes it from the request's own version-checked `timer_session` target). */
+  session: ResourceId;
+  /**
+   * PURE. Called inside the writing transaction with the singleton as stored NOW (whose timer evidence the caller decodes with
+   * `timerAuthorityOf`, the decoding every screen reads; the decoder is not loaded with the outbox) and every draft that targets
+   * `session` (the request's own only for a retry of a save already made, which is recognised first).
+   */
+  admit(seen: TimerSeen): boolean;
+}
+export interface TimerSeen {
+  /** The database incarnation of the writing transaction: an observation ordered in another one means nothing here. */
+  incarnationId: string;
+  sync: Readonly<SyncStateRow>;
+  drafts: readonly DraftRow[];
 }
 
 /**
@@ -569,6 +597,8 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
     ...(request.expectLatest === undefined
       ? {}
       : { expectLatest: request.expectLatest }),
+    // A timer end's precondition as one value: the session checked is the one stored with it (`admit` stays the caller's).
+    ...(request.expectTimer && { expectTimer: { ...request.expectTimer } }),
   };
 }
 

@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { Policy } from "../../data";
+import type { ActivityTimeline } from "./activity/timeline";
 import type { EditingSession } from "./lifetime";
 import type { Attempt } from "./model/attempt";
 import type { LinkageState } from "./model/linkage";
@@ -25,6 +26,9 @@ import type { LinkageState } from "./model/linkage";
  *  - `summaries`: the viewer-safe summaries read for this identity (finding 8, `summaries.tsx`), per query, for the CURRENT invalidation
  *    `summaryGeneration` only, with the highest `preferences_version` applied and each row's highest versions (the contract's
  *    monotonicity rules: an older answer is never applied over a newer one in the same epoch). Display data only, never a permission.
+ *  - `activity` and `activityDepth` (WEB-19, `activity/timeline.ts`): each person's activity timeline as read for the CURRENT invalidation
+ *    (the summaries' `summaryGeneration`: any invalidation re-reads it from its first page), and how many of its events the reader asked
+ *    to see (a count, never content, kept across invalidations and remounts).
  *
  * Nothing is written to storage: a reload forgets it, and so does any other identity. Memory for one identity is dropped the moment
  * another identity asks for its own, so nothing learnt or kept under one account (or an earlier sign-in of it) is shown or sent under
@@ -61,6 +65,28 @@ export interface SummaryEntry {
     | { kind: "loading" }
     | { kind: "ready"; value: unknown; checkedAt: number }
     | { kind: "failed"; reason: "failed" | "not_found" | "stale" };
+}
+
+/**
+ * WEB-19: one person's activity timeline read (`activity/timeline.ts`), under the generation it was asked at. `ready` holds ONE read of the
+ * timeline from its first page to the depth asked (never pages of two generations); `extending`: "Show older changes" is on its way;
+ * `extendFailed`: it failed (the timeline held stays). `gone`: a `404` (the person is not visible now): nothing of the timeline is held.
+ * `merged`: the answer is another person's (the route's person was merged into `canonicalId`): nothing of it is held either.
+ */
+export interface ActivityEntry {
+  generation: number;
+  state:
+    | { kind: "loading" }
+    | {
+        kind: "ready";
+        timeline: ActivityTimeline;
+        checkedAt: number;
+        extending: boolean;
+        extendFailed: boolean;
+      }
+    | { kind: "failed"; reason: "failed" | "stale" }
+    | { kind: "gone" }
+    | { kind: "merged"; canonicalId: string };
 }
 
 /** A request command's last word (`requestReports`): the message, a copyable reference, and whether its outcome is uncertain. */
@@ -187,6 +213,10 @@ export class PeopleMemory {
   >();
   /** The summary reads of the current generation, by query key. */
   readonly summaries = new Map<string, SummaryEntry>();
+  /** WEB-19: the activity timeline reads of the current generation, by the route's person id. */
+  readonly activity = new Map<string, ActivityEntry>();
+  /** WEB-19: how many events of each person's timeline the reader asked to see (absent: the preview). */
+  readonly activityDepth = new Map<string, number>();
   private listeners = new Set<Listener>();
   private revision = 0;
 
@@ -207,11 +237,13 @@ export class PeopleMemory {
 
   /**
    * Something a summary depends on may have changed (a projection, a receipt, a reconnection, households or the primary household, the
-   * 60-second refresh, the view becoming visible): every summary is read again, and every read still on its way is superseded.
+   * 60-second refresh, the view becoming visible): every summary is read again, and every read still on its way is superseded. So is
+   * every activity timeline (WEB-19): read again from its first page.
    */
   invalidateSummaries(): void {
     this.summaryGeneration += 1;
     this.summaries.clear();
+    this.activity.clear();
     this.touch();
   }
 

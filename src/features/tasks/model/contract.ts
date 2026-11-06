@@ -755,3 +755,316 @@ export function parseProgressPage(
   if (out.length === PROGRESS_PAGE ? next !== last : next !== null) return null;
   return { items: out, next_after: next as string | null };
 }
+
+// ---- WEB-10c: dependencies, timers, rotas, streaks (the pinned contract `v0.29.0-rc.1`) ------------------------------------------
+
+/** One visible prerequisite of a preview (`DependencyItem`): no title, status, date or depth; titles and days come from the cache. */
+export interface DependencyItem {
+  occurrence_id: string;
+  task_id: string;
+  complete: boolean;
+  can_complete: boolean;
+  progress_version: number | null;
+}
+/**
+ * `GET /occurrences/{id}/dependencies`: the visible TRANSITIVE prerequisites in completion order, the root LAST, with a caller-specific
+ * token. No edge is exposed (the server publishes no prerequisite ids), so the client cannot know the direct list (D-10c-6, E-1).
+ */
+export interface DependencyPreview {
+  token: string;
+  items: DependencyItem[];
+  unavailable: boolean;
+  strict: boolean;
+}
+/** One of my timer sessions of one occurrence (`TimerSession`). Unix seconds. */
+export interface TimerSession {
+  id: string;
+  occurrence_id: string;
+  started_at: number;
+  stopped_at: number | null;
+  version: number;
+}
+export interface TimerPage {
+  items: TimerSession[];
+  next_after: string | null;
+}
+/** A row of `GET /timer-sessions` (B6): available with its task, or restricted (no task, occurrence, title or date). */
+export type AccountTimerSession =
+  | {
+      access: "available";
+      id: string;
+      occurrence_id: string;
+      task_id: string;
+      task_title: string;
+      slot_date: string | null;
+      started_at: number;
+      stopped_at: number | null;
+      version: number;
+      can_modify: boolean;
+    }
+  | {
+      access: "restricted";
+      id: string;
+      started_at: number;
+      stopped_at: number | null;
+      version: number;
+    };
+export interface AccountTimerPage {
+  items: AccountTimerSession[];
+  next_after: string | null;
+}
+/** `GET /tasks/{id}/rota`. `eligible_participants` is filled for execution editors only (empty for other readers). */
+export interface RotaState {
+  version: number;
+  participants: string[];
+  consent_version: number;
+  accepted: boolean;
+  eligible_participants: string[];
+}
+/** `GET /tasks/{id}/streak?scope=`: null when the server cannot say (an invisible period, a withheld part). Never 0 for unknown. */
+export interface TaskStreak {
+  current: number | null;
+  longest: number | null;
+}
+/** The receipt of every task command (`TaskResult`). */
+export interface TaskResult {
+  revision: number;
+}
+
+const TOKEN = /^[0-9a-f]{64}$/;
+const isToken = (value: unknown): value is string =>
+  typeof value === "string" && TOKEN.test(value);
+const uuidList = (value: unknown, max: number, unique: boolean) => {
+  if (!Array.isArray(value) || value.length > max || !value.every(isUuid))
+    return null;
+  if (unique && new Set(value).size !== value.length) return null;
+  return [...value] as string[];
+};
+
+export function parseTaskResult(value: unknown): TaskResult | null {
+  return isObject(value) &&
+    keysAre(value, ["revision"]) &&
+    Number.isSafeInteger(value.revision)
+    ? { revision: value.revision as number }
+    : null;
+}
+
+export function parseDependencyPreview(
+  value: unknown,
+): DependencyPreview | null {
+  if (
+    !isObject(value) ||
+    !keysAre(value, ["token", "items", "unavailable", "strict"])
+  )
+    return null;
+  if (!isToken(value.token)) return null;
+  if (typeof value.unavailable !== "boolean") return null;
+  if (typeof value.strict !== "boolean") return null;
+  if (!Array.isArray(value.items) || value.items.length > 200) return null;
+  const items: DependencyItem[] = [];
+  for (const raw of value.items) {
+    if (
+      !isObject(raw) ||
+      !keysAre(raw, [
+        "occurrence_id",
+        "task_id",
+        "complete",
+        "can_complete",
+        "progress_version",
+      ])
+    )
+      return null;
+    if (!isUuid(raw.occurrence_id) || !isUuid(raw.task_id)) return null;
+    if (typeof raw.complete !== "boolean") return null;
+    if (typeof raw.can_complete !== "boolean") return null;
+    if (raw.progress_version !== null && !isInt(raw.progress_version, 1))
+      return null;
+    items.push({
+      occurrence_id: raw.occurrence_id,
+      task_id: raw.task_id,
+      complete: raw.complete,
+      can_complete: raw.can_complete,
+      progress_version: raw.progress_version as number | null,
+    });
+  }
+  // One item per occurrence: a repeated one is not a preview this contract describes.
+  if (new Set(items.map((i) => i.occurrence_id)).size !== items.length)
+    return null;
+  return {
+    token: value.token,
+    items,
+    unavailable: value.unavailable,
+    strict: value.strict,
+  };
+}
+
+const isSeconds = (value: unknown) => isInt(value, Number.MIN_SAFE_INTEGER);
+const isStop = (value: unknown) => value === null || isSeconds(value);
+
+function parseTimerSession(raw: unknown): TimerSession | null {
+  if (
+    !isObject(raw) ||
+    !keysAre(raw, [
+      "id",
+      "occurrence_id",
+      "started_at",
+      "stopped_at",
+      "version",
+    ])
+  )
+    return null;
+  if (!isUuid(raw.id) || !isUuid(raw.occurrence_id)) return null;
+  if (!isSeconds(raw.started_at) || !isStop(raw.stopped_at)) return null;
+  if (!isInt(raw.version, 1)) return null;
+  return {
+    id: raw.id,
+    occurrence_id: raw.occurrence_id,
+    started_at: raw.started_at as number,
+    stopped_at: raw.stopped_at as number | null,
+    version: raw.version as number,
+  };
+}
+
+/** `GET /occurrences/{id}/timers`: my uncancelled sessions of `occurrenceId`, in id order after `after`; a cursor only after a full page. */
+export function parseTimerPage(
+  value: unknown,
+  occurrenceId: string,
+  after: string | null,
+  limit: number,
+): TimerPage | null {
+  if (!isObject(value) || !keysAre(value, ["items", "next_after"])) return null;
+  if (!Array.isArray(value.items) || value.items.length > Math.min(limit, 200))
+    return null;
+  const items: TimerSession[] = [];
+  let last = after;
+  for (const raw of value.items) {
+    const session = parseTimerSession(raw);
+    if (session === null || session.occurrence_id !== occurrenceId) return null;
+    if (last !== null && !(session.id > last)) return null;
+    items.push(session);
+    last = session.id;
+  }
+  // The released endpoint names the last id of a FULL page and nothing otherwise (`server/src/tasks.rs` `timers`).
+  const next = value.next_after;
+  if (items.length === limit ? next !== last : next !== null) return null;
+  return { items, next_after: next as string | null };
+}
+
+/** One row of `GET /timer-sessions` (also how the running-timer copy is read back, row by row). */
+export function parseAccountTimer(raw: unknown): AccountTimerSession | null {
+  if (!isObject(raw)) return null;
+  if (raw.access === "restricted") {
+    if (!keysAre(raw, ["access", "id", "started_at", "stopped_at", "version"]))
+      return null;
+    if (
+      !isUuid(raw.id) ||
+      !isSeconds(raw.started_at) ||
+      !isStop(raw.stopped_at)
+    )
+      return null;
+    if (!isInt(raw.version, 1)) return null;
+    return {
+      access: "restricted",
+      id: raw.id,
+      started_at: raw.started_at as number,
+      stopped_at: raw.stopped_at as number | null,
+      version: raw.version as number,
+    };
+  }
+  if (raw.access !== "available") return null;
+  if (
+    !keysAre(raw, [
+      "access",
+      "id",
+      "occurrence_id",
+      "task_id",
+      "task_title",
+      "slot_date",
+      "started_at",
+      "stopped_at",
+      "version",
+      "can_modify",
+    ])
+  )
+    return null;
+  if (!isUuid(raw.id) || !isUuid(raw.occurrence_id) || !isUuid(raw.task_id))
+    return null;
+  if (!isText(raw.task_title, 1, 300)) return null;
+  if (raw.slot_date !== null && !isContractDate(raw.slot_date)) return null;
+  if (!isSeconds(raw.started_at) || !isStop(raw.stopped_at)) return null;
+  if (!isInt(raw.version, 1) || typeof raw.can_modify !== "boolean")
+    return null;
+  return {
+    access: "available",
+    id: raw.id,
+    occurrence_id: raw.occurrence_id,
+    task_id: raw.task_id,
+    task_title: raw.task_title,
+    slot_date: raw.slot_date as string | null,
+    started_at: raw.started_at as number,
+    stopped_at: raw.stopped_at as number | null,
+    version: raw.version as number,
+    can_modify: raw.can_modify,
+  };
+}
+
+/**
+ * `GET /timer-sessions?state=`: a `running` page lists only running rows, `stopped` only finished ones (the cursor is opaque). A row of the
+ * wrong state is not this page.
+ */
+export function parseAccountTimerPage(
+  value: unknown,
+  state: "running" | "stopped" | "all",
+  limit: number,
+): AccountTimerPage | null {
+  if (!isObject(value) || !keysAre(value, ["items", "next_after"])) return null;
+  if (!Array.isArray(value.items) || value.items.length > Math.min(limit, 200))
+    return null;
+  const items: AccountTimerSession[] = [];
+  for (const raw of value.items) {
+    const row = parseAccountTimer(raw);
+    if (row === null) return null;
+    if (state === "running" && row.stopped_at !== null) return null;
+    if (state === "stopped" && row.stopped_at === null) return null;
+    items.push(row);
+  }
+  const next = value.next_after;
+  if (next !== null && !isText(next, 1, 64)) return null;
+  return { items, next_after: next as string | null };
+}
+
+export function parseRotaState(value: unknown): RotaState | null {
+  if (
+    !isObject(value) ||
+    !keysAre(value, [
+      "version",
+      "participants",
+      "consent_version",
+      "accepted",
+      "eligible_participants",
+    ])
+  )
+    return null;
+  if (!isInt(value.version, 0) || !isInt(value.consent_version, 0)) return null;
+  if (typeof value.accepted !== "boolean") return null;
+  const participants = uuidList(value.participants, 8, true);
+  const eligible = uuidList(value.eligible_participants, 10_000, true);
+  if (participants === null || eligible === null) return null;
+  return {
+    version: value.version as number,
+    participants,
+    consent_version: value.consent_version as number,
+    accepted: value.accepted,
+    eligible_participants: eligible,
+  };
+}
+
+export function parseStreak(value: unknown): TaskStreak | null {
+  if (!isObject(value) || !keysAre(value, ["current", "longest"])) return null;
+  const figure = (v: unknown) => v === null || isInt(v, 0);
+  if (!figure(value.current) || !figure(value.longest)) return null;
+  return {
+    current: value.current as number | null,
+    longest: value.longest as number | null,
+  };
+}

@@ -22,6 +22,12 @@ const TaskNewScreen = lazy(() =>
 const TaskEditScreen = lazy(() =>
   screens().then((m) => ({ default: m.TaskEditScreen })),
 );
+const TaskStreakScreen = lazy(() =>
+  screens().then((m) => ({ default: m.TaskStreakScreen })),
+);
+const TimersScreen = lazy(() =>
+  screens().then((m) => ({ default: m.TimersScreen })),
+);
 const ListsLayoutScreen = lazy(() =>
   screens().then((m) => ({ default: m.ListsLayoutScreen })),
 );
@@ -38,9 +44,10 @@ export interface TaskSearch {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * The Tasks routes (§4.5): `/tasks` (the list), `/tasks/new` (the preset picker, then the form), `/tasks/$taskId` (the detail) and
- * `/tasks/$taskId/edit`. The screens are one lazy chunk (`screens.tsx`).
+ * The Tasks routes (§4.5): `/tasks` (the list), `/tasks/new` (the preset picker, then the form), `/tasks/$taskId` (the detail),
+ * `/tasks/$taskId/edit` and `/tasks/$taskId/streak` (WEB-10c). The screens are one lazy chunk (`screens.tsx`).
  */
+// `/tasks/timers` also matches the task-id pattern: it has its own child heading.
 function TasksLayout() {
   const matchRoute = useMatchRoute();
   return (
@@ -111,6 +118,16 @@ export const tasksRoute = (parent: AnyRoute) => {
       </Suspense>
     ),
   });
+  // WEB-10c (D-10c-12): the account's timers. A static segment wins over `$taskId`.
+  const timers = createRoute({
+    getParentRoute: () => tasks,
+    path: "timers",
+    component: () => (
+      <Suspense fallback={null}>
+        <TimersScreen />
+      </Suspense>
+    ),
+  });
   const detail = createRoute({
     getParentRoute: () => tasks,
     path: "$taskId",
@@ -152,7 +169,25 @@ export const tasksRoute = (parent: AnyRoute) => {
       );
     },
   });
-  return tasks.addChildren([index, create, detail.addChildren([view, edit])]);
+  // WEB-10c: WF-TASK-06, the task's streak.
+  const streak = createRoute({
+    getParentRoute: () => detail,
+    path: "streak",
+    component: function StreakRoute() {
+      const { taskId } = detail.useParams();
+      return (
+        <Suspense fallback={null}>
+          <TaskStreakScreen taskId={taskId} />
+        </Suspense>
+      );
+    },
+  });
+  return tasks.addChildren([
+    index,
+    create,
+    timers,
+    detail.addChildren([view, edit, streak]),
+  ]);
 };
 
 /**

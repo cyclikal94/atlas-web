@@ -1,10 +1,12 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
 import {
+  completionEntryId,
   occurrenceId,
   progressId,
   slotKey,
   uuidV5,
+  uuidV5Sync,
 } from "../../../src/features/tasks/model/ids";
 
 const TASK = "70000000-0000-4000-8000-000000000011";
@@ -62,5 +64,59 @@ describe("deterministic ids (A5; backend docs/tasks.md golden vector)", () => {
     expect(slotKey({ ...daily, time: "07:30:00" }, "2026-09-08")).toBe(
       "2026-09-08T07:30:00",
     );
+  });
+});
+
+/**
+ * Revision 1 (review R6): a dependency completion's entries carry the SERVER's ids, so a synced stream that lists one shows it landed.
+ * `completionEntryId` is UUIDv5(operation key, "dependency-completion:<occurrence>:<actor>") (`crates/core/src/tasks/service/
+ * dependencies.rs` at the pinned 4396c99), computed synchronously for the pure row composition. The vectors are an INDEPENDENT oracle:
+ * Python's standard `uuid.uuid5` (recorded in the revision's execution report), not this code.
+ */
+describe("dependency completion entry ids (review R6)", () => {
+  test("the server's derivation, against Python's uuid.uuid5", () => {
+    expect(
+      completionEntryId(
+        "cccccccc-0000-4000-8000-000000000001",
+        "aaaaaaaa-0000-4000-8000-0000000000b1",
+        "11111111-1111-4111-8111-111111111111",
+      ),
+    ).toBe("b4c8baa6-348d-568f-8def-49cdc618337a");
+    expect(
+      completionEntryId(
+        "70000000-0000-4000-8000-000000000998",
+        "aaaaaaaa-0000-4000-8000-0000000000b2",
+        "22222222-2222-4222-8222-222222222222",
+      ),
+    ).toBe("9e2ee21f-01d0-5f8f-85bf-deb44ec3e180");
+    expect(
+      completionEntryId(
+        "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "11111111-1111-4111-8111-111111111111",
+      ),
+    ).toBe("d7b9c403-446a-5b1d-acd8-9b9fbc2c11c5");
+    // A name longer than one SHA-1 block, and the occurrence form.
+    expect(
+      uuidV5Sync("0f8fad5b-d9cb-469f-a165-70867728950e", "x".repeat(130)),
+    ).toBe("8716c0a4-66fb-5dd1-a317-7b3d806dd449");
+    expect(
+      uuidV5Sync(
+        "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "atlas-occurrence-v1:2026-10-25Tdate",
+      ),
+    ).toBe("4ecb123a-cade-57ff-a0f8-4e728e2121ac");
+  });
+
+  test("the synchronous digest equals WebCrypto's for names of every padding length; a key that is not a UUID gives none", async () => {
+    const ns = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    for (let n = 0; n <= 200; n += 1) {
+      const name = `${"é".repeat(n % 3)}${"a".repeat(n)}`;
+      expect(uuidV5Sync(ns, name), `length ${n}`).toBe(await uuidV5(ns, name));
+    }
+    expect(uuidV5Sync("not-a-uuid", "x")).toBeNull();
+    expect(
+      completionEntryId("A0000000-0000-4000-8000-000000000001", "o", "a"),
+    ).toBeNull();
   });
 });

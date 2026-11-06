@@ -4,6 +4,7 @@ import type {
   DraftCommandRow,
   DraftRow,
   FormRecoveryRow,
+  MaterialiseSequenceRow,
   PendingEffectRow,
   ResourceVersionRow,
   SyncStateRow,
@@ -58,7 +59,7 @@ export interface RowByStore {
   drafts: DraftRow;
   draft_commands: DraftCommandRow;
   resource_versions: ResourceVersionRow;
-  materialise_sequences: Record<string, unknown>;
+  materialise_sequences: MaterialiseSequenceRow;
   reminder_firings: Record<string, unknown>;
   form_recovery: FormRecoveryRow;
   sync_state: SyncStateRow;
