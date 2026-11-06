@@ -32551,6 +32551,92 @@ export const UNIT = [
         "    if (!ready || restored === null) return;",
       ),
   },
+  // WEB-14a revision 57 (Review 57, F-R57-1; design assessment of 6 November 2026, C-F1/C-F2, Q-F8): a restored editor's focus target is a
+  // control of the editor itself, never inside a recovery surface; the library refuses (and in test builds reports) one that is.
+  {
+    id: "MU-3811",
+    title:
+      "WEB-14a revision 57: the turn order dialog's restored focus is the first enabled button of a body that also holds the notice (Review 57's defect: the banner's own Discard instead)",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /Q-F1: after the reload the dialog opened on the copy focuses/,
+    patch: (t) =>
+      sub(
+        t,
+        "    firstControl(orderSection.current) ??\n    firstControl(addSection.current) ??\n    openingFocus(body.current);\n",
+        '    body.current?.querySelector<HTMLElement>("button:not([disabled])");\n',
+      ),
+  },
+  {
+    id: "MU-3812",
+    title:
+      "WEB-14a revision 57: the dependency editor names no control of its own (the Task select is not its restored field)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect:
+      /Q-F2: after the reload the editor opened on the copy focuses the Task select/,
+    patch: (t) => sub(t, "              ref={firstField}\n", ""),
+  },
+  {
+    id: "MU-3813",
+    title:
+      "WEB-14a revision 57: the library admits a restored, chosen or returned target inside a recovery surface",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/recovery-surface-guard.test.tsx"],
+    expect:
+      /Q-F6 restored: a resolver answering the banner's own Discard instead is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!element?.closest(RECOVERY_SURFACE)) return element;\n",
+        "  if (element || !element) return element;\n",
+      ),
+  },
+  {
+    id: "MU-3814",
+    title:
+      "WEB-14a revision 57: the recovery surfaces leave out the other saved copies (firstControl answers another copy's Restore)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/recovery-surface-guard.test.tsx"],
+    expect:
+      /Q-F6 with the restored banner AND another copy offered|Q-F6 the constant names the three surfaces/,
+    patch: (t) =>
+      sub(
+        t,
+        '  "[data-recovery-state],[data-recovery-alternatives],[data-recovery-check]";\n',
+        '  "[data-recovery-state],[data-recovery-check]";\n',
+      ),
+  },
+  {
+    id: "MU-3815",
+    title:
+      "WEB-14a revision 57: a refused target is never reported in development and test builds (a mis-wired editor passes its tests)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/recovery-surface-guard.test.tsx"],
+    expect:
+      /Q-F6 restored: a resolver answering the banner's own Discard instead is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (import.meta.env.DEV)\n    (\n",
+        "  if (false as boolean)\n    (\n",
+      ),
+  },
+  {
+    id: "MU-3816",
+    title:
+      "WEB-14a revision 57: the restored banner's own return after a keyboard Discard instead focuses its target unchecked",
+    file: "src/lib/form-recovery/RecoveryBanner.tsx",
+    tests: ["tests/lib/recovery-surface-guard.test.tsx"],
+    expect: /Q-F6 the banner's own fallback/,
+    patch: (t) =>
+      sub(
+        t,
+        '              else recoveryTarget("returned", firstFieldRef)?.focus();\n',
+        '              else (typeof firstFieldRef === "function" ? firstFieldRef() : firstFieldRef?.current)?.focus();\n',
+      ),
+  },
 ];
 
 /**

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
-import { type FocusTarget, resolveTarget, useRestoredFocus } from "./focus";
+import { type FocusTarget, recoveryTarget, useRestoredFocus } from "./focus";
 
 /**
  * Recovery banners for form-recovery-reload.html, states 2 and 3. They never submit anything and never
@@ -184,7 +184,7 @@ export function RecoveryBanner({
               state.onDiscard();
               if (!used) return;
               if (onFocusedDiscard) onFocusedDiscard(button);
-              else resolveTarget(firstFieldRef)?.focus();
+              else recoveryTarget("returned", firstFieldRef)?.focus();
             }}
           >
             Discard instead

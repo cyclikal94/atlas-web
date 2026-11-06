@@ -361,6 +361,31 @@ describe("DA-F1 (Kieran, 15 October 2026): the restored field wins over a state-
     expect(button("Save and reload")).toHaveFocus();
   });
 
+  test("restored first, then the prompt appears: the field keeps focus (revision 57: the restore waited behind the gate across a navigation and took focus in the NEW arrival, whose prompt it then holds back)", async () => {
+    // Revision 57 (MU-1983, a schedule no case had covered since revision 51 recorded each request's arrival when it is made): DA-F1 is
+    // decided by the arrival a restore TOOK focus in, not the one it was asked in.
+    openForm();
+    const field = createRef<HTMLInputElement>();
+    render(<Shell field={field} />, { container: inProtected() });
+    protectedRoot().setAttribute("inert", "");
+    restore(field);
+    expect(title(), "held behind the gate").not.toHaveFocus();
+    act(() => noteNavigation());
+    await act(async () => {
+      protectedRoot().removeAttribute("inert");
+    });
+    expect(
+      title(),
+      "the waiting restore takes focus once eligible",
+    ).toHaveFocus();
+    set({ kind: "available", dismissed: false });
+    expect(button("Save and reload")).toBeInTheDocument();
+    expect(
+      title(),
+      "the prompt of the arrival the field took focus in does not take it",
+    ).toHaveFocus();
+  });
+
   test("the prompt first, then the restore: the restored form's first field takes focus", () => {
     openForm();
     const field = createRef<HTMLInputElement>();
@@ -387,6 +412,46 @@ describe("DA-F1 (Kieran, 15 October 2026): the restored field wins over a state-
     expect(title()).not.toHaveFocus();
     set({ kind: "available", dismissed: false });
     expect(button("Save and reload")).toHaveFocus();
+  });
+
+  test("revision 57 (C-F2, Q-F6): a restore whose owner named a target inside its own banner is refused (no target yet): it does not hold the prompt back", () => {
+    const hook = globalThis as {
+      __atlasRecoverySurfaceRefused?: (kind: string, element: Element) => void;
+    };
+    const before = hook.__atlasRecoverySurfaceRefused;
+    const kinds: string[] = [];
+    hook.__atlasRecoverySurfaceRefused = (kind) => kinds.push(kind);
+    let banner: { unmount(): void } | null = null;
+    // Its own container only: a request left behind (a mutant that never withdraws one) must never name a later case's banner.
+    const own = inProtected();
+    try {
+      openForm();
+      shell();
+      banner = render(
+        <UiProviders>
+          <RecoveryBanner
+            state={{ kind: "restored", onDiscard: () => {} }}
+            firstFieldRef={() =>
+              own.querySelector<HTMLElement>(
+                '[data-recovery-state="restored"] button',
+              )
+            }
+          />
+        </UiProviders>,
+        { container: own },
+      );
+      expect(
+        screen.getByRole("button", { name: "Discard instead" }),
+      ).not.toHaveFocus();
+      expect(kinds).toContain("restored");
+      set({ kind: "available", dismissed: false });
+      expect(button("Save and reload")).toHaveFocus();
+    } finally {
+      // The refused restore stays pending (refused at every attempt) until its owner goes: withdrawn here, under this case's reporter,
+      // whatever the case found (a failed assertion must not leave it to report into the setup's hook).
+      banner?.unmount();
+      hook.__atlasRecoverySurfaceRefused = before;
+    }
   });
 });
 

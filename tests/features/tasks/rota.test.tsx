@@ -1261,11 +1261,19 @@ describe("R33: a rota answer settles only its own attempt", () => {
       ).toBe(true);
       expect(order(), "the newer order stays, editable").toEqual([ME, THIRD]);
       expect(saveButton()?.disabled, "and can be saved (not busy)").toBe(false);
-      if (success)
+      if (success) {
+        // WEB-14a revision 57 (adaptation, strengthening only): the note is THERE (an assertion of its own), then says what it says. Before,
+        // a missing note reached jest-dom as `null`, which WEB-14a's assertion-origin mutant runner counts as a matcher refusing its input,
+        // not as this test's comparison (MU-3199 caught on accepted main's runner, crash-only on the merged one).
+        expect(
+          savedEarlier(),
+          "said: A saved, the newer order not (the note is shown)",
+        ).not.toBeNull();
         expect(
           savedEarlier(),
           "said: A saved, the newer order not",
         ).toHaveTextContent(ROTA_COPY.savedEarlier);
+      }
       // The separate observation: closed and opened again on the same visit, the newer order is still the person's.
       await reopen(w.t);
       expect(order(), "reopened: still the newer order").toEqual([ME, THIRD]);

@@ -1112,12 +1112,10 @@ export function DependencyEditor({
       recover: dependencyRecovery(row.id, replacing?.local_id ?? null),
     },
   );
-  // The restored editor's first field: the first chosen day's Remove, else the task picker (what "Discard instead" leaves).
-  const body = useRef<HTMLDivElement>(null);
-  const firstField = () =>
-    body.current?.querySelector<HTMLElement>(
-      "[data-editor-list] button, select",
-    );
+  // The restored editor's first field: the task picker, its first field proper, always shown and enabled (revision 57, Review 57
+  // judgement; design assessment C-F1). Not a chosen day's Remove: one keypress there would take a day off the restored list. The restored
+  // arrival, a copy chosen and a keyboard discard's return all land on it (I-F2); it is never inside the recovery notice (I-F1).
+  const firstField = useRef<HTMLSelectElement>(null);
   const [pickTask, setPickTask] = useState<string | null>(null);
   const [pickDay, setPickDay] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -1265,7 +1263,6 @@ export function DependencyEditor({
       }
     >
       <div
-        ref={body}
         className="flex flex-col gap-3"
         data-dependency-editor={block ?? "open"}
       >
@@ -1321,6 +1318,7 @@ export function DependencyEditor({
               {DEPENDENCY_COPY.addTask}
             </label>
             <select
+              ref={firstField}
               id={taskId}
               value={pickTask ?? ""}
               data-field-edge=""

@@ -9,6 +9,7 @@ import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { useSharingDefaults } from "../../../data";
+import { firstControl, openingFocus } from "../../../lib/form-recovery/focus";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { RotaConsentCommand, SetRotaCommand, TasksResult } from "../api";
 import * as copy from "../copy";
@@ -577,10 +578,17 @@ function RotaDialog({
       recover: rotaRecovery(taskId),
     },
   );
-  // The restored dialog's first field: its first control that can be used (a move or a remove, else an add).
+  // The restored dialog's first field: the first control of the ORDER that can be used (a move or a remove), else of the people who could
+  // be added (an add), read in those two sections only, which never hold the recovery notice (revision 57, Review 57 F-R57-1; design
+  // assessment C-F1: the notice's own "Discard instead" was the first enabled button of the dialog's body). With neither, the dialog's own
+  // opening focus (decision D1). The restored arrival, a copy chosen and a keyboard discard's return all use it (I-F2).
   const body = useRef<HTMLDivElement>(null);
+  const orderSection = useRef<HTMLDivElement>(null);
+  const addSection = useRef<HTMLDivElement>(null);
   const firstField = () =>
-    body.current?.querySelector<HTMLElement>("button:not([disabled])");
+    firstControl(orderSection.current) ??
+    firstControl(addSection.current) ??
+    openingFocus(body.current);
   // What the order's change was answered, as the page holds it, since this dialog opened (an edit or a reload puts it away).
   const hold = useRotaHold(env.identity, orderKey);
   const since = useRef(rotaSerial());
@@ -752,7 +760,11 @@ function RotaDialog({
             firstFieldRef={firstField}
           />
         ) : null}
-        <div className="flex flex-col gap-2">
+        <div
+          ref={orderSection}
+          className="flex flex-col gap-2"
+          data-rota-editor=""
+        >
           {order.length === 0 ? (
             <p className="text-[13px] text-ink-2">{ROTA_COPY.noTurns}</p>
           ) : (
@@ -818,7 +830,11 @@ function RotaDialog({
             {ROTA_COPY.count(order.length)}
           </p>
         </div>
-        <div className="flex flex-col gap-2">
+        <div
+          ref={addSection}
+          className="flex flex-col gap-2"
+          data-rota-editor=""
+        >
           <h3 className="text-[13.5px] font-medium text-ink-1">
             {ROTA_COPY.couldAdd}
           </h3>

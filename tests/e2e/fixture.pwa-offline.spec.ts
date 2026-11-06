@@ -174,3 +174,112 @@ test("backend paths and the OIDC callback are never answered with the shell, onl
     expect(response, `${path} must not be answered offline`).toBeNull();
   }
 });
+
+/**
+ * WEB-14a revision 57 (Review 57, F-R57-3; design assessment of 6 November 2026, RC-H3, C-O1, Q-O2): the forcing control of the offline
+ * transition. On the merged tree "offline: reload, cold start …" failed in Chromium about half the time because Today's reads (its lazy
+ * screen mounting after `quiet()` was satisfied, measured) were on their way when `goOffline` cut the network: the browser logged each
+ * failure. This case makes that ordering certain instead of likely: a Today read is HELD in the page once the person goes back to Today,
+ * and released only when the page is told it is offline. With the old transition (the network first, the pages told after) the released
+ * read meets a dead network in every run; with the corrected one (the pages first, the network once nothing is in flight) it is answered
+ * by the live server and nothing fails. The hold is test instrumentation at the page's own `fetch`, counted in flight while held; the read
+ * itself is the product's. Nothing reaches the server after the cut, as P-O1 asserts.
+ */
+test("offline transition (forcing control): a Today read on its way when the device goes offline is answered before the network goes; nothing fails, nothing reaches the server after", async ({
+  context,
+  generations,
+  browserName,
+}) => {
+  await context.addInitScript(() => {
+    const scope = window as unknown as {
+      __inflight: number;
+      __holdDaily?: boolean;
+      __heldDaily?: { state: string; status?: number; online?: boolean };
+    };
+    const inner = window.fetch.bind(window);
+    window.fetch = (...args: Parameters<typeof fetch>) => {
+      const [input] = args;
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+      if (!scope.__holdDaily || !url.includes("/api/experimental/v1/daily"))
+        return inner(...args);
+      scope.__holdDaily = false;
+      const held: { state: string; status?: number; online?: boolean } = {
+        state: "held",
+      };
+      scope.__heldDaily = held;
+      scope.__inflight += 1;
+      return new Promise<Response>((resolve, reject) => {
+        const go = () => {
+          scope.__inflight -= 1;
+          held.state = "sent";
+          held.online = navigator.onLine;
+          inner(...args).then(
+            (response) => {
+              held.state = "answered";
+              held.status = response.status;
+              resolve(response);
+            },
+            (error: unknown) => {
+              held.state = "failed";
+              reject(error);
+            },
+          );
+        };
+        if (!navigator.onLine) go();
+        else window.addEventListener("offline", go, { once: true });
+      });
+    };
+  });
+  await seedAccount(context, generations);
+  const page = await openApp(context, generations, { form: false });
+  await workerActive(page);
+  await reloadQuietly(page);
+  await quiet(page);
+  const nav = page.getByRole("navigation").first();
+  await nav.getByRole("link", { name: "Tasks", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Tasks", exact: true }),
+  ).toBeVisible();
+  await quiet(page);
+  // Back to Today: its screen mounts again and reads the day, the first of those reads held until the page is told it is offline.
+  await page.evaluate(() => {
+    (window as unknown as { __holdDaily: boolean }).__holdDaily = true;
+  });
+  await nav.getByRole("link", { name: "Today", exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __heldDaily?: { state: string } }).__heldDaily
+            ?.state ?? null,
+      ),
+    )
+    .toBe("held");
+
+  await goOffline(context, generations, browserName);
+  await generations.clearLog();
+  const held = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __heldDaily?: { state: string; status?: number };
+        }
+      ).__heldDaily,
+  );
+  expect(
+    held,
+    "the held read was answered by the live server, before the network went",
+  ).toEqual(expect.objectContaining({ state: "answered", status: 200 }));
+  // Offline from now on: the open tab reloads from the precache, and nothing reaches the server.
+  await page.reload();
+  await displayed(page);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Today" }),
+  ).toBeVisible();
+  expect(await generations.log()).toEqual([]);
+});

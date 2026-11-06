@@ -432,7 +432,18 @@ was open still reopens it after an update. Each host opens its editor ONCE per r
 session still holds input after a Cancel, and reopening on it would undo the person's Cancel; any later opening is the person's own. A
 text either codec cannot read is offered, never restored in part. Fixture evidence: `tests/features/tasks/web10c-editors-recovery.test.tsx`
 (the production coordinator's accepted update, its save and its one reload; the screens reopening each editor once; mutants
-MU-3801..MU-3810). Native-engine evidence of these two editors is still owed (`fixture.pwa-editors`).
+MU-3801..MU-3810). Native-engine evidence (revision 57, Review 57 F-R57-4): `tests/e2e/fixture.pwa-task-editors.spec.ts`, in Chromium,
+Firefox and WebKit, generation A updated to B with each editor left by its sync control and by Cancel: reopened on the copy with the
+restored notice, focus on the editor's own first field (below), nothing sent, and Save sending the restored list and strict rule
+(`set_dependencies`, queued) or `set_rota` at the roster version the order was edited on, also after the roster moved. Its seeded task
+days and their reads come from `tests/e2e/pwa-reads.ts`. The case reads what Save sends by HOLDING the page's write at its own `fetch`
+(the generation server refuses every write), never by excusing the page from the console guard.
+
+**Their restored focus (revision 57, Review 57 F-R57-1).** The turn order's first field is the first usable control of the ORDER (a move
+or a remove), else of the people who could be added, read in those two sections only (`[data-rota-editor]`), else the dialog's own opening
+focus (D1). Before, it was the first enabled button of the dialog's body, which also holds the notice: focus landed on the restored banner's
+own "Discard instead" in every engine, and one Enter discarded the restored order. The dependency editor's is its Task select (a ref): its
+first field proper, always shown and enabled, never a chosen day's Remove.
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 
@@ -631,6 +642,16 @@ first field on mount, and `RecoveryBanner`'s revision-19 "Discard instead" contr
   it unmounted) with focus nowhere or where the arbiter put it, the grant ends; with focus moved elsewhere by anyone else, it stays until
   the next navigation, so a later restore still takes nothing. When the granted field itself is replaced and focus is nowhere, a later
   restore may take focus (it takes nobody's). Completed requests remain history only (a same-arrival prompt stays suppressed, DA-F1).
+- **Never a recovery surface (revision 57; Review 57 F-R57-1; design assessment of 6 November 2026, C-F2/C-F3, I-F1/I-F2/I-F4).** The
+  restored banner, the other saved copies and the check again (`RECOVERY_SURFACE`: `[data-recovery-state]`, `[data-recovery-alternatives]`,
+  `[data-recovery-check]`) hold actions that discard or replace the input the person came back to. A restored, chosen or returned
+  request's target inside one is REFUSED (`recoveryTarget`): treated as no target yet, so nothing is focused for it and DA-F1's pending
+  restore does not hold a prompt back; development and test builds report it (`tests/setup.ts` fails the test whose editor named it), a
+  production build never throws. `firstControl`/`openingFocus` skip all three surfaces (before, another copy's Restore could be a dialog's
+  "first control"). The banner's own fallback after a keyboard discard goes through the same check. Every `<RecoveryNotice>` site is
+  registered with the kind of its target (`tests/static/recovery-focus-sites.test.ts`: a ref; a region of the editor that never holds the
+  notice; or a closure over a body that does) and a region or closure site names the jsdom case that asserts its focus after a restore;
+  a new site, a changed target or a missing case fails there.
 - **Coverage.** `tests/lib/recovery-discard-focus.test.tsx` (the request and D2), each caller's restore and keyboard discard in the
   People, lists, preset, owner-discard and owner-host tests, and `tests/e2e/fixture.pwa-people.spec.ts`: on B the restored form's first
   field has focus before any test gesture, native keyboard traversal reaches "Discard instead" and Enter leaves focus on that field, in

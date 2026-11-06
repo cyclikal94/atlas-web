@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import { pressTab } from "./helpers";
+import { managedHousehold, sharingReads } from "./pwa-reads";
 import {
   armReload,
   build,
@@ -360,18 +361,8 @@ test.describe("R40: the production new-task editor across an accepted update", (
   }) => {
     // The personal layer of the field defaults, an account with no household: the snapshot is the stub's; the layer's templates, the
     // memberships and the sharing screens' invitations are the generation server's canned reads (GET only), healthy empty answers.
-    const empty = { template: null, version: 0 };
-    await generations.reads({
-      "/api/experimental/v1/defaults/templates": {
-        person: empty,
-        field: empty,
-        task: empty,
-        list: empty,
-        progress: empty,
-      },
-      "/api/experimental/v1/households": [],
-      "/api/experimental/v1/invitations": [],
-    });
+    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once; byte for byte the set this spec held inline).
+    await generations.reads(sharingReads());
     await seedAccount(context, generations, "acct-a", "s1", {
       validCache: "pwa-r51-defaults",
     });
@@ -470,19 +461,10 @@ test.describe("R40: the production new-task editor across an accepted update", (
  * Native composition over the generation server's canned reads (GET only); never released-backend acceptance.
  */
 test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-screen forms", () => {
-  const HOUSE = {
-    id: "66666666-6666-4666-8666-666666666660",
-    name: "R52 House",
-    version: 1,
-    role: "manager",
-    members: [
-      {
-        account_id: "11111111-1111-4111-8111-111111111111",
-        username: "me",
-        role: "manager",
-      },
-    ],
-  };
+  const HOUSE = managedHousehold(
+    "66666666-6666-4666-8666-666666666660",
+    "R52 House",
+  );
   const createName = (page: Page) =>
     page.getByRole("textbox", { name: "Household name", exact: true });
   const invitee = (page: Page) =>
@@ -558,18 +540,8 @@ test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-s
         });
       } as LockManager["request"];
     });
-    const empty = { template: null, version: 0 };
-    await generations.reads({
-      "/api/experimental/v1/defaults/templates": {
-        person: empty,
-        field: empty,
-        task: empty,
-        list: empty,
-        progress: empty,
-      },
-      "/api/experimental/v1/households": [HOUSE],
-      "/api/experimental/v1/invitations": [],
-    });
+    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once; byte for byte the set this spec held inline).
+    await generations.reads(sharingReads([HOUSE]));
     await seedAccount(context, generations, "acct-a", "s1", {
       validCache: "pwa-r52-households",
     });
@@ -674,19 +646,10 @@ test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-s
  * or a frozen/bfcache result.
  */
 test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copies again, and focus after an explicit choice", () => {
-  const HOUSE = {
-    id: "66666666-6666-4666-8666-666666666653",
-    name: "R53 House",
-    version: 1,
-    role: "manager",
-    members: [
-      {
-        account_id: "11111111-1111-4111-8111-111111111111",
-        username: "me",
-        role: "manager",
-      },
-    ],
-  };
+  const HOUSE = managedHousehold(
+    "66666666-6666-4666-8666-666666666653",
+    "R53 House",
+  );
   const CHECK = "Check saved copies again";
   const WITHHELD =
     "A saved copy of this form may still be open in another tab.";
@@ -728,18 +691,8 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
     context,
     generations,
   }) => {
-    const empty = { template: null, version: 0 };
-    await generations.reads({
-      "/api/experimental/v1/defaults/templates": {
-        person: empty,
-        field: empty,
-        task: empty,
-        list: empty,
-        progress: empty,
-      },
-      "/api/experimental/v1/households": [HOUSE],
-      "/api/experimental/v1/invitations": [],
-    });
+    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once; byte for byte the set this spec held inline).
+    await generations.reads(sharingReads([HOUSE]));
     await seedAccount(context, generations, "acct-a", "s1", {
       validCache: "pwa-r53-households",
     });
@@ -913,19 +866,10 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
  * Deliberately ordered (a held read, tabs closed in order): characterisation of the corrected rules, not a natural frequency result.
  */
 test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a late earlier restore; a check keeps this page's claimed hand-off", () => {
-  const HOUSE = {
-    id: "66666666-6666-4666-8666-666666666655",
-    name: "R55 House",
-    version: 1,
-    role: "manager",
-    members: [
-      {
-        account_id: "11111111-1111-4111-8111-111111111111",
-        username: "me",
-        role: "manager",
-      },
-    ],
-  };
+  const HOUSE = managedHousehold(
+    "66666666-6666-4666-8666-666666666655",
+    "R55 House",
+  );
   const HOUSEHOLDS = "/api/experimental/v1/households";
   const CHECK = "Check saved copies again";
   const WITHHELD =
@@ -978,18 +922,8 @@ test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a lat
     generations: Generations,
     cache: string,
   ) {
-    const empty = { template: null, version: 0 };
-    await generations.reads({
-      "/api/experimental/v1/defaults/templates": {
-        person: empty,
-        field: empty,
-        task: empty,
-        list: empty,
-        progress: empty,
-      },
-      [HOUSEHOLDS]: [HOUSE],
-      "/api/experimental/v1/invitations": [],
-    });
+    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once; byte for byte the set this spec held inline).
+    await generations.reads(sharingReads([HOUSE]));
     await seedAccount(context, generations, "acct-a", "s1", {
       validCache: cache,
     });

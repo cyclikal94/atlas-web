@@ -66,6 +66,40 @@ export const resolveTarget = (
   typeof target === "function" ? target() : target?.current;
 
 /**
+ * WEB-14a revision 57 (Review 57, F-R57-1; design assessment of 6 November 2026, C-F2, I-F1): what a restored editor shows of its recovery
+ * (the restored or failed banner, the other saved copies, the check again block). A restored, chosen or returned request's target is a
+ * control of the editor itself, never inside one of these: one keypress there discards or replaces the input the person came back to.
+ */
+export const RECOVERY_SURFACE =
+  "[data-recovery-state],[data-recovery-alternatives],[data-recovery-check]";
+
+/** The kinds of request whose target is the restored editor's own field (`recoveryTarget`). */
+export type RecoveryFocusKind = "restored" | "chosen" | "returned";
+
+/**
+ * The editor's field `target` names, read now, unless it is inside a recovery surface: such a target is REFUSED and treated as "no target
+ * yet" (so DA-F1's pending restore and its prompt suppression see none, and nothing is focused). Development and test builds report the
+ * refusal (`tests/setup.ts` fails the test whose owner named it); a production build never throws or reports, the page carries on.
+ */
+export function recoveryTarget(
+  kind: RecoveryFocusKind,
+  target: FocusTarget | undefined,
+): HTMLElement | null | undefined {
+  const element = resolveTarget(target);
+  if (!element?.closest(RECOVERY_SURFACE)) return element;
+  if (import.meta.env.DEV)
+    (
+      globalThis as {
+        __atlasRecoverySurfaceRefused?: (
+          kind: RecoveryFocusKind,
+          element: HTMLElement,
+        ) => void;
+      }
+    ).__atlasRecoverySurfaceRefused?.(kind, element);
+  return null;
+}
+
+/**
  * Where a dialog's opening puts focus when it names no field (WEB-14a revision 51, decision D1, Kieran, 3 November 2026: a restored editor
  * with no field to focus uses its owner's surviving control): the first control of the dialog holding `within` that the keyboard reaches,
  * as the dialog's own opening does, never a recovery banner's action. Null outside a dialog or before it has a control.
@@ -76,8 +110,9 @@ export function openingFocus(within: Element | null): HTMLElement | null {
 }
 
 /**
- * The first control in `root` the keyboard reaches (enabled, not hidden or inert), never a recovery banner's action: an owner's own
- * section (a grants list, WEB-14a revision 51) or a dialog. Null when it has none yet.
+ * The first control in `root` the keyboard reaches (enabled, not hidden or inert), never a recovery surface's action (the banner, another
+ * saved copy's Restore or Discard, the check again: revision 57, C-F2): an owner's own section (a grants list, WEB-14a revision 51) or a
+ * dialog. Null when it has none yet.
  */
 export function firstControl(root: Element | null): HTMLElement | null {
   if (!root) return null;
@@ -88,9 +123,7 @@ export function firstControl(root: Element | null): HTMLElement | null {
       control.tabIndex >= 0 &&
       !(control as HTMLButtonElement).disabled &&
       (control as HTMLInputElement).type !== "hidden" &&
-      !control.closest(
-        "[hidden],[inert],[data-recovery-state],[data-recovery-check]",
-      )
+      !control.closest(`[hidden],[inert],${RECOVERY_SURFACE}`)
     )
       return control;
   return null;
@@ -361,7 +394,7 @@ export function useRestoredFocus(
   useEffect(
     () =>
       shown
-        ? request("restored", () => resolveTarget(current.current))
+        ? request("restored", () => recoveryTarget("restored", current.current))
         : undefined,
     [shown],
   );
@@ -397,7 +430,7 @@ export function useDiscardFocus(
     withdraw.current?.();
     const withdrawn = request(
       "returned",
-      () => resolveTarget(current.current),
+      () => recoveryTarget("returned", current.current),
       0,
       from,
     );
@@ -444,7 +477,7 @@ export function useChoiceFocus(
       if (latest.current === choice && arrival === arrivals && !choice.withdraw)
         choice.withdraw = request(
           "chosen",
-          () => resolveTarget(current.current),
+          () => recoveryTarget("chosen", current.current),
           0,
           from,
           kept,

@@ -303,6 +303,7 @@ export const test = base.extend<{
     });
     const started = await startGenerations(firstGeneration);
     let unanswered: string[] = [];
+    let census: string[] | null = null;
     try {
       await use(started.world);
       // Revision 47 (F-R46-PWA-LOAD): a test that armed a reload receipt joins or cancels it (an unjoined one checked nothing). Only for a
@@ -316,10 +317,35 @@ export const test = base.extend<{
       for (const page of context.pages())
         await page.close().catch(() => undefined);
       // Revision 56 (C-H2): read once every page is gone, so the whole test is judged. Asserted below, beside the console guard.
-      unanswered = unansweredReads((await started.world.ledger(0)).entries);
+      const entries = (await started.world.ledger(0)).entries;
+      unanswered = unansweredReads(entries);
+      // Revision 57 (Review 57 F-R57-2; design assessment C-H5, I-R3): the merge-time census. With ATLAS_PWA_READ_CENSUS=1, each test
+      // attaches the backend reads its pages made and how they were answered to its OWN report entry (R27: never a shared file), so the
+      // next base merge's census can be compared with this one read by read. Observation only: the oracle and the console guard judge.
+      if (process.env.ATLAS_PWA_READ_CENSUS)
+        census = [
+          ...new Set(
+            entries
+              .filter(
+                (entry) =>
+                  (entry.method === "GET" || entry.method === "HEAD") &&
+                  entry.backend &&
+                  !entry.document,
+              )
+              .map(
+                (entry) =>
+                  `${entry.method} ${entry.path.split("?")[0]} ${entry.status}${entry.identity ? "" : " (signed out)"}`,
+              ),
+          ),
+        ].sort();
     } finally {
       started.stop();
     }
+    if (census !== null)
+      await testInfo.attach("backend-reads", {
+        body: JSON.stringify(census),
+        contentType: "application/json",
+      });
     if (probes.length > 0)
       await testInfo.attach("probe-page-console-messages", {
         body: probes.join("\n"),
@@ -542,31 +568,61 @@ export const checkForUpdate = (page: Page) =>
  * this spec), and the device says it is offline: Chromium and Firefox with `context.setOffline(true)`; WebKit, whose Playwright build fails a
  * worker-served navigation under `setOffline` (qualification probe Q-P0), by `navigator.onLine` reporting false in every page (an init
  * script for pages loaded from now on, and the same plus an `offline` event in the pages already open).
+ *
+ * WEB-14a revision 57 (Review 57, F-R57-3; design assessment of 6 November 2026, RC-H3, C-O1, I-O1): the device says so FIRST, in every
+ * engine, the way a device does (the system announces it, then requests fail), and the network goes only once every open page has nothing
+ * in flight. Before, the server went first and the pages were told after, so a read the app had dispatched just before (measured: the
+ * lazily loaded Today screen mounting after `quiet()` was satisfied, its first reads racing the cut in Chromium about half the time on the
+ * merged tree) failed against a dead network and the browser logged it. Now the condition the product itself acts on decides: once a page
+ * knows it is offline, Today, the defaults and every other online-only read schedule nothing (they wait for `online`), and a read already
+ * on its way is answered by the live server before the cut (in flight is `__inflight`, the page's own count). No window or timer is
+ * shortened, nothing is retried, and nothing that reaches the server after the cut is excused (the specs still assert the log is empty).
  */
 export async function goOffline(
   context: BrowserContext,
   world: Generations,
   browserName: string,
 ): Promise<void> {
-  await world.dark(true);
   // A page loaded from now on knows at once that it is offline (a reloaded Chromium page was seen asking `/health` before the emulation
-  // reached it), and every open page is told.
+  // reached it), and every open page is told now, while the server still answers.
   await context.addInitScript(() => {
     Object.defineProperty(navigator, "onLine", {
       configurable: true,
       get: () => false,
     });
   });
-  if (browserName !== "webkit") await context.setOffline(true);
-  else
-    for (const page of context.pages())
-      await page.evaluate(() => {
-        Object.defineProperty(navigator, "onLine", {
-          configurable: true,
-          get: () => false,
-        });
-        window.dispatchEvent(new Event("offline"));
+  for (const page of context.pages())
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "onLine", {
+        configurable: true,
+        get: () => false,
       });
+      window.dispatchEvent(new Event("offline"));
+    });
+  // What the pages had already sent is answered (the app sends nothing new once it knows it is offline): three samples in a row with
+  // nothing in flight, as `quiet()`, in every open page.
+  for (const page of context.pages()) {
+    let idle = 0;
+    await expect
+      .poll(
+        async () => {
+          const inflight = await page.evaluate(
+            () =>
+              (window as unknown as { __inflight?: number }).__inflight ?? 0,
+          );
+          idle = inflight === 0 ? idle + 1 : 0;
+          return idle >= 3;
+        },
+        {
+          intervals: [100],
+          message:
+            "the open pages' reads in flight are answered before the network goes",
+        },
+      )
+      .toBe(true);
+  }
+  await world.dark(true);
+  if (browserName !== "webkit") await context.setOffline(true);
 }
 
 const exempted = new WeakSet<Page>();

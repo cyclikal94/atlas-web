@@ -1,5 +1,6 @@
 import type { BrowserContext, Locator, Page } from "@playwright/test";
 import { pressTab } from "./helpers";
+import { seededPerson } from "./pwa-reads";
 import {
   armReload,
   build,
@@ -51,68 +52,18 @@ const SAVE_FAILED =
 
 const PERSON = "71717171-7171-4171-8171-717171717171";
 const OWNER = "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1";
-const API = "/api/experimental/v1";
-/** The seeded person, as the sync projection (and the backend's reads) have it: owned, private, no fields. */
-const PERSON_ROW = {
+/**
+ * The seeded person and every People read of the list and of its page, as a healthy backend answers them to its owner (`pwa-reads.ts`,
+ * revision 57 C-H3: built once, each body checked against the product's own parser by `tests/pwa/pwa-reads.test.ts`). Byte for byte the
+ * revision 50 set this spec held inline, plus the person's activity read accepted WEB-19 added (Review 57, F-R57-2).
+ */
+const SEEDED = seededPerson({
   id: PERSON,
-  kind: "person",
-  parent_id: null,
   label: "Ada Lovelace",
-  value: null,
-  version: 1,
-  policy_version: 1,
-  can_edit: true,
-  archived: false,
-};
-const owner = { account_id: OWNER, username: "alice", you: true, person: null };
-/** The person's summary, as a healthy backend answers it to its owner (`model/summary.ts` parses it strictly). */
-const SUMMARY = {
-  id: PERSON,
-  label: PERSON_ROW.label,
-  version: 1,
-  policy_version: 1,
-  archived: false,
-  linkage: "none",
-  linked_account_id: null,
-  owner,
-  added_by_you: "unknown",
-  your_access: "owner",
-  field_count: 0,
-  audience: {
-    disclosure: "complete",
-    in_home: false,
-    households: [],
-    your_direct_grant: null,
-    direct_grant_count: 0,
-    excluded_count: 0,
-  },
-};
-/** The person's People reads (the list's page of summaries, the person, its summary and duplicates), as a healthy backend answers them. */
-const PERSON_READS = {
-  [`${API}/people/summaries`]: {
-    items: [SUMMARY],
-    next_after: null,
-    home: null,
-    preferences_version: 1,
-  },
-  [`${API}/people/${PERSON}`]: { person: PERSON_ROW, linked_account_id: null },
-  [`${API}/people/${PERSON}/summary`]: {
-    summary: SUMMARY,
-    shared_with: {
-      disclosure: "complete",
-      owner,
-      accounts: [],
-      households: [],
-      excluded_accounts: [],
-    },
-    home: null,
-    preferences_version: 1,
-  },
-  [`${API}/people/${PERSON}/duplicates`]: { items: [], next_after: null },
-  // Base merge of 5 November 2026: accepted WEB-11b's People screens read the reader's pending requests (`GET /people/requests`, at most
-  // 100); none here. Kept although the server now answers it by default (revision 56, C-H1): a canned set is answered first, as a whole.
-  [`${API}/people/requests`]: { items: [] },
-};
+  owner: { account_id: OWNER, username: "alice" },
+});
+const PERSON_ROW = SEEDED.row;
+const PERSON_READS = SEEDED.reads;
 const RENAMED = "Ada King, Countess of Lovelace";
 
 const dialog = (page: Page) => page.getByRole("dialog");

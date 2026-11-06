@@ -1,5 +1,13 @@
 import { act, fireEvent, screen, within } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "vitest";
 import type {
   SetRotaCommand,
   TasksResult,
@@ -656,4 +664,295 @@ describe("D-1: the two codecs (explicitly versioned raw input; an unreadable tex
     ])
       expect(codec.decode(text, start), text).toBeNull();
   });
+});
+
+// ---- revision 57: where a restored editor's focus goes (Review 57, F-R57-1; design assessment of 6 November 2026, C-F1, Q-F1 to Q-F5) ----
+/**
+ * The restored dialog's focus is a control of the editor itself and never inside a recovery surface (I-F1), on the restored arrival, after
+ * a copy chosen while the banner stays, and on a keyboard "Discard instead"'s return, with and without another copy offered (I-F2). Before
+ * the correction the turn order dialog's resolver was the first enabled button of a body that also holds the notice: focus landed on the
+ * banner's own "Discard instead" (jsdom, and natively in three engines) and one keypress there discarded the restored order.
+ *
+ * `focus.ts` refuses a target inside a recovery surface (C-F2) and the test setup fails any test whose editor names one. These cases
+ * collect the refusals themselves and assert them in the test body, beside where focus is (each waits for a condition that does not
+ * depend on focus, then asserts focus), so a defect is reported by the test's own assertions.
+ */
+const SURFACE =
+  "[data-recovery-state],[data-recovery-alternatives],[data-recovery-check]";
+const focused = () => document.activeElement as HTMLElement | null;
+const inSurface = (element: Element | null) => !!element?.closest(SURFACE);
+const label = (element: Element | null) =>
+  element?.getAttribute("aria-label") ?? element?.textContent ?? "";
+const OTHER_TAB = "r57-gone-tab";
+type Reporter = (kind: string, element: Element) => void;
+const reporterHook = globalThis as {
+  __atlasRecoverySurfaceRefused?: Reporter;
+};
+const refusals: string[] = [];
+/** The describe's cases collect `focus.ts`'s refusals here (cleared before each case) and assert them in the body. */
+function collectRefusals(): void {
+  let previous: Reporter | undefined;
+  beforeAll(() => {
+    previous = reporterHook.__atlasRecoverySurfaceRefused;
+    reporterHook.__atlasRecoverySurfaceRefused = (kind, element) =>
+      refusals.push(`${kind}: ${label(element).trim()}`);
+  });
+  beforeEach(() => {
+    refusals.length = 0;
+  });
+  afterAll(() => {
+    reporterHook.__atlasRecoverySurfaceRefused = previous;
+    refusals.length = 0;
+  });
+}
+/** Another closed tab's copy of `context` (older than the reloading tab's own), so the restored editor also offers it. */
+async function anotherCopy(t: Mounted, context: string, model: object) {
+  expect(
+    await t.data.formRecovery.save({
+      formContext: context,
+      tabInstanceId: OTHER_TAB,
+      values: { model: JSON.stringify(model) },
+      savedAt: new Date(Date.now() - 60_000).toISOString(),
+      capture: `${OTHER_TAB}-capture`,
+    }),
+  ).toBe("saved");
+}
+/** "Discard instead" (or another button) used from the keyboard: focused when pressed (jsdom does not focus on click). */
+function keyboardPress(button: HTMLElement): void {
+  button.focus();
+  expect(button, "the control used has focus").toHaveFocus();
+  fireEvent.click(button);
+}
+const rotaCount = () =>
+  rotaDialog()?.querySelector("[data-rota-count]")?.textContent ?? "";
+
+async function restoredTurnOrder(options: { another?: boolean } = {}) {
+  const world = await turnOrder();
+  const { t, task } = world;
+  fireEvent.click(screen.getByRole("button", { name: ROTA_COPY.order }));
+  await t.until(() => rotaDialog() !== null);
+  fireEvent.click(
+    within(rotaDialog() as HTMLElement).getByRole("button", {
+      name: `${ROTA_COPY.add}: Someone (2222…)`,
+    }),
+  );
+  const { origin, tab } = await updatingTab();
+  await acceptUpdate(t, origin, tab);
+  expect(tab.reloads).toBe(1);
+  if (options.another)
+    await anotherCopy(t, ROTA_CONTEXT(task.taskId), {
+      v: 1,
+      base: 2,
+      order: [OTHER],
+    });
+  await reload(t);
+  // Shown restored (and offering the other copy): conditions of the model and the page, never of focus. `until` gives up silently, so
+  // the premise is ASSERTED: a defect that loses the copy fails here, by an assertion, never by a later query that throws.
+  const shown = () =>
+    rotaDialog()?.querySelector('[data-recovery-state="restored"]') != null &&
+    rotaCount() === ROTA_COPY.count(2) &&
+    (!options.another ||
+      rotaDialog()?.querySelector("[data-recovery-alternatives]") != null);
+  await t.until(shown);
+  await t.settle();
+  expect(shown(), "premise: the dialog reopened restored on the copy").toBe(
+    true,
+  );
+  return world;
+}
+
+describe("revision 57 (F-R57-1): a restored turn order dialog focuses its order, never the recovery notice", () => {
+  collectRefusals();
+  test(
+    "Q-F1: after the reload the dialog opened on the copy focuses the order's first usable control (Move down), inside the order, not the banner's Discard instead",
+    SLOW,
+    async () => {
+      await restoredTurnOrder();
+      expect(inSurface(focused()), "not a recovery surface").toBe(false);
+      expect(
+        focused()?.closest("[data-rota-editor]"),
+        `inside the order (focus is on "${label(focused())}")`,
+      ).not.toBeNull();
+      expect(label(focused())).toMatch(new RegExp(`^${ROTA_COPY.down}: `));
+      expect(refusals, "no target inside a recovery surface").toEqual([]);
+    },
+  );
+
+  test(
+    "Q-F5: one activation of the focused control leaves the restored order (2 people) and its copy; Discard instead was not used",
+    SLOW,
+    async () => {
+      const { t, task, sent } = await restoredTurnOrder();
+      fireEvent.click(focused() as HTMLElement);
+      await t.settle();
+      expect(
+        rotaCount(),
+        "the restored order is still there (before the correction: 1, the discard's reset)",
+      ).toBe(ROTA_COPY.count(2));
+      expect(await copies(t, ROTA_CONTEXT(task.taskId))).toHaveLength(1);
+      expect(sent).toEqual([]);
+    },
+  );
+
+  test(
+    "Q-F4: a keyboard Discard instead with no other copy returns focus to the order's first usable control (the reset order's Remove)",
+    SLOW,
+    async () => {
+      const { t } = await restoredTurnOrder();
+      keyboardPress(
+        within(rotaDialog() as HTMLElement).getByRole("button", {
+          name: "Discard instead",
+        }),
+      );
+      await t.until(() => rotaCount() === ROTA_COPY.count(1));
+      await t.settle();
+      expect(rotaCount(), "the discard reset the order").toBe(
+        ROTA_COPY.count(1),
+      );
+      expect(inSurface(focused())).toBe(false);
+      expect(
+        focused()?.closest("[data-rota-editor]"),
+        `inside the order (focus is on "${label(focused())}")`,
+      ).not.toBeNull();
+      expect(label(focused())).toMatch(new RegExp(`^${ROTA_COPY.remove}: `));
+      expect(refusals).toEqual([]);
+    },
+  );
+
+  test(
+    "Q-F4 with another copy offered: a keyboard Discard instead returns focus inside the order, never to the other copy's Restore",
+    SLOW,
+    async () => {
+      const { t } = await restoredTurnOrder({ another: true });
+      expect(inSurface(focused()), "the arrival: not a recovery surface").toBe(
+        false,
+      );
+      keyboardPress(
+        within(rotaDialog() as HTMLElement).getByRole("button", {
+          name: "Discard instead",
+        }),
+      );
+      await t.until(() => rotaCount() === ROTA_COPY.count(1));
+      await t.settle();
+      expect(rotaCount(), "the discard reset the order").toBe(
+        ROTA_COPY.count(1),
+      );
+      expect(inSurface(focused()), "the discard's return").toBe(false);
+      expect(
+        focused()?.closest("[data-rota-editor]"),
+        `inside the order (focus is on "${label(focused())}")`,
+      ).not.toBeNull();
+      expect(refusals).toEqual([]);
+    },
+  );
+
+  test(
+    "Q-F3: another copy chosen while the restored banner stays: focus lands inside the order of the chosen copy, never on the banner",
+    SLOW,
+    async () => {
+      const { t } = await restoredTurnOrder({ another: true });
+      const restore = within(
+        rotaDialog()?.querySelector(
+          "[data-recovery-alternatives]",
+        ) as HTMLElement,
+      ).getByRole("button", { name: /^Restore the copy saved / });
+      keyboardPress(restore);
+      await t.until(() => rotaCount() === ROTA_COPY.count(1));
+      await t.settle();
+      expect(rotaCount(), "the chosen copy is applied").toBe(
+        ROTA_COPY.count(1),
+      );
+      expect(inSurface(focused())).toBe(false);
+      expect(
+        focused()?.closest("[data-rota-editor]"),
+        `inside the order (focus is on "${label(focused())}")`,
+      ).not.toBeNull();
+      expect(label(focused())).toMatch(
+        new RegExp(`^${ROTA_COPY.remove}: Someone`),
+      );
+      expect(refusals).toEqual([]);
+    },
+  );
+});
+
+describe("revision 57 (F-R57-1, Review 57 judgement): a restored dependency editor focuses its Task select", () => {
+  collectRefusals();
+  async function restoredDependencies() {
+    const world = await dependencies();
+    const { t, prerequisite } = world;
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.set }));
+    await t.until(editorReady);
+    await t.until(() =>
+      [
+        ...(screen.getByLabelText(DEPENDENCY_COPY.addTask) as HTMLSelectElement)
+          .options,
+      ].some((o) => o.value === prerequisite.taskId),
+    );
+    fireEvent.change(screen.getByLabelText(DEPENDENCY_COPY.addTask), {
+      target: { value: prerequisite.taskId },
+    });
+    await t.until(
+      () =>
+        (screen.getByLabelText(DEPENDENCY_COPY.addDay) as HTMLSelectElement)
+          .options.length > 1,
+    );
+    fireEvent.change(screen.getByLabelText(DEPENDENCY_COPY.addDay), {
+      target: { value: prerequisite.occurrenceId },
+    });
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.add }));
+    const { origin, tab } = await updatingTab();
+    await acceptUpdate(t, origin, tab);
+    expect(tab.reloads).toBe(1);
+    await reload(t);
+    const shown = () =>
+      editorBody()?.querySelector('[data-recovery-state="restored"]') != null &&
+      editorBody()?.querySelector(
+        `[data-editor-item="${prerequisite.occurrenceId}"]`,
+      ) != null;
+    await t.until(shown);
+    await t.settle();
+    // `until` gives up silently: the premise is asserted (a defect that loses the copy fails here, by an assertion).
+    expect(shown(), "premise: the editor reopened restored on the copy").toBe(
+      true,
+    );
+    return world;
+  }
+
+  test(
+    "Q-F2: after the reload the editor opened on the copy focuses the Task select (not a chosen day's Remove, not the banner)",
+    SLOW,
+    async () => {
+      await restoredDependencies();
+      expect(focused(), `focus is on "${label(focused())}"`).toBe(
+        screen.queryByLabelText(DEPENDENCY_COPY.addTask),
+      );
+      expect(inSurface(focused())).toBe(false);
+      expect(refusals).toEqual([]);
+    },
+  );
+
+  test(
+    "Q-F4: a keyboard Discard instead returns focus to the Task select; the restored day is gone with the copy",
+    SLOW,
+    async () => {
+      const { t, prerequisite } = await restoredDependencies();
+      keyboardPress(
+        within(editorBody() as HTMLElement).getByRole("button", {
+          name: "Discard instead",
+        }),
+      );
+      const gone = () =>
+        editorBody()?.querySelector(
+          `[data-editor-item="${prerequisite.occurrenceId}"]`,
+        ) == null;
+      await t.until(gone);
+      await t.settle();
+      expect(gone(), "the restored day is gone with the copy").toBe(true);
+      expect(focused(), `focus is on "${label(focused())}"`).toBe(
+        screen.queryByLabelText(DEPENDENCY_COPY.addTask),
+      );
+      expect(inSurface(focused())).toBe(false);
+      expect(refusals).toEqual([]);
+    },
+  );
 });
