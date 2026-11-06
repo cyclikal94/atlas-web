@@ -165,6 +165,7 @@ describe("S-ED1 / S-ED4: built from the authoritative direct list, saved on its 
         .checked,
     ).toBe(true);
     // Remove one and save: the WHOLE intended visible list, on the graph's version 7 (the cache holds 1).
+    expect(item(pres[1]?.occurrenceId as string)).not.toBeNull();
     fireEvent.click(
       within(item(pres[1]?.occurrenceId as string) as HTMLElement).getByRole(
         "button",
@@ -280,6 +281,7 @@ describe("S-ED2: a base that moves (changed dependencies)", () => {
     const { t, pres } = await openEditor({
       graphs: [graphOf({ version: 7, direct: [0, 1] })],
     });
+    expect(item(pres[0]?.occurrenceId as string)).not.toBeNull();
     fireEvent.click(
       within(item(pres[0]?.occurrenceId as string) as HTMLElement).getByRole(
         "button",

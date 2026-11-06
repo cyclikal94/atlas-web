@@ -98,6 +98,22 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
   not physical devices or a screen reader (WEB-09d, collected by WEB-15).
 
+## The dependency graph (WEB-18)
+
+- **Decorative map, real list** (TASK-04: "the diagram is decoration… the list is the real control"). The map is `aria-hidden` and holds nothing
+  focusable; a pointer pick on a box selects that day in the list and moves focus there. Everything the map shows is in the list.
+- **The list is an ARIA tree** (`role="tree"`, labelled "What this waits for", described by the keys line). Each day is a `treeitem` with
+  `aria-level`, `aria-setsize`, `aria-posinset`, `aria-selected` and, when it has items below, `aria-expanded`; child items sit in a
+  `role="group"`. A day is placed once; every other relationship is a reference item ("Needs “X · day” too") whose activation moves focus to
+  the day itself, opening the way to it. Keys: Up/Down, Right (open, then enter), Left (close, then go up), Home/End, Enter/Space (select);
+  one roving tab stop. Targets are at least 44 px high.
+- **States are words**, never colour alone (Done, Waiting, "Waiting on something you can't see", To do, "Not shown here"; "Needed directly" /
+  "Further back"); restricted and partial answers are said in text, and nothing hidden is counted.
+- **No live region of its own** (lint R6): a selection is announced through the announcer; "Checking again…" sets `aria-busy` on the section.
+- Automated: jest-axe on the dialog (jsdom); axe with real layout in Chromium, Firefox and WebKit at 1440×900, 1180×820 and 390×844 in light and
+  dark, no horizontal overflow, keyboard traversal of the tree and focus return to the opener (`fixture.tasks-18.spec.ts` E-G1..E-G4). Browser
+  emulation, not physical devices or a screen reader (WEB-09d, collected by WEB-15).
+
 ## What WEB-08c built in (the account switcher's focus)
 
 - **Closing the switcher returns focus to an entry control that is still there.** From the rail's account control or Settings' "Switch account", focus returns to that control. On mobile the account control sits in the More sheet, which closes as the switcher opens (two sheets are never stacked), so the switcher returns focus to **More** instead (R10 of the review of 15 October 2026; the shell hands the sheet's own return target to the slot, `ShellSlotState.returnFocus`).

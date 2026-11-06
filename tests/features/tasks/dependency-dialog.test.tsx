@@ -374,6 +374,12 @@ describe("the editor (D-10c-7)", () => {
     const editor = document.querySelector(
       "[data-dependency-editor]",
     ) as HTMLElement;
+    // WEB-18 FIXTURE ADAPTATION (labelled; the assertions below are unchanged): since D-18-7 the editor's start is built from its own
+    // depth-one read, so its start is judged once that read has answered (before it, the editor is "loading" and shows nothing built).
+    await t.until(
+      () => editor.getAttribute("data-dependency-editor") !== "loading",
+    );
+    expect(editor.getAttribute("data-dependency-editor")).toBe("open");
     expect(editor).toHaveTextContent(DEPENDENCY_COPY.editorEmpty);
     expect(document.body).toHaveTextContent(
       DEPENDENCY_COPY.editorLead("Hang the washing"),
