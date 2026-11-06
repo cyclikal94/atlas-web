@@ -22,7 +22,12 @@ export type GraphView =
   | { kind: "loading" }
   | { kind: "offline" }
   | { kind: "refused" }
-  | { kind: "error"; requestId?: string }
+  | {
+      kind: "error";
+      requestId?: string;
+      /** A re-read is in flight (set only while one is; the preview's fallback list stays meanwhile). */
+      checking?: true;
+    }
   | {
       kind: "ready";
       graph: DependencyGraph;
@@ -133,7 +138,9 @@ export function useDependencyGraph(
         ? {
             ...prev,
             view:
-              prev.view.kind === "ready" || prev.view.kind === "stale"
+              prev.view.kind === "ready" ||
+              prev.view.kind === "stale" ||
+              prev.view.kind === "error"
                 ? { ...prev.view, checking: true }
                 : prev.view.kind === "idle"
                   ? LOADING

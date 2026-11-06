@@ -451,6 +451,91 @@ export const UNIT_WEB18 = [
         "              {title}\n",
       ),
   },
+  // ---- revision 1 (independent review 1, F-R2..F-R4) ------------------------------------------------------------------------------
+  {
+    id: "MU-7036",
+    title:
+      "MU-7036: WEB-18 revision 1 (review F-R2): the tree takes Arrow, Home, End, Enter and Space held with Alt, Ctrl or Meta from the browser",
+    file: VIEW,
+    tests: VIEW_TESTS,
+    expect: /S-G9b/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (event.altKey || event.ctrlKey || event.metaKey) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-7037",
+    title:
+      "MU-7037: WEB-18 revision 1 (review F-R3): the summary rewrites the joined text, so a title containing '. and ' is altered",
+    file: VIEW,
+    tests: VIEW_TESTS,
+    expect: /S-G3b/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {text}.\n",
+        '      {text.replace(/\\. and /, ", and ")}.\n',
+      ),
+  },
+  {
+    id: "MU-7038",
+    title:
+      "MU-7038: WEB-18 revision 1 (review F-R4): 'Try again' from the stale notice shows no 'Checking again…' while the re-read is in flight",
+    file: VIEW,
+    tests: VIEW_TESTS,
+    expect: /S-G10b/,
+    patch: (t) =>
+      sub(
+        t,
+        "                {copy.TRY_AGAIN}\n              </Button>\n              {view.checking ? (",
+        "                {copy.TRY_AGAIN}\n              </Button>\n              {false ? (",
+      ),
+  },
+  {
+    id: "MU-7039",
+    title:
+      "MU-7039: WEB-18 revision 1 (review F-R4): the section is busy only while a READY answer is re-read (not a stale or failed one)",
+    file: VIEW,
+    tests: VIEW_TESTS,
+    expect: /S-G10b|S-G10c/,
+    patch: (t) =>
+      sub(
+        t,
+        '        ((view.kind === "ready" ||\n          view.kind === "stale" ||\n          view.kind === "error") &&\n          view.checking)',
+        '        (view.kind === "ready" && view.checking)',
+      ),
+  },
+  {
+    id: "MU-7040",
+    title:
+      "MU-7040: WEB-18 revision 1 (F-R4's related schedule): 'Try again' from the error shows no 'Checking again…' while the re-read is in flight",
+    file: VIEW,
+    tests: VIEW_TESTS,
+    expect: /S-G10c/,
+    patch: (t) =>
+      sub(
+        t,
+        "{copy.TRY_AGAIN}</Button>\n            {view.checking ? (",
+        "{copy.TRY_AGAIN}</Button>\n            {false ? (",
+      ),
+  },
+  {
+    id: "MU-7041",
+    title:
+      "MU-7041: WEB-18 revision 1 (F-R4's related schedule): the hook does not mark a failed view as checking while it is read again",
+    file: HOOK,
+    tests: VIEW_TESTS,
+    expect: /S-G10c/,
+    patch: (t) =>
+      sub(
+        t,
+        '              prev.view.kind === "stale" ||\n              prev.view.kind === "error"\n',
+        '              prev.view.kind === "stale"\n',
+      ),
+  },
 ];
 
 export const ENGINE_WEB18 = [

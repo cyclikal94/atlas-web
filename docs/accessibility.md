@@ -106,10 +106,11 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   `aria-level`, `aria-setsize`, `aria-posinset`, `aria-selected` and, when it has items below, `aria-expanded`; child items sit in a
   `role="group"`. A day is placed once; every other relationship is a reference item ("Needs “X · day” too") whose activation moves focus to
   the day itself, opening the way to it. Keys: Up/Down, Right (open, then enter), Left (close, then go up), Home/End, Enter/Space (select);
-  one roving tab stop. Targets are at least 44 px high.
+  one roving tab stop. A key held with Alt, Ctrl or Meta is left to the browser (history Back, word moves). Targets are at least 44 px high.
 - **States are words**, never colour alone (Done, Waiting, "Waiting on something you can't see", To do, "Not shown here"; "Needed directly" /
   "Further back"); restricted and partial answers are said in text, and nothing hidden is counted.
-- **No live region of its own** (lint R6): a selection is announced through the announcer; "Checking again…" sets `aria-busy` on the section.
+- **No live region of its own** (lint R6): a selection is announced through the announcer; "Checking again…" sets `aria-busy` on the section,
+  including while a stale or failed view is read again after "Try again".
 - Automated: jest-axe on the dialog (jsdom); axe with real layout in Chromium, Firefox and WebKit at 1440×900, 1180×820 and 390×844 in light and
   dark, no horizontal overflow, keyboard traversal of the tree and focus return to the opener (`fixture.tasks-18.spec.ts` E-G1..E-G4). Browser
   emulation, not physical devices or a screen reader (WEB-09d, collected by WEB-15).

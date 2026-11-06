@@ -509,6 +509,8 @@ function DependencyTree({
     onSelect(row.id);
   };
   const onKey = (event: KeyboardEvent<HTMLElement>, row: Row) => {
+    // A key held with Alt, Ctrl or Meta is the browser's or the system's (history Back, word moves): the tree takes none of them.
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const at = shown.findIndex((r) => r.key === row.key);
     const item = row.kind === "node" ? items.get(row.id) : undefined;
     const open = item !== undefined && isOpen(item);
@@ -704,14 +706,15 @@ function Summary({
         {s.rootRestricted ? GRAPH_COPY.rootRestrictedOnly : GRAPH_COPY.none}
       </p>
     );
-  const parts = [GRAPH_COPY.summary(s.direct, s.directDone)];
+  // Joined clause by clause, never by rewriting the joined text: a title is the person's own words and may contain anything.
+  let text = GRAPH_COPY.summary(s.direct, s.directDone);
   if (s.open.length > 0)
-    parts.push(GRAPH_COPY.open(s.open.map((id) => nodeLabel(index, id).title)));
-  if (s.rootRestricted) parts.push(GRAPH_COPY.hiddenToo);
-  if (s.further > 0) parts.push(GRAPH_COPY.furtherBack(s.further));
+    text += `. ${GRAPH_COPY.open(s.open.map((id) => nodeLabel(index, id).title))}`;
+  if (s.rootRestricted) text += `, ${GRAPH_COPY.hiddenToo}`;
+  if (s.further > 0) text += `. ${GRAPH_COPY.furtherBack(s.further)}`;
   return (
     <p className="text-[13px] text-ink-1" data-graph-summary="">
-      {parts.join(". ").replace(/\. and /, ", and ")}.
+      {text}.
     </p>
   );
 }
@@ -765,7 +768,11 @@ export function DependencyGraphSection({
     <section
       data-dependency-graph={state}
       aria-busy={
-        view.kind === "loading" || (view.kind === "ready" && view.checking)
+        view.kind === "loading" ||
+        ((view.kind === "ready" ||
+          view.kind === "stale" ||
+          view.kind === "error") &&
+          view.checking)
           ? true
           : undefined
       }
@@ -795,8 +802,13 @@ export function DependencyGraphSection({
               {copy.REQUEST_ID(view.requestId)}
             </p>
           ) : null}
-          <span>
+          <span className="flex flex-wrap items-center gap-2">
             <Button onClick={onRefresh}>{copy.TRY_AGAIN}</Button>
+            {view.checking ? (
+              <span className="text-[12px] text-ink-2" data-graph-checking="">
+                {GRAPH_COPY.checking}
+              </span>
+            ) : null}
           </span>
         </div>
       ) : graph !== null && index !== null && tree !== null ? (
@@ -813,6 +825,11 @@ export function DependencyGraphSection({
               <Button variant="quiet" onClick={onRefresh}>
                 {copy.TRY_AGAIN}
               </Button>
+              {view.checking ? (
+                <span className="text-[12px] text-ink-2" data-graph-checking="">
+                  {GRAPH_COPY.checking}
+                </span>
+              ) : null}
             </div>
           ) : null}
           {graph.restricted ? (

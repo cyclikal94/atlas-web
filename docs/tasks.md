@@ -1205,7 +1205,8 @@ record. The released-backend cases (`integration.tasks-18.spec.ts`) are focused 
 8. **D-18-8** "Keep editing" starts from the SUBMITTED list, shows "Waits for now: …" from its fresh read and supersedes on that read's version.
 9. **D-18-8a** Labels are the answer's task titles and the node's day ("No date" when undated); a recurring task's days are told apart by day.
 10. **D-18-9** States: loading; offline (hidden, "Can be checked when you're online."); refused; error ("Couldn't show how these connect", request
-    ID, Try again); stale ("Couldn't check again. Shown as it was at HH:MM.", Try again); checking ("Checking again…", `aria-busy`); empty
+    ID, Try again); stale ("Couldn't check again. Shown as it was at HH:MM.", Try again); checking ("Checking again…", `aria-busy`, also
+    beside "Try again" while a stale or failed view is read again, revision 1); empty
     ("Nothing needs doing first", or "This waits for something you can't see." when the root is restricted). **Running changed:** the preview's
     ordered list is the labelled fallback ("How these connect couldn't be shown. This is the order they can be done in.") when the graph read
     failed or was refused, not while it is loading (no flash of a list that is then replaced).
@@ -1216,15 +1217,19 @@ record. The released-backend cases (`integration.tasks-18.spec.ts`) are focused 
 ## Tests
 
 jsdom (FIXTURE): `dependency-graph-model.test.ts` (M-P1..M-P23 one rejection per invariant, the six documented examples, every builder, M-G1..M-G7,
-the maximal answer, the 300-answer property), `dependency-graph-hook.test.tsx` (H-1..H-10), `dependency-graph-view.test.tsx` (S-G1..S-G10),
+the maximal answer, the 300-answer property), `dependency-graph-hook.test.tsx` (H-1..H-10), `dependency-graph-view.test.tsx` (S-G1..S-G10 with
+S-G1b one name for the day; revision 1: S-G3b a title's own words in the summary, S-G9b modifier keys left to the browser, S-G10b/c checking
+from the stale and failed views),
 `dependency-editor-graph.test.tsx` (S-ED1..S-ED8), `api-graph.test.ts`, `commands-18.test.ts`; `tests/support/tasks/graphs.ts` builds valid answers
 from small specs and carries the backend's documented examples verbatim. `dependency-dialog.test.tsx` (WEB-10c) is unchanged except a labelled
-fixture adaptation of its `mount`: the editor's depth-one read answers the root alone (the server state those cases assume) and the dialog's full
-read stays unavailable, so its cases keep exercising the ordered list as the fallback. Native (FIXTURE, Chromium, Firefox, WebKit):
+fixture adaptation (`rootAloneAtDepthOne`, used by its `mount` and, since revision 1, by the R4 case that opens the editor through `mountTasks`
+itself, which also asserts that premise): the editor's depth-one read answers the root alone (the server state those cases assume) and the
+dialog's full read stays unavailable, so its cases keep exercising the ordered list as the fallback. Native (FIXTURE, Chromium, Firefox, WebKit):
 `fixture.tasks-18.spec.ts` E-G1..E-G5, E-G7, E-G9 (E-G6, an answer held across an account switch, is jsdom H-2: a switch remounts the detail).
 Released backend: `integration.tasks-18.spec.ts` I-18-G1..G9 in the `tasks` stack; two I-10C assertions of the ordered list now count the
-tree's items (labelled adaptations; same two days). Mutation: `scripts/mutation/catalogue-web18.mjs` (MU-7001..MU-7033 unit, MU-7101..MU-7103
-real engine); WEB-10c's MU-3018 re-anchored.
+tree's items (labelled adaptations; same two days). Mutation: `scripts/mutation/catalogue-web18.mjs` (unit MU-7001..MU-7025, MU-7027..MU-7034
+and, revision 1, MU-7036..MU-7041; MU-7026 not created, identical to MU-3017; MU-7035 withdrawn; real engine MU-7101..MU-7103); WEB-10c's
+MU-3018 re-anchored.
 
 ## Limits (WEB-18)
 

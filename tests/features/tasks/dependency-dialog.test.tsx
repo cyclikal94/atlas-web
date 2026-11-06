@@ -9,7 +9,7 @@ import {
 import { axe } from "jest-axe";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { TasksResult } from "../../../src/features/tasks/api";
+import type { TasksApi, TasksResult } from "../../../src/features/tasks/api";
 import { DEPENDENCY_COPY } from "../../../src/features/tasks/detail/Dependencies";
 import { usePreview } from "../../../src/features/tasks/detail/usePreview";
 import { TasksEnvProvider } from "../../../src/features/tasks/env";
@@ -74,6 +74,32 @@ const row = () =>
 const dialog = () =>
   document.querySelector("[data-dependency-dialog]") as HTMLElement | null;
 
+/**
+ * WEB-18 FIXTURE ADAPTATION (labelled for the reviewer): the editor's own depth-one graph read answered with the root alone (no direct
+ * prerequisite), on the cached occurrence version and with `strict()`'s rule; the dialog's full read stays unavailable (`uncertain`).
+ * Shared by `mount()` and by every case here that opens the editor through `mountTasks` itself (WEB-18 revision 1, review F-R1): without
+ * it the editor also reads "loading" for want of that read, which can hide what a case says it isolates.
+ */
+function rootAloneAtDepthOne(
+  root: SeededTask,
+  strict: () => boolean,
+): TasksApi["readDependencyGraph"] {
+  return async (_id, maxDepth) => {
+    if (maxDepth !== 1) return { ok: false, kind: "uncertain" };
+    const occurrence = root.rows.find((r) => r.id === root.occurrenceId);
+    return {
+      ok: true,
+      value: rootGraph({
+        root: root.occurrenceId,
+        task: root.taskId,
+        title: root.rows[0]?.label ?? "",
+        version: occurrence?.version ?? 1,
+        strict: strict(),
+      }),
+    };
+  };
+}
+
 async function mount(options: {
   root?: SeededTask;
   prerequisite?: SeededTask;
@@ -98,21 +124,10 @@ async function mount(options: {
      * empty. The dialog's full read stays unavailable (`uncertain`), so these cases keep exercising the preview's ordered list (now the
      * labelled fallback, D-18-9). The graph itself is qualified in the WEB-18 suites.
      */
-    readDependencyGraph: async (_id, maxDepth) => {
-      if (maxDepth !== 1) return { ok: false, kind: "uncertain" };
+    readDependencyGraph: rootAloneAtDepthOne(root, () => {
       const shown = options.preview(root, prerequisite);
-      const occurrence = root.rows.find((r) => r.id === root.occurrenceId);
-      return {
-        ok: true,
-        value: rootGraph({
-          root: root.occurrenceId,
-          task: root.taskId,
-          title: root.rows[0]?.label ?? "",
-          version: occurrence?.version ?? 1,
-          strict: shown.ok ? shown.value.strict : false,
-        }),
-      };
-    },
+      return shown.ok ? shown.value.strict : false;
+    }),
   });
   const t = await mountTasks({
     path: path(root),
@@ -671,11 +686,20 @@ describe("R4: one admission for a new and a replacing save", () => {
     const fresh = new Promise<void>((resolve) => {
       release = resolve;
     });
+    // WEB-18 revision 1 (review F-R1, MU-3042): the editor's own depth-one read answers as in `mount()`, so the outstanding PREVIEW
+    // re-read below is the only reason the editor is still "loading" (the premise this case exists to prove; asserted before release).
+    let depthOneAnswered = 0;
+    const depthOne = rootAloneAtDepthOne(root, () => false);
     const api = fakeApi({
       readDependencies: async () => {
         reads += 1;
         if (reads > 1) await fresh;
         return answer(root, [], { unavailable: reads > 1 });
+      },
+      readDependencyGraph: async (id, maxDepth) => {
+        const out = await depthOne(id, maxDepth);
+        if (maxDepth === 1) depthOneAnswered += 1;
+        return out;
       },
     });
     const t = await mountTasks({ path: path(root), rows: root.rows, api });
@@ -689,6 +713,10 @@ describe("R4: one admission for a new and a replacing save", () => {
     await t.settle();
     // The re-read is outstanding: the preview the editor was opened from (nothing private then) admits nothing.
     expect(reads, "the editor read the preview again").toBeGreaterThan(before);
+    expect(
+      depthOneAnswered,
+      "premise: the editor's own depth-one read has answered",
+    ).toBeGreaterThan(0);
     expect(editor()).toBe("loading");
     expect(
       screen.getByRole("button", { name: DEPENDENCY_COPY.save }),

@@ -257,6 +257,27 @@ describe("S-G1..S-G3: the tree and the map agree with the answer's edges and sta
     );
     expect(graph.direct_prerequisites).toHaveLength(2);
   });
+
+  test("S-G3b: the summary keeps a title's own words (one containing '. and '), joining the hidden clause itself", async () => {
+    const title = "Pay rent. and file return";
+    await openDialog({
+      spec: {
+        root: gid(60),
+        nodes: [
+          { id: gid(60), task: gid(60, 1), title: "Move out", hidden: true },
+          { id: gid(61), task: gid(61, 1), title },
+        ],
+        edges: [[gid(61), gid(60)]],
+      },
+    });
+    const summary = document.querySelector(
+      "[data-graph-summary]",
+    ) as HTMLElement;
+    expect(summary.textContent).toBe(
+      `${GRAPH_COPY.summary(1, 0)}. ${GRAPH_COPY.open([title])}, ${GRAPH_COPY.hiddenToo}.`,
+    );
+    expect(summary.textContent).toContain(`“${title}”`);
+  });
 });
 
 describe("S-G1b: one name for this day in both views", () => {
@@ -527,6 +548,41 @@ describe("S-G9: the keyboard model and the tree's semantics", () => {
     expect(document.activeElement).toBe(nodeItem(gid(23)));
     expect(nodeItem(gid(21)).getAttribute("aria-expanded")).toBe("true");
   });
+
+  test("S-G9b: a key held with Alt, Ctrl or Meta is left to the browser (history Back, word moves); the plain key is the tree's", async () => {
+    const { t, graph } = await openDialog({ spec: sharedSpec() });
+    const root = nodeItem(graph.root_id);
+    const cook = nodeItem(gid(21));
+    cook.focus();
+    for (const modifier of ["altKey", "ctrlKey", "metaKey"] as const)
+      for (const key of [
+        "ArrowLeft",
+        "ArrowUp",
+        "ArrowDown",
+        "Home",
+        "End",
+        "Enter",
+        " ",
+      ]) {
+        const taken = !fireEvent.keyDown(cook, { key, [modifier]: true });
+        await t.settle();
+        expect(taken, `${modifier}+${key} is not taken`).toBe(false);
+        expect(document.activeElement, `${modifier}+${key}`).toBe(cook);
+        expect(cook.getAttribute("aria-expanded")).toBe("true");
+        expect(document.querySelector("[data-graph-inspect]")).toBeNull();
+      }
+    // Control: the same element and keys without a modifier are handled (prevented) and act.
+    expect(fireEvent.keyDown(cook, { key: "ArrowLeft" })).toBe(false);
+    await t.settle();
+    expect(cook.getAttribute("aria-expanded")).toBe("false");
+    expect(fireEvent.keyDown(cook, { key: "ArrowUp" })).toBe(false);
+    expect(document.activeElement).toBe(root);
+    // Shift is not a browser shortcut here and changes nothing about the tree's keys.
+    expect(fireEvent.keyDown(root, { key: "ArrowDown", shiftKey: true })).toBe(
+      false,
+    );
+    expect(document.activeElement).toBe(cook);
+  });
 });
 
 describe("S-G10: states and the map's conditions", () => {
@@ -577,6 +633,86 @@ describe("S-G10: states and the map's conditions", () => {
     );
     await t.until(() => section()?.dataset.dependencyGraph === "ready");
     expect(document.querySelector("[data-graph-stale]")).toBeNull();
+  });
+
+  test("S-G10b: 'Try again' from the stale notice says it is checking (busy) until the answer replaces it", async () => {
+    let release: (() => void) | null = null;
+    const { t } = await openDialog({
+      spec: chainSpec(),
+      answers: [
+        (g) => ({ ok: true, value: g }),
+        () => ({ ok: false, kind: "uncertain" }),
+        (g) =>
+          new Promise<GraphAnswer>((resolve) => {
+            release = () => resolve({ ok: true, value: g });
+          }),
+      ],
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: GRAPH_COPY.checkAgain }),
+    );
+    await t.until(() => section()?.dataset.dependencyGraph === "stale");
+    expect(section()?.getAttribute("aria-busy")).toBeNull();
+    expect(document.querySelector("[data-graph-checking]")).toBeNull();
+    const stale = document.querySelector("[data-graph-stale]") as HTMLElement;
+    fireEvent.click(within(stale).getByRole("button", { name: "Try again" }));
+    await t.settle();
+    // Still the old answer, still labelled stale, and now visibly checking beside the button that asked.
+    expect(section()?.dataset.dependencyGraph).toBe("stale");
+    expect(section()?.getAttribute("aria-busy")).toBe("true");
+    expect(stale.querySelector("[data-graph-checking]")).toHaveTextContent(
+      GRAPH_COPY.checking,
+    );
+    expect(document.querySelectorAll("[data-graph-checking]")).toHaveLength(1);
+    await act(async () => {
+      release?.();
+    });
+    await t.settle();
+    expect(section()?.dataset.dependencyGraph).toBe("ready");
+    expect(section()?.getAttribute("aria-busy")).toBeNull();
+    expect(document.querySelector("[data-graph-checking]")).toBeNull();
+  });
+
+  test("S-G10c: 'Try again' from the error says it is checking (busy) while the preview's fallback list stays", async () => {
+    let release: ((a: GraphAnswer) => void) | null = null;
+    const { t, graph } = await openDialog({
+      spec: chainSpec(),
+      answers: [
+        () => ({ ok: false, kind: "uncertain", requestId: "req-7" }),
+        () =>
+          new Promise<GraphAnswer>((resolve) => {
+            release = resolve;
+          }),
+        (g) => ({ ok: true, value: g }),
+      ],
+    });
+    expect(section()?.dataset.dependencyGraph).toBe("error");
+    expect(section()?.getAttribute("aria-busy")).toBeNull();
+    expect(document.querySelector("[data-graph-checking]")).toBeNull();
+    const error = document.querySelector("[data-graph-error]") as HTMLElement;
+    fireEvent.click(within(error).getByRole("button", { name: "Try again" }));
+    await t.settle();
+    expect(section()?.dataset.dependencyGraph).toBe("error");
+    expect(section()?.getAttribute("aria-busy")).toBe("true");
+    expect(error.querySelector("[data-graph-checking]")).toHaveTextContent(
+      GRAPH_COPY.checking,
+    );
+    expect(document.querySelector("[data-dependency-list]")).not.toBeNull();
+    // Failing again: the error stands, no longer checking.
+    await act(async () => {
+      release?.({ ok: false, kind: "uncertain" });
+    });
+    await t.settle();
+    expect(section()?.dataset.dependencyGraph).toBe("error");
+    expect(section()?.getAttribute("aria-busy")).toBeNull();
+    expect(document.querySelector("[data-graph-checking]")).toBeNull();
+    fireEvent.click(
+      within(
+        document.querySelector("[data-graph-error]") as HTMLElement,
+      ).getByRole("button", { name: "Try again" }),
+    );
+    await t.until(() => section()?.dataset.dependencyGraph === "ready");
+    expect(nodeItem(graph.root_id)).not.toBeNull();
   });
 
   test("a refusal removes the view: the screen says it can't be shown, and the preview's fallback list stands", async () => {
