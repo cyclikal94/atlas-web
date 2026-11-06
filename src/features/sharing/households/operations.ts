@@ -123,9 +123,14 @@ function liveReason(memory: HouseholdsMemory): string | null {
   return null;
 }
 
-/** What a refusal or failure says, by kind. */
+/**
+ * What a refusal or failure says, by kind, and for `capacity` by the command it refused (review 1 F-R1-3): at 0.31 `slice_capacity` is
+ * the 32-household cap of `create_household` and of an ACCEPTED invitation, but `invite_to_household`'s means the RECIPIENT already has
+ * 200 pending invitations; any other command's is said as a limit without guessing which.
+ */
 export function messageOf(
   failure: Exclude<HouseholdResult<never>, { ok: true }>,
+  command?: ManagementCommand,
 ): string {
   switch (failure.kind) {
     case "gone":
@@ -137,7 +142,13 @@ export function messageOf(
     case "offline":
       return base.SAVE_OFFLINE_REASON;
     case "capacity":
-      return copy.CAPACITY_REFUSED;
+      return command === undefined ||
+        command.kind === "create_household" ||
+        (command.kind === "respond_to_household_invitation" && command.accept)
+        ? copy.CAPACITY_REFUSED
+        : command.kind === "invite_to_household"
+          ? copy.INVITE_CAPACITY_REFUSED
+          : copy.LIMIT_REFUSED;
     case "limit":
       return copy.SIGNUP_LIMIT;
     case "last_manager":
@@ -171,6 +182,10 @@ function refreshAfterChange(ctx: Ctx): void {
   // Asked AFTER the change (R7): a snapshot read already under way may predate it.
   void ctx.defaults.acquire(ctx.defaults.boundary());
 }
+
+/** The one command an attempt carries (every household attempt carries exactly one), or undefined. */
+const commandOf = (attempt: Attempt): ManagementCommand | undefined =>
+  (JSON.parse(attempt.body) as ManagementCommand[])[0];
 
 export interface SendMeta {
   done: string;
@@ -239,7 +254,7 @@ export async function sendAttempt(
       // The server's own refusal of this key and body: it was not made.
       if (earlier !== null) hold(memory, null);
       memory.note(meta.surface, {
-        message: messageOf(result),
+        message: messageOf(result, commandOf(attempt)),
         ...requestIdOf(result),
       });
       // What the refusal says may be out of date here: read again what it concerns (a lost role, a changed household, a stale row).
@@ -267,21 +282,32 @@ export async function run(
   return sendAttempt(ctx, token, nextAttempt(null, [command], ctx.newId), meta);
 }
 
-/** Try again: the unresolved attempt as it was (same key, same body). */
-export async function retry(ctx: Ctx): Promise<void> {
+/**
+ * Try again: the unresolved attempt as it was (same key, same body). A Try again that is now known to have been made completes the form
+ * it came from as a first-try success does (review 1 F-R1-2), wherever it was pressed: a create's name is not kept for another and the
+ * household it made is shown; an invite's username and a rename's typed name are forgotten. Returns the attempt it completed, or null:
+ * the screen the Try again was pressed on closes its own dialog (a rename's `onRetried`), as its first try would have.
+ */
+export async function retry(ctx: Ctx): Promise<Unresolved | null> {
   const earlier = unresolvedOf(ctx.memory);
   const token = earlier === null ? null : admit(ctx.memory, true);
-  if (earlier === null || token === null) return;
+  if (earlier === null || token === null) return null;
   const result = await sendAttempt(ctx, token, earlier.attempt, {
     done: earlier.done,
     surface: earlier.surface,
     target: earlier.target,
   });
-  // A create that is now known to have been made: its name is not kept for another, and the household it made is shown.
-  if (result?.ok && earlier.surface === "new" && earlier.target !== null) {
-    ctx.memory.draft(formContext.create(), null);
-    ctx.go(`/sharing/households/${encodeURIComponent(earlier.target)}`);
-  }
+  if (!result?.ok) return null;
+  const { memory } = ctx;
+  const target = earlier.target;
+  if (earlier.surface === "new" && target !== null) {
+    memory.draft(formContext.create(), null);
+    ctx.go(`/sharing/households/${encodeURIComponent(target)}`);
+  } else if (target !== null && earlier.surface === `rename:${target}`)
+    memory.draft(formContext.rename(target), null);
+  else if (target !== null && earlier.surface === `invite:${target}`)
+    memory.draft(formContext.invite(target), null);
+  return earlier;
 }
 
 /** Reload while an attempt is unresolved: the lists again; the attempt is NOT ended (R8). */

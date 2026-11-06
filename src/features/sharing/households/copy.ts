@@ -37,7 +37,6 @@ export const FROM_SNAPSHOT =
   "You're offline. These are the households your last sharing defaults named, not necessarily every household you're in.";
 export const SNAPSHOT_NONE =
   "You're offline. Your last sharing defaults named no households; connect to see every household you're in.";
-export const SELECT = "Choose a household to see its members.";
 
 // ---- the detail --------------------------------------------------------------------------------------------------------------------
 export const MAIN_NOTE = (name: string) =>
@@ -107,6 +106,9 @@ export const NAME_LABEL = "Household name";
 export const CREATE = "Create household";
 export const NAME_REASON = "Enter a name of 1 to 300 characters.";
 export const LIST_WAIT = "Wait until your households have loaded.";
+/** New household's Create while the list it checks (the 32 cap, the same-name guard) could not be read: the banner above has Try again. */
+export const LIST_FAILED_REASON =
+  "Your households couldn't be loaded. Try again above first.";
 export const SAME_NAME = (name: string) =>
   `You already belong to a household called ${name}. Create another?`;
 export const CREATE_ANOTHER = "Create another";
@@ -119,6 +121,11 @@ export const SAME_AS_NOW = "That's its name already.";
 // ---- refusals ----------------------------------------------------------------------------------------------------------------------
 export const CAPACITY_REFUSED =
   "Atlas didn't do this: you're already in 32 households, the most allowed.";
+/** `invite_to_household`'s `slice_capacity`: the RECIPIENT already has as many pending invitations as the server allows (200 at 0.31). */
+export const INVITE_CAPACITY_REFUSED =
+  "Atlas didn't send this invitation: the person you invited already has as many invitations waiting as Atlas allows. They need to answer some first.";
+/** A `slice_capacity` on any other command (none is known at 0.31): a limit, said without guessing which. */
+export const LIMIT_REFUSED = "Atlas didn't do this: a limit was reached.";
 export const LAST_MANAGER_REFUSED =
   "Atlas didn't do this: a household needs at least one other manager first.";
 export const FORBIDDEN =
@@ -135,6 +142,8 @@ export const INVITATIONS_TITLE = "Invitations";
 export const INVITATIONS_TITLE_FOR = (name: string) => `Invitations — ${name}`;
 export const FOR_YOU = "For you";
 export const FOR_YOU_NONE = "No pending invitations";
+export const FOR_YOU_LOADING = "Loading your invitations…";
+export const FOR_YOU_FAILED = "Couldn't load your invitations.";
 export const INVITED_YOU = (name: string, days: number | null) =>
   days === null
     ? `${name} — invited you`

@@ -349,6 +349,184 @@ export const UNIT_WEB12B = [
         "        {browse?.refused !== false ? (\n          <p",
       ),
   },
+  // ---- revision 1 (Independent Review 1: F-R1-1 failed reads, F-R1-2 retry completion, F-R1-3 capacity wording, F-R1-4 prompt) ----
+  {
+    id: "MU-6226",
+    title:
+      "WEB-12b review 1 F-R1-1: the detail shown alone (below 1280 px) draws a failed list read as nothing or B5's view, with no failure and no Try again",
+    file: `${D}/HouseholdDetail.tsx`,
+    tests: [PAGE],
+    expect: /MU-6226/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const listFailedHere = withoutPane && failedUnread(read, online);\n",
+        "  const listFailedHere = withoutPane && false && failedUnread(read, online);\n",
+      ),
+  },
+  {
+    id: "MU-6227",
+    title:
+      "WEB-12b review 1 F-R1-1: a failed sent walk is drawn as 'Loading what you sent…' in 'Invited by you, waiting', with no Try again",
+    file: `${D}/HouseholdDetail.tsx`,
+    tests: [PAGE],
+    expect: /MU-6227/,
+    patch: (t) =>
+      sub(
+        t,
+        "          {failedUnread(memory.sent, online) ? (\n",
+        "          {false ? (\n",
+      ),
+  },
+  {
+    id: "MU-6228",
+    title:
+      "WEB-12b review 1 F-R1-1: Rename draws a failed list read as 'Loading…', with no Try again",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [PAGE],
+    expect: /MU-6228/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {household === null && failedUnread(memory.households, online) ? (\n",
+        "        {false ? (\n",
+      ),
+  },
+  {
+    id: "MU-6229",
+    title:
+      "WEB-12b review 1 F-R1-1: the signup dialog draws a failed list read as 'Loading…', with no Try again",
+    file: `${D}/SignupDialog.tsx`,
+    tests: [SIGNUP],
+    expect: /MU-6229/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {household === null && failedUnread(memory.households, online) ? (\n",
+        "        {false ? (\n",
+      ),
+  },
+  {
+    id: "MU-6230",
+    title:
+      "WEB-12b review 1 F-R1-1: New household does not show a failed list read or its Try again (Create only waits)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [PAGE],
+    expect: /MU-6230/,
+    patch: (t) => sub(t, "        {listFailed ? (\n", "        {false ? (\n"),
+  },
+  {
+    id: "MU-6231",
+    title:
+      "WEB-12b review 1 F-R1-1: the household's invitations dialog silently drops its Invite section when the list read has failed",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [INVITATIONS],
+    expect: /MU-6231/,
+    patch: (t) =>
+      sub(
+        t,
+        "              {failedUnread(memory.households, online) ? (\n",
+        "              {false ? (\n",
+      ),
+  },
+  {
+    id: "MU-6232",
+    title:
+      "WEB-12b review 1 F-R1-2: a successful Try again of a lost invite keeps the username typed (a first try clears it)",
+    file: `${D}/operations.ts`,
+    tests: [INVITATIONS],
+    expect: /MU-6232/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.draft(formContext.invite(target), null);\n",
+        "    undefined;\n",
+      ),
+  },
+  {
+    id: "MU-6233",
+    title:
+      "WEB-12b review 1 F-R1-2: a successful Try again of a lost rename leaves its dialog open (a first try closes it)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [PAGE],
+    expect: /MU-6233/,
+    patch: (t) =>
+      sub(
+        t,
+        "            if (completed.surface === `rename:${householdId}`) onClose();\n",
+        "            if (completed.surface === `rename:${householdId}`) undefined;\n",
+      ),
+  },
+  {
+    id: "MU-6234",
+    title:
+      "WEB-12b review 1 F-R1-3: an invitation refused for the recipient's waiting invitations (503 slice_capacity) is worded as your own 32-household cap",
+    file: `${D}/operations.ts`,
+    tests: [MODEL, INVITATIONS],
+    expect: /MU-6234/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? copy.INVITE_CAPACITY_REFUSED\n",
+        "          ? copy.CAPACITY_REFUSED\n",
+      ),
+  },
+  {
+    id: "MU-6235",
+    title:
+      "WEB-12b review 1 F-R1-4: with nothing to choose (the list loading, failed or empty) the desktop detail column says 'Choose a household'",
+    file: `${D}/screens.tsx`,
+    tests: [PAGE],
+    expect: /MU-6235/,
+    patch: (t) =>
+      sub(
+        t,
+        "              implicit === null ? null : detail(implicit)\n",
+        "              implicit === null ? <p>Choose a household to see its members.</p> : detail(implicit)\n",
+      ),
+  },
+  {
+    id: "MU-6236",
+    title:
+      "WEB-12b review 1 F-R1-1: a failed read's Try again does not read again",
+    file: `${D}/parts.tsx`,
+    tests: [PAGE],
+    expect: /MU-6236/,
+    patch: (t) =>
+      sub(
+        t,
+        "          <Button onClick={() => void READERS[kind](ctx.memory, ctx.api)}>\n",
+        "          <Button onClick={() => undefined}>\n",
+      ),
+  },
+  {
+    id: "MU-6237",
+    title:
+      "WEB-12b review 1 F-R1-1: a failed read is shown without its request id",
+    file: `${D}/parts.tsx`,
+    tests: [PAGE],
+    expect: /MU-6237/,
+    patch: (t) =>
+      sub(
+        t,
+        '          failure !== null && "requestId" in failure\n            ? failure.requestId\n            : undefined\n',
+        "          undefined\n",
+      ),
+  },
+  {
+    id: "MU-6238",
+    title:
+      "WEB-12b review 1 F-R1-2: a successful Try again of a lost rename keeps the typed name as a draft (Rename reopens on it, not the household's name)",
+    file: `${D}/operations.ts`,
+    tests: [PAGE],
+    expect: /MU-6238/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.draft(formContext.rename(target), null);\n",
+        "    undefined;\n",
+      ),
+  },
 ];
 
 export const ENGINE_WEB12B = [
@@ -420,6 +598,21 @@ export const ENGINE_WEB12B = [
         ),
         "  const latest = useRef({ search: 0, exact: 0 });\n",
         '  const latest = useRef({ search: 0, exact: 0 });\n  // biome-ignore lint/correctness/useExhaustiveDependencies: mutant\n  useEffect(() => {\n    const kept = keep?.get("search") ?? "";\n    if (browse && kept.trim() !== "") void ask("search", kept.trim(), setSearch);\n  }, []);\n',
+      ),
+  },
+  {
+    id: "MU-6306",
+    title:
+      "WEB-12b review 1 F-R1-1: (REAL ENGINE) at 390 px the detail alone draws a failed households read with no failure and no Try again",
+    file: `${D}/HouseholdDetail.tsx`,
+    spec: "tests/e2e/fixture.households.spec.ts",
+    grep: "E-HH12:",
+    expect: /E-HH12:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const listFailedHere = withoutPane && failedUnread(read, online);\n",
+        "  const listFailedHere = withoutPane && false && failedUnread(read, online);\n",
       ),
   },
 ];

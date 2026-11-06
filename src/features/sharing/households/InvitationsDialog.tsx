@@ -8,7 +8,7 @@ import * as base from "../copy";
 import { DirectoryLookup } from "../DirectoryLookup";
 import { Banner, formatWhen } from "../parts";
 import * as copy from "./copy";
-import { householdOf, listOf, readInvitations, walkSent } from "./memory";
+import { householdOf, listOf } from "./memory";
 import {
   daysLeft,
   formContext,
@@ -24,8 +24,10 @@ import {
 } from "./operations";
 import {
   blockedReason,
+  failedUnread,
   Note,
   ProblemBanner,
+  ReadFailed,
   UnresolvedBanner,
   useAsk,
 } from "./parts";
@@ -38,6 +40,10 @@ import {
  *
  * "Sent by you" is `GET /invitations/sent`, which is SENDER-keyed: invitations other managers sent are not in it, and the dialog says so.
  * Every status is the server's, verbatim; Revoke is offered only on a waiting row of a household you manage (its own version).
+ *
+ * A read it needs that FAILED with nothing landed (For you, Sent by you and, opened for a household, the household list its Invite
+ * section needs) is shown as that failure with its request id and Try again, never as "Loading…" or a silently missing section (review 1
+ * F-R1-1).
  */
 export function InvitationsDialog({
   ctx,
@@ -153,19 +159,15 @@ export function InvitationsDialog({
                 requestId={problem.requestId}
               />
             ))}
-            {memory.invitations.status === "failed" &&
-            memory.invitations.last === null ? (
-              <Banner
-                message={copy.FAILED}
-                action={
-                  <Button onClick={() => void readInvitations(memory, ctx.api)}>
-                    {base.TRY_AGAIN}
-                  </Button>
-                }
+            {failedUnread(memory.invitations, online) ? (
+              <ReadFailed
+                ctx={ctx}
+                kind="invitations"
+                message={copy.FOR_YOU_FAILED}
               />
             ) : memory.invitations.last === null ? (
               <p className="text-[13px] text-ink-2">
-                {online ? copy.LOADING : copy.NEEDS_CONNECTION}
+                {online ? copy.FOR_YOU_LOADING : copy.NEEDS_CONNECTION}
               </p>
             ) : pending.length === 0 ? (
               <p className="text-[13px] text-ink-1">{copy.FOR_YOU_NONE}</p>
@@ -267,6 +269,24 @@ export function InvitationsDialog({
                 </Note>
               )}
             </section>
+          ) : householdId !== null ? (
+            // Opened for a household the list does not (yet) have: why there is no Invite section, never silence.
+            <div
+              className="flex flex-col gap-2"
+              data-invitations="invite-unknown"
+            >
+              {failedUnread(memory.households, online) ? (
+                <ReadFailed ctx={ctx} kind="households" message={copy.FAILED} />
+              ) : (
+                <p className="text-[13px] text-ink-2">
+                  {memory.households.last !== null
+                    ? copy.NOT_IN_IT
+                    : online
+                      ? copy.LOADING
+                      : copy.NEEDS_CONNECTION}
+                </p>
+              )}
+            </div>
           ) : null}
           <section
             aria-labelledby={ids.sent}
@@ -278,15 +298,8 @@ export function InvitationsDialog({
             </h3>
             <Note>{copy.SENT_NOTE}</Note>
             <ProblemBanner memory={memory} surface={`sent:${scope}`} />
-            {memory.sent.status === "failed" && memory.sent.last === null ? (
-              <Banner
-                message={copy.SENT_FAILED}
-                action={
-                  <Button onClick={() => void walkSent(memory, ctx.api)}>
-                    {base.TRY_AGAIN}
-                  </Button>
-                }
-              />
+            {failedUnread(memory.sent, online) ? (
+              <ReadFailed ctx={ctx} kind="sent" message={copy.SENT_FAILED} />
             ) : memory.sent.last === null ? (
               <p className="text-[13px] text-ink-2">
                 {online ? copy.SENT_LOADING : copy.NEEDS_CONNECTION}

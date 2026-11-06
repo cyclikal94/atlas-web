@@ -10,9 +10,11 @@ import { householdPath, invitationsPath } from "../route";
 import { useHouseholdsEnv } from "./env";
 import {
   type HouseholdsMemory,
+  type Read,
   readHouseholds,
   readInvitations,
   readSignup,
+  type Unresolved,
   useHouseholdsMemory,
   walkSent,
 } from "./memory";
@@ -98,9 +100,16 @@ export const blockedReason = (memory: HouseholdsMemory): string | null =>
 
 /**
  * The unresolved attempt (R8), with its own Try again and Reload. Shown on the page and in every household dialog: nothing new is sent
- * until it is resolved, so wherever the person is, this is what they can do.
+ * until it is resolved, so wherever the person is, this is what they can do. `onRetried` hears the attempt a Try again pressed HERE
+ * completed (made, not refused): the dialog it was pressed in finishes as its first try would have (review 1 F-R1-2).
  */
-export function UnresolvedBanner({ ctx }: { ctx: Ctx }) {
+export function UnresolvedBanner({
+  ctx,
+  onRetried,
+}: {
+  ctx: Ctx;
+  onRetried?: (completed: Unresolved) => void;
+}) {
   const { memory } = ctx;
   const unresolved = unresolvedOf(memory);
   if (unresolved === null) return null;
@@ -120,7 +129,15 @@ export function UnresolvedBanner({ ctx }: { ctx: Ctx }) {
                 {base.TRY_AGAIN}
               </Button>
             ) : (
-              <Button onClick={() => void retry(ctx)}>{base.TRY_AGAIN}</Button>
+              <Button
+                onClick={() =>
+                  void retry(ctx).then((completed) => {
+                    if (completed !== null) onRetried?.(completed);
+                  })
+                }
+              >
+                {base.TRY_AGAIN}
+              </Button>
             )}
             <Button
               variant="quiet"
@@ -130,6 +147,48 @@ export function UnresolvedBanner({ ctx }: { ctx: Ctx }) {
               {base.RELOAD}
             </Button>
           </span>
+        }
+      />
+    </div>
+  );
+}
+
+/**
+ * Whether `read` FAILED with nothing landed on this page (WF-SHARING-01's Er state, review 1 F-R1-1): a screen that needs it shows the
+ * failure with its own Try again (`ReadFailed`), never "Loading…". Offline the screen says it needs a connection instead (the read is
+ * asked again on reconnection: `useAsk`); a read that once landed keeps showing that answer with its time.
+ */
+export const failedUnread = (read: Read<unknown>, online: boolean): boolean =>
+  online && read.status === "failed" && read.last === null;
+
+/**
+ * A failed read (`failedUnread`): what could not be read, its copyable request id, and a Try again that asks it again (the same reader
+ * the screen's mount asked: `READERS`). A Try again while one is already on its way is not offered twice: the read is then `loading`
+ * and the screen shows its loading line.
+ */
+export function ReadFailed({
+  ctx,
+  kind,
+  message,
+}: {
+  ctx: Ctx;
+  kind: ReadKind;
+  message: string;
+}) {
+  const failure = ctx.memory[kind].failure;
+  return (
+    <div data-households-read-failed={kind}>
+      <Banner
+        message={message}
+        requestId={
+          failure !== null && "requestId" in failure
+            ? failure.requestId
+            : undefined
+        }
+        action={
+          <Button onClick={() => void READERS[kind](ctx.memory, ctx.api)}>
+            {base.TRY_AGAIN}
+          </Button>
         }
       />
     </div>

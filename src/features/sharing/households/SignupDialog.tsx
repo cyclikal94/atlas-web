@@ -5,9 +5,9 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { List } from "../../../components/ui/list";
 import * as base from "../copy";
-import { Banner, formatWhen } from "../parts";
+import { formatWhen } from "../parts";
 import * as copy from "./copy";
-import { householdOf, readSignup } from "./memory";
+import { householdOf } from "./memory";
 import type { AccountInvitationSummary } from "./model";
 import {
   type Ctx,
@@ -18,8 +18,10 @@ import {
 } from "./operations";
 import {
   blockedReason,
+  failedUnread,
   Note,
   ProblemBanner,
+  ReadFailed,
   UnresolvedBanner,
   useAsk,
 } from "./parts";
@@ -107,7 +109,9 @@ export function SignupDialog({
     >
       <div className="flex flex-col gap-5" data-signup-dialog={householdId}>
         <UnresolvedBanner ctx={ctx} />
-        {household === null ? (
+        {household === null && failedUnread(memory.households, online) ? (
+          <ReadFailed ctx={ctx} kind="households" message={copy.FAILED} />
+        ) : household === null ? (
           <p className="text-[13.5px] text-ink-1">
             {memory.households.last !== null
               ? copy.NOT_IN_IT
@@ -197,14 +201,11 @@ export function SignupDialog({
             <h3 id={heading} className="text-[13.5px] font-medium text-ink-1">
               {copy.SIGNUP_LIST_HEADING}
             </h3>
-            {memory.signup.status === "failed" && list === null ? (
-              <Banner
+            {failedUnread(memory.signup, online) ? (
+              <ReadFailed
+                ctx={ctx}
+                kind="signup"
                 message={copy.SIGNUP_FAILED}
-                action={
-                  <Button onClick={() => void readSignup(memory, ctx.api)}>
-                    {base.TRY_AGAIN}
-                  </Button>
-                }
               />
             ) : list === null ? (
               <p className="text-[13px] text-ink-2">

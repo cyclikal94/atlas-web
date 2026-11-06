@@ -8,9 +8,11 @@ import { cmd, formContext, sameName, validName } from "./model";
 import { type Ctx, run } from "./operations";
 import {
   blockedReason,
+  failedUnread,
   householdPath,
   Note,
   ProblemBanner,
+  ReadFailed,
   UnresolvedBanner,
   useAsk,
 } from "./parts";
@@ -36,10 +38,14 @@ export function NewHouseholdDialog({
   const [asked, setAsked] = useState<string | null>(null);
   const list = listOf(memory);
   const blocked = blockedReason(memory);
+  // The list it checks (the cap, the same name) failed: said with its Try again, and Create says why it waits (review 1 F-R1-1).
+  const listFailed = failedUnread(memory.households, online);
   const reason =
     blocked ??
     (list === null
-      ? copy.LIST_WAIT
+      ? listFailed
+        ? copy.LIST_FAILED_REASON
+        : copy.LIST_WAIT
       : list.length >= 32
         ? copy.AT_CAPACITY
         : !validName(name)
@@ -104,6 +110,9 @@ export function NewHouseholdDialog({
       >
         <UnresolvedBanner ctx={ctx} />
         <ProblemBanner memory={memory} surface="new" />
+        {listFailed ? (
+          <ReadFailed ctx={ctx} kind="households" message={copy.FAILED} />
+        ) : null}
         <Input
           label={copy.NAME_LABEL}
           surface="panel"
@@ -195,9 +204,17 @@ export function RenameDialog({
           });
         }}
       >
-        <UnresolvedBanner ctx={ctx} />
+        <UnresolvedBanner
+          ctx={ctx}
+          // A lost rename that Try again (pressed here) found made closes the dialog, as its first try would have (review 1 F-R1-2).
+          onRetried={(completed) => {
+            if (completed.surface === `rename:${householdId}`) onClose();
+          }}
+        />
         <ProblemBanner memory={memory} surface={`rename:${householdId}`} />
-        {household === null ? (
+        {household === null && failedUnread(memory.households, online) ? (
+          <ReadFailed ctx={ctx} kind="households" message={copy.FAILED} />
+        ) : household === null ? (
           <p className="text-[13.5px] text-ink-1">
             {memory.households.last !== null
               ? copy.NOT_IN_IT

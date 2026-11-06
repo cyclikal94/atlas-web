@@ -91,6 +91,11 @@ export interface Households {
   issued: number;
   /** Reads that are held (never answered while held): `households`, `snapshot`. */
   held: Set<string>;
+  /**
+   * Reads that FAIL while listed (`households`, `sent`): each such request is answered with this status and an Atlas body carrying this
+   * request id, every time, until the test removes it (so an early second mount cannot land a success first).
+   */
+  failing: Map<string, { status: number; requestId: string }>;
   reads: Record<string, number>;
   /** The request URLs the stub saw (never containing a token: asserted by E-HH7). */
   urls: string[];
@@ -155,6 +160,7 @@ export async function serveHouseholds(
     revokeScript: [],
     issued: 0,
     held: new Set(),
+    failing: new Map(),
     reads: {},
     urls: [],
   };
@@ -371,9 +377,16 @@ export async function serveHouseholds(
         }),
       );
     }
+    const failure = (key: string) => {
+      const f = served.failing.get(key);
+      return f === undefined
+        ? null
+        : route.fulfill(json(f.status, atlas("unavailable", f.requestId)));
+    };
     if (path === "/households") {
       count("households");
       if (served.held.has("households")) return;
+      if (served.failing.has("households")) return failure("households");
       return route.fulfill(json(200, mine().map(view)));
     }
     if (path === "/invitations") {
@@ -382,6 +395,7 @@ export async function serveHouseholds(
     }
     if (path === "/invitations/sent") {
       count("sent");
+      if (served.failing.has("sent")) return failure("sent");
       const after = url.searchParams.get("after");
       const ordered = [...served.sent].sort((a, b) => a.id.localeCompare(b.id));
       const start =

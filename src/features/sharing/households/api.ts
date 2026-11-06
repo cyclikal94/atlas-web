@@ -29,8 +29,9 @@ import {
  *
  * Classification (D-12b-10). Every answer is classified by WEB-12a's `classifyAnswer` EXCEPT two refusals the server raises with a status
  * the generic rule reads as "may have committed":
- *  - a household command answered `503` with the Atlas code `slice_capacity` (32 households; raised inside the rolled-back transaction):
- *    refusal `capacity`, nothing was made;
+ *  - a household command answered `503` with the Atlas code `slice_capacity` (raised inside the rolled-back transaction: your 32
+ *    households for a create or an accepted invitation, the recipient's 200 pending invitations for an invite; `messageOf` words it by
+ *    the command): refusal `capacity`, nothing was made;
  *  - a signup issuance answered `429` with the Atlas code `rate_limited` (20 unredeemed per issuer, or the per-source throttle): refusal
  *    `limit`, nothing was issued.
  * Without an Atlas body, or with another code, a `429`/`5xx` stays `uncertain`.

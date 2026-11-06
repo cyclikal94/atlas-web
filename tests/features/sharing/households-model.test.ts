@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { SnapshotHousehold } from "../../../src/data";
 import { classifyHousehold } from "../../../src/features/sharing/households/api";
+import * as copy from "../../../src/features/sharing/households/copy";
 import {
   cmd,
   conflictCause,
@@ -19,6 +20,7 @@ import {
   soleMember,
   validName,
 } from "../../../src/features/sharing/households/model";
+import { messageOf } from "../../../src/features/sharing/households/operations";
 import { sentRow } from "../../support/sharing/fake-households";
 
 /**
@@ -305,5 +307,35 @@ describe("helpers", () => {
     expect(restoreName({})).toBeNull();
     expect(restoreUsername({ username: "jamie" })).toBe("jamie");
     expect(restoreUsername({ username: "x".repeat(101) })).toBeNull();
+  });
+});
+
+describe("Review 1 F-R1-3: a capacity refusal is worded by the command it refused", () => {
+  const capacity = { ok: false, kind: "capacity" } as const;
+  test("MU-6234: create and an accepted invitation are your own 32-household cap; an invite is the recipient's waiting invitations; anything else a neutral limit", () => {
+    expect(messageOf(capacity, cmd.create(ID, "Cabin"))).toBe(
+      copy.CAPACITY_REFUSED,
+    );
+    const invitation = {
+      id: ID,
+      household_id: HOME,
+      household_name: "Home",
+      sender_id: SAM,
+      status: "pending" as const,
+      expires_at: "2026-11-13T10:00:00Z",
+      version: 3,
+    };
+    expect(messageOf(capacity, cmd.respond(invitation, true))).toBe(
+      copy.CAPACITY_REFUSED,
+    );
+    expect(messageOf(capacity, cmd.invite(ID, home(), SAM))).toBe(
+      copy.INVITE_CAPACITY_REFUSED,
+    );
+    expect(messageOf(capacity, cmd.respond(invitation, false))).toBe(
+      copy.LIMIT_REFUSED,
+    );
+    expect(messageOf(capacity, cmd.rename(home(), "Cabin"))).toBe(
+      copy.LIMIT_REFUSED,
+    );
   });
 });

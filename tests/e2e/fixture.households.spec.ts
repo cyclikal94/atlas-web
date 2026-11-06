@@ -34,7 +34,8 @@ import { recordPaintedContrast, surfaceScreenshot } from "./surface-checks";
  * capacity, removed elsewhere; E-HH4 a lost role: the 403 remount reopens the dialog with its problem, one command, no read loop; E-HH5 an
  * uncertain rename retried with the same key and body, never sent offline; E-HH6 For you, a stale row, Sent by you, revoke; E-HH7 signup
  * links (fragment, clipboard, nothing in the URL or storage, a remount keeps the link until Done, the cap, a lost issuance, 390 px);
- * E-HH8 a keyboard-only journey; E-HH9 the directory's browse mode enabled and disabled; E-HH10 an account switch; E-HH11 painted
+ * E-HH8 a keyboard-only journey; E-HH9 the directory's browse mode enabled and disabled; E-HH10 an account switch; E-HH12 (revision 1) a
+ * failed list read and a failed sent walk at 390 px drawn as failures with Try again; E-HH11 painted
  * contrast and screenshots in both themes.
  */
 const detail = (page: Page) => page.locator("[data-household-detail]");
@@ -284,7 +285,7 @@ test.describe("E-HH4: a lost role, a 403 and the remount (A6)", () => {
 });
 
 test.describe("E-HH5: an uncertain rename (R8, one attempt per body)", () => {
-  test("the rename's response is lost: offline Try again is disabled and nothing is sent; back online Try again sends the SAME key and body; its receipt closes the attempt", async ({
+  test("the rename's response is lost: offline Try again is disabled and nothing is sent; back online Try again sends the SAME key and body; its receipt closes the attempt and completes the rename (the dialog closes on the household)", async ({
     context,
   }) => {
     const { page, served } = await setupHouseholds(
@@ -315,9 +316,72 @@ test.describe("E-HH5: an uncertain rename (R8, one attempt per body)", () => {
     expect(served.management[1]).toEqual(original);
     await expect(page.locator("[data-households-unresolved]")).toHaveCount(0);
     expect(served.households[0]?.name).toBe("Our place");
+    // ADAPTATION (review 1 F-R1-2; the old assertion's intent kept): until revision 1 this case asserted that the retried rename left
+    // its dialog OPEN, retitled from the list read after it ("Rename Our place"), which pinned a Try again that did not complete the
+    // form. The intent, that the committed rename is what the page shows, is now asserted on the household's own route: a Try again
+    // that is answered closes the dialog as a first-try success does, and the detail is titled with the new name.
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect
+      .poll(() => new URL(page.url()).pathname)
+      .toBe(`/sharing/households/${HOME}`);
     await expect(
-      dialogNamed(page, copy.RENAME_TITLE("Our place")),
+      detail(page).getByRole("heading", { level: 2, name: "Our place" }),
     ).toBeVisible();
+  });
+});
+
+test.describe("E-HH12: a failed read at 390 px is a failure with its request id and Try again (A1 Er; review 1 F-R1-1)", () => {
+  test("the detail alone: a failed GET /households says so with its request id and Try again (never 'Loading'), and Try again reads it and shows the household; a failed sent walk says so in 'Invited by you, waiting' with its own Try again", async ({
+    context,
+  }, info) => {
+    const { page, served } = await setupHouseholds(
+      context,
+      `/sharing/households/${HOME}`,
+      (s) => {
+        s.failing.set("households", {
+          status: 503,
+          requestId: "abcd1234-0000-4000-8000-000000000000",
+        });
+        s.failing.set("sent", {
+          status: 503,
+          requestId: "feedface-0000-4000-8000-000000000000",
+        });
+      },
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    // The narrow layout applied: no pane, the push navigation's back link.
+    await expect(
+      page.getByRole("link", { name: copy.BACK_TO_HOUSEHOLDS }),
+    ).toBeVisible();
+    await expect(page.locator("[data-households-pane]")).toHaveCount(0);
+    const list = detail(page).locator(
+      '[data-households-read-failed="households"]',
+    );
+    await expect(list).toContainText(copy.FAILED);
+    await expect(list).toContainText("abcd1234");
+    await expect(page.getByText(copy.LOADING)).toHaveCount(0);
+    const before = served.reads.households ?? 0;
+    served.failing.delete("households");
+    await list.getByRole("button", { name: base.TRY_AGAIN }).click();
+    // The complete list landed: the manager's actions, which B5's read-only view of this household (shown meanwhile) never draws.
+    await expect(
+      detail(page).getByRole("link", { name: copy.RENAME }),
+    ).toBeVisible();
+    expect(served.reads.households ?? 0).toBeGreaterThan(before);
+    await expect(list).toHaveCount(0);
+    const sent = detail(page).locator(
+      '[data-household-waiting] [data-households-read-failed="sent"]',
+    );
+    await expect(sent).toContainText(copy.SENT_FAILED);
+    await expect(sent).toContainText("feedface");
+    served.failing.delete("sent");
+    await sent.getByRole("button", { name: base.TRY_AGAIN }).click();
+    await expect(
+      detail(page)
+        .locator("[data-household-waiting]")
+        .getByText(copy.WAITING_NONE),
+    ).toBeVisible();
+    recordEvidence(info, "e-hh12", { reads: served.reads });
   });
 });
 

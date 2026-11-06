@@ -737,3 +737,310 @@ describe("D-12b-1: the responsive layout", () => {
     expect(detail()).not.toBeNull();
   });
 });
+
+/** A read that fails with an Atlas request id (`uncertain`: a 5xx with the server's body). */
+const FAILED_READ = {
+  ok: false,
+  kind: "uncertain",
+  requestId: "abcd1234-0000-4000-8000-000000000000",
+} as const;
+const readFailed = (inside: ParentNode, kind: string) =>
+  inside.querySelector(
+    `[data-households-read-failed="${kind}"]`,
+  ) as HTMLElement | null;
+/** The narrow layout really applied (review 1's probe trap: a width that silently stayed at 1440 px). */
+async function narrowApplied() {
+  expect(
+    await present(() =>
+      screen.queryByRole("link", { name: copy.BACK_TO_HOUSEHOLDS }),
+    ),
+  ).toBeInTheDocument();
+  expect(document.querySelector("[data-households-pane]")).toBeNull();
+}
+
+describe("Review 1 F-R1-1: a failed read is a failure with its request id and Try again, never 'Loading'", () => {
+  for (const [width, b5] of [
+    [390, false],
+    [834, false],
+    [390, true],
+    [834, true],
+  ] as const) {
+    test(`MU-6226: ${width} px, the detail alone (no pane)${b5 ? ", B5's read-only view of it shown" : ""}: a failed list read says so with its request id and Try again; Try again reads the list again and shows the household`, async () => {
+      media.set({ width });
+      const api = fakeHouseholdApi();
+      api.defaults.households = FAILED_READ as never;
+      mountHouseholds(`/sharing/households/${HOME_ID}`, {
+        api,
+        env: b5 ? homeWithB5() : stubEnv(),
+      });
+      await narrowApplied();
+      const failed = await present(() => readFailed(detail(), "households"));
+      expect(within(failed).queryByText(copy.FAILED)).not.toBeNull();
+      expect(within(failed).queryByText(/abcd1234/)).not.toBeNull();
+      expect(screen.queryByText(copy.LOADING)).toBeNull();
+      const before = api.count("households");
+      api.defaults.households = ok([homeOf()]);
+      fireEvent.click(
+        must(within(failed).queryByRole("button", { name: base.TRY_AGAIN })),
+      );
+      // The complete list landed: the manager's actions (never drawn from B5's read-only view) and no failure.
+      expect(
+        await present(() => screen.queryByRole("link", { name: copy.RENAME })),
+      ).toBeInTheDocument();
+      expect(readFailed(document, "households")).toBeNull();
+      expect(api.count("households")).toBeGreaterThan(before);
+    });
+  }
+
+  test("1440 px: the pane beside the detail carries the failure and its ONE Try again; the detail adds no second one and no 'Loading'", async () => {
+    media.set({ width: 1440 });
+    const api = fakeHouseholdApi();
+    api.defaults.households = FAILED_READ as never;
+    mountHouseholds(`/sharing/households/${HOME_ID}`, {
+      api,
+      env: homeWithB5(),
+    });
+    const pane = await present(() =>
+      document.querySelector("[data-households-pane]"),
+    );
+    await present(() => within(pane as HTMLElement).queryByText(copy.FAILED));
+    expect(
+      screen.queryAllByRole("button", { name: base.TRY_AGAIN }),
+    ).toHaveLength(1);
+    expect(readFailed(document, "households")).toBeNull();
+    expect(screen.queryByText(copy.LOADING)).toBeNull();
+  });
+
+  test("offline after a failed read: 'hasn't synced yet', no Try again (it is read again on reconnection)", async () => {
+    media.set({ width: 390 });
+    const api = fakeHouseholdApi();
+    api.defaults.households = FAILED_READ as never;
+    const t = mountHouseholds(`/sharing/households/${HOME_ID}`, { api });
+    await present(() => readFailed(document, "households"));
+    t.setSharing({ online: false });
+    expect(
+      await present(() => screen.queryByText(copy.OFFLINE_NEVER)),
+    ).toBeInTheDocument();
+    expect(readFailed(document, "households")).toBeNull();
+  });
+
+  for (const width of [1440, 390]) {
+    test(`MU-6227: ${width} px, a failed sent walk says so in 'Invited by you, waiting' with its request id and Try again; Try again walks it again`, async () => {
+      media.set({ width });
+      const api = fakeHouseholdApi();
+      api.next.sent.push(FAILED_READ);
+      await mountHome([homeOf()], { api });
+      const waiting = () =>
+        document.querySelector("[data-household-waiting]") as HTMLElement;
+      const failed = await present(() => readFailed(waiting(), "sent"));
+      expect(within(failed).queryByText(copy.SENT_FAILED)).not.toBeNull();
+      expect(within(failed).queryByText(/abcd1234/)).not.toBeNull();
+      expect(within(waiting()).queryByText(copy.SENT_LOADING)).toBeNull();
+      fireEvent.click(
+        must(within(failed).queryByRole("button", { name: base.TRY_AGAIN })),
+      );
+      expect(
+        await present(() => within(waiting()).queryByText(copy.WAITING_NONE)),
+      ).toBeInTheDocument();
+      expect(api.count("sent")).toBe(2);
+    });
+  }
+
+  test("MU-6228: 390 px, Rename with a failed list read says so with its request id and Try again; Try again shows the name field", async () => {
+    media.set({ width: 390 });
+    const api = fakeHouseholdApi();
+    api.defaults.households = FAILED_READ as never;
+    mountHouseholds(`/sharing/households/${HOME_ID}/rename`, {
+      api,
+      env: homeWithB5(),
+    });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    const failed = await present(() => readFailed(dialog, "households"));
+    expect(within(failed).queryByText(copy.FAILED)).not.toBeNull();
+    expect(within(failed).queryByText(/abcd1234/)).not.toBeNull();
+    expect(within(dialog).queryByText(copy.LOADING)).toBeNull();
+    api.defaults.households = ok([homeOf()]);
+    fireEvent.click(
+      must(within(failed).queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    expect(
+      await present(() => within(dialog).queryByLabelText(copy.NAME_LABEL)),
+    ).toHaveValue("Home");
+  });
+
+  test("MU-6230: New household with a failed list read: the failure with its request id and Try again, and Create waits saying why; after Try again Create is offered", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = FAILED_READ as never;
+    mountHouseholds("/sharing/new", { api, env: homeWithB5() });
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", { name: copy.NEW_TITLE }),
+    );
+    const failed = await present(() => readFailed(dialog, "households"));
+    expect(within(failed).queryByText(copy.FAILED)).not.toBeNull();
+    expect(within(failed).queryByText(/abcd1234/)).not.toBeNull();
+    fireEvent.change(must(within(dialog).queryByLabelText(copy.NAME_LABEL)), {
+      target: { value: "Cabin" },
+    });
+    const create = () =>
+      must(within(dialog).queryByRole("button", { name: copy.CREATE }));
+    expect(create()).toBeDisabled();
+    expect(reasonOf(create())).toBe(copy.LIST_FAILED_REASON);
+    api.defaults.households = ok([homeOf()]);
+    fireEvent.click(
+      must(within(failed).queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    await waitFor(() => expect(create()).toBeEnabled());
+    expect(readFailed(dialog, "households")).toBeNull();
+  });
+
+  test("MU-6236/MU-6237: the failure's Try again reads again and the request id is the failed read's own", async () => {
+    media.set({ width: 390 });
+    const api = fakeHouseholdApi();
+    api.next.households.push({
+      ok: false,
+      kind: "uncertain",
+      requestId: "feedface-0000-4000-8000-000000000000",
+    });
+    api.next.households.push(FAILED_READ);
+    mountHouseholds(`/sharing/households/${HOME_ID}`, { api });
+    const first = await present(() => readFailed(detail(), "households"));
+    expect(within(first).queryByText(/feedface/)).not.toBeNull();
+    fireEvent.click(
+      must(within(first).queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    // The second read failed too: its own request id is shown, and Try again is offered again.
+    await present(() =>
+      readFailed(detail(), "households")?.textContent?.includes("abcd1234")
+        ? true
+        : null,
+    );
+    expect(api.count("households")).toBe(2);
+  });
+});
+
+describe("Review 1 F-R1-2: a successful Try again completes the rename as a first try does", () => {
+  test("MU-6233: a rename whose answer was lost, then a Try again answered: the dialog closes and the household's own route shows its new name (E-HH5 adapted)", async () => {
+    const api = fakeHouseholdApi();
+    api.next.command.push({ ok: false, kind: "uncertain" });
+    api.defaults.households = ok([homeOf()]);
+    const t = mountHouseholds(`/sharing/households/${HOME_ID}/rename`, {
+      api,
+      env: homeWithB5(),
+    });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    fireEvent.change(must(within(dialog).queryByLabelText(copy.NAME_LABEL)), {
+      target: { value: "Our place" },
+    });
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.SAVE_NAME })),
+    );
+    const retry = await present(() =>
+      within(dialog).queryByRole("button", { name: base.TRY_AGAIN }),
+    );
+    // Premise: the uncertain first try leaves the dialog open with the typed name.
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    api.defaults.households = ok([homeOf({ name: "Our place", version: 5 })]);
+    fireEvent.click(retry);
+    await waitFor(() => expect(api.sentCommands).toHaveLength(2));
+    expect(api.sentCommands[1]).toEqual(api.sentCommands[0]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(t.router().state.location.pathname).toBe(
+      `/sharing/households/${HOME_ID}`,
+    );
+    expect(
+      await present(() =>
+        screen.queryByRole("heading", { level: 2, name: "Our place" }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  test("control: a first-try rename closes the dialog and shows the household's route", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    const t = mountHouseholds(`/sharing/households/${HOME_ID}/rename`, {
+      api,
+      env: homeWithB5(),
+    });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    fireEvent.change(must(within(dialog).queryByLabelText(copy.NAME_LABEL)), {
+      target: { value: "Our place" },
+    });
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.SAVE_NAME })),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(t.router().state.location.pathname).toBe(
+      `/sharing/households/${HOME_ID}`,
+    );
+  });
+
+  test("MU-6238: a Try again pressed on the detail for a lost rename forgets the typed name, so Rename opens on the household's own name", async () => {
+    const api = fakeHouseholdApi();
+    api.next.command.push({ ok: false, kind: "uncertain" });
+    api.defaults.households = ok([homeOf()]);
+    const t = mountHouseholds(`/sharing/households/${HOME_ID}/rename`, {
+      api,
+      env: homeWithB5(),
+    });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    fireEvent.change(must(within(dialog).queryByLabelText(copy.NAME_LABEL)), {
+      target: { value: "Our place" },
+    });
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.SAVE_NAME })),
+    );
+    await present(() =>
+      within(dialog).queryByRole("button", { name: base.TRY_AGAIN }),
+    );
+    await t.navigate(`/sharing/households/${HOME_ID}`);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    api.defaults.households = ok([homeOf({ name: "Our place", version: 5 })]);
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    await present(() =>
+      screen.queryByRole("heading", { level: 2, name: "Our place" }),
+    );
+    // Someone else renames it afterwards: a kept draft would still say "Our place"; a completed form starts from the household's name.
+    api.defaults.households = ok([homeOf({ name: "Cabin", version: 6 })]);
+    await t.navigate(`/sharing/households/${HOME_ID}/rename`);
+    const reopened = await present(() =>
+      screen.queryByRole("dialog", { name: copy.RENAME_TITLE("Cabin") }),
+    );
+    expect(
+      must(within(reopened).queryByLabelText(copy.NAME_LABEL)),
+    ).toHaveValue("Cabin");
+  });
+});
+
+describe("Review 1 F-R1-4: nothing to choose, so no 'choose a household' prompt", () => {
+  test("MU-6235: 1440 px, a checked empty list (and a list still loading) leaves the detail column empty beside the pane", async () => {
+    media.set({ width: 1440 });
+    const pending = held<SnapshotHousehold[]>();
+    const api = fakeHouseholdApi();
+    api.next.households.push(pending.answer);
+    mountHouseholds("/sharing", { api });
+    const column = await present(() =>
+      document.querySelector("[data-households-detail-column]"),
+    );
+    await present(() => screen.queryByText(copy.LOADING));
+    expect(column?.textContent).toBe("");
+    pending.release(ok([]));
+    await present(() => screen.queryByText(copy.EMPTY));
+    expect(
+      document.querySelector("[data-households-detail-column]")?.textContent,
+    ).toBe("");
+  });
+
+  test("with a household listed, the detail column (the one MU-6235 checks) shows it", async () => {
+    media.set({ width: 1440 });
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    mountHouseholds("/sharing", { api, env: homeWithB5() });
+    await present(() =>
+      document.querySelector(
+        `[data-households-detail-column] [data-household-detail="${HOME_ID}"]`,
+      ),
+    );
+  });
+});

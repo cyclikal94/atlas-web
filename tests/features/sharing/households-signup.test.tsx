@@ -343,3 +343,59 @@ describe("S-HH16: role loss and offline", () => {
     ).toBeDisabled();
   });
 });
+
+describe("Review 1 F-R1-1: a failed list read in the signup dialog is a failure with Try again, never 'Loading'", () => {
+  test("MU-6229: 390 px, the signup dialog while the household list read has failed says so with its request id and Try again; Try again reads it and the manager's controls appear", async () => {
+    media.set({ width: 390 });
+    const api = fakeHouseholdApi();
+    api.defaults.households = {
+      ok: false,
+      kind: "uncertain",
+      requestId: "abcd1234-0000-4000-8000-000000000000",
+    } as never;
+    mountHouseholds(`/sharing/households/${HOME_ID}/signup`, { api });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    const failed = await present(
+      () =>
+        dialog.querySelector(
+          '[data-households-read-failed="households"]',
+        ) as HTMLElement | null,
+    );
+    expect(within(failed).queryByText(copy.FAILED)).not.toBeNull();
+    expect(within(failed).queryByText(/abcd1234/)).not.toBeNull();
+    expect(within(dialog).queryByText(copy.LOADING)).toBeNull();
+    api.defaults.households = ok([homeOf()]);
+    fireEvent.click(
+      must(within(failed).queryByRole("button", { name: /Try again/ })),
+    );
+    expect(
+      await present(() =>
+        within(dialog).queryByRole("button", { name: copy.SIGNUP_NEW }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  test("a failed signup list read keeps its request id beside its Try again", async () => {
+    const api = fakeHouseholdApi();
+    api.next.signupList.push({
+      ok: false,
+      kind: "uncertain",
+      requestId: "feedface-0000-4000-8000-000000000000",
+    });
+    const { dialog } = await openSignup(api);
+    const failed = await present(
+      () =>
+        dialog.querySelector(
+          '[data-households-read-failed="signup"]',
+        ) as HTMLElement | null,
+    );
+    expect(within(failed).queryByText(copy.SIGNUP_FAILED)).not.toBeNull();
+    expect(within(failed).queryByText(/feedface/)).not.toBeNull();
+    fireEvent.click(
+      must(within(failed).queryByRole("button", { name: /Try again/ })),
+    );
+    expect(
+      await present(() => within(dialog).queryByText(copy.SIGNUP_NONE)),
+    ).toBeInTheDocument();
+  });
+});

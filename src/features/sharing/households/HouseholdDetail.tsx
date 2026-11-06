@@ -17,9 +17,11 @@ import {
 import { type Ctx, run } from "./operations";
 import {
   blockedReason,
+  failedUnread,
   invitationsPath,
   Note,
   ProblemBanner,
+  ReadFailed,
   renamePath,
   signupPath,
   useAsk,
@@ -39,6 +41,10 @@ const LINK =
  * main household from the B5 record only (never inferred from the list: D-12b-8), the manager's actions (members see none, with a
  * one-line note: SHARE-6a), and the last-manager and sole-member rules shown with their reason and fix (SHARE-6). The server stays the
  * authority: a stale view's refusal is shown with its request id, and the list is read again.
+ *
+ * A read it needs that FAILED with nothing landed is shown as a failure with its request id and Try again, never as "Loading…" (review 1
+ * F-R1-1): the household list when the detail is shown ALONE (below 1280 px there is no pane; from 1280 px the pane beside it carries
+ * that failure and its one Try again), and the sent walk ("Invited by you, waiting") at every width.
  */
 export function HouseholdDetail({
   ctx,
@@ -46,12 +52,15 @@ export function HouseholdDetail({
   online,
   now,
   record,
+  withoutPane,
 }: {
   ctx: Ctx;
   householdId: string;
   online: boolean;
   now: number;
   record: DefaultsRecord | null;
+  /** Shown without the households pane beside it (below 1280 px). */
+  withoutPane: boolean;
 }) {
   const { memory } = ctx;
   // Opening a household reads its members again (a change made elsewhere shows), once per mount: a remount adds one read, never a loop.
@@ -61,6 +70,12 @@ export function HouseholdDetail({
   const read = memory.households;
   const household = householdOf(memory, householdId);
   const surface = `detail:${householdId}`;
+  // The list failed with nothing landed and no pane beside this detail says so (below 1280 px): the detail says it, with Try again,
+  // whether it shows nothing or B5's read-only view of this household (review 1 F-R1-1). Beside the pane, the pane's one Try again.
+  const listFailedHere = withoutPane && failedUnread(read, online);
+  const listFailure = listFailedHere ? (
+    <ReadFailed ctx={ctx} kind="households" message={copy.FAILED} />
+  ) : null;
   if (household === null) {
     // Offline before the list was read: the B5 snapshot may name it (read-only, with its time); otherwise nothing is known.
     const fromSnapshot =
@@ -72,13 +87,17 @@ export function HouseholdDetail({
       return (
         <section className="flex flex-col gap-3" data-household-detail="absent">
           <ProblemBanner memory={memory} surface={surface} />
-          <p className="text-[13.5px] text-ink-1">
-            {read.last !== null
-              ? copy.NOT_IN_IT
-              : online
-                ? copy.LOADING
-                : copy.OFFLINE_NEVER}
-          </p>
+          {failedUnread(read, online) ? (
+            listFailure
+          ) : (
+            <p className="text-[13.5px] text-ink-1">
+              {read.last !== null
+                ? copy.NOT_IN_IT
+                : online
+                  ? copy.LOADING
+                  : copy.OFFLINE_NEVER}
+            </p>
+          )}
           {read.last !== null ? (
             <Link to="/sharing" className={LINK}>
               {copy.NOT_IN_IT_LINK}
@@ -242,6 +261,7 @@ export function HouseholdDetail({
         ) : null}
       </div>
       <ProblemBanner memory={memory} surface={surface} />
+      {complete ? null : listFailure}
       {complete && !manager ? (
         <Note>
           {memory.managed.has(householdId)
@@ -346,7 +366,9 @@ export function HouseholdDetail({
           <h3 className="text-[13.5px] font-medium text-ink-1">
             {copy.WAITING_HEADING}
           </h3>
-          {memory.sent.last === null ? (
+          {failedUnread(memory.sent, online) ? (
+            <ReadFailed ctx={ctx} kind="sent" message={copy.SENT_FAILED} />
+          ) : memory.sent.last === null ? (
             <p className="text-[12.5px] text-ink-2">
               {online ? copy.SENT_LOADING : copy.NEEDS_CONNECTION}
             </p>

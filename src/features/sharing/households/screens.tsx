@@ -143,6 +143,7 @@ function Region({ dialogOpen }: { dialogOpen: boolean }) {
       online={env.online}
       now={now}
       record={record}
+      withoutPane={mode !== "desktop"}
     />
   );
   if (mode === "desktop")
@@ -154,12 +155,12 @@ function Region({ dialogOpen }: { dialogOpen: boolean }) {
           style={{ gridTemplateColumns: "280px minmax(0, 1fr)" }}
         >
           {pane}
-          <div className="min-w-0">
-            {implicit === null ? (
-              <p className="text-[13.5px] text-ink-2">{copy.SELECT}</p>
-            ) : (
-              detail(implicit)
-            )}
+          <div className="min-w-0" data-households-detail-column="">
+            {
+              // No household to show (the list is loading, failed, empty, or only B5's unlinked subset is shown offline): nothing to
+              // choose, so nothing is said here; the pane beside it says what the list is (review 1 F-R1-4).
+              implicit === null ? null : detail(implicit)
+            }
           </div>
         </div>
       </div>

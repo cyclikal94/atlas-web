@@ -556,3 +556,150 @@ describe("D-12b-12: the header Invitations count", () => {
     ).toBeInTheDocument();
   });
 });
+
+/** A read that fails with an Atlas request id (`uncertain`: a 5xx with the server's body). */
+const FAILED_READ = {
+  ok: false,
+  kind: "uncertain",
+  requestId: "abcd1234-0000-4000-8000-000000000000",
+} as const;
+const readFailed = (within: HTMLElement, kind: string) =>
+  within.querySelector(
+    `[data-households-read-failed="${kind}"]`,
+  ) as HTMLElement | null;
+
+describe("Review 1 F-R1-1: a failed read in the invitations dialog is a failure with Try again, never 'Loading' or a missing section", () => {
+  test("MU-6231: opened for a household while the list read has failed, the dialog says so with its request id and Try again (no silent missing Invite); Try again reads the list and the Invite section appears", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = FAILED_READ as never;
+    mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    const failed = await present(() => readFailed(dialog, "households"));
+    expect(within(failed).queryByText(copy.FAILED)).not.toBeNull();
+    expect(within(failed).queryByText(/abcd1234/)).not.toBeNull();
+    expect(within(dialog).queryByText(copy.LOADING)).toBeNull();
+    expect(section("invite")).toBeNull();
+    const before = api.count("households");
+    api.defaults.households = ok([homeOf()]);
+    fireEvent.click(
+      must(within(failed).queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    expect(
+      await present(() =>
+        within(dialog).queryByText(copy.INVITE_HEADING("Home")),
+      ),
+    ).toBeInTheDocument();
+    expect(api.count("households")).toBeGreaterThan(before);
+    expect(readFailed(dialog, "households")).toBeNull();
+  });
+
+  test("opened for a household the complete list does not have, it says you're no longer in it (no failure, no Try again)", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    mountHouseholds(`/sharing/households/${FLAT_ID}/invitations`, { api });
+    const dialog = await present(() => screen.queryByRole("dialog"));
+    expect(
+      await present(() => within(dialog).queryByText(copy.NOT_IN_IT)),
+    ).toBeInTheDocument();
+    expect(readFailed(dialog, "households")).toBeNull();
+  });
+
+  test("For you and Sent by you: each failed read says what failed, with its request id and its own Try again", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    api.next.invitations.push(FAILED_READ);
+    api.next.sent.push(FAILED_READ);
+    mountHouseholds("/sharing/invitations", { api });
+    const dialog = await dialogNamed(copy.INVITATIONS_TITLE);
+    const forYou = await present(() => readFailed(dialog, "invitations"));
+    // The invitations read is not the household list: it is never said as "Couldn't load your households".
+    expect(within(forYou).queryByText(copy.FOR_YOU_FAILED)).not.toBeNull();
+    expect(within(forYou).queryByText(/abcd1234/)).not.toBeNull();
+    const sent = await present(() => readFailed(dialog, "sent"));
+    expect(within(sent).queryByText(copy.SENT_FAILED)).not.toBeNull();
+    expect(within(sent).queryByText(/abcd1234/)).not.toBeNull();
+    fireEvent.click(
+      must(within(forYou).queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    expect(
+      await present(() => within(dialog).queryByText(copy.FOR_YOU_NONE)),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      must(within(sent).queryByRole("button", { name: base.TRY_AGAIN })),
+    );
+    expect(
+      await present(() => within(dialog).queryByText(copy.SENT_NONE)),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("Review 1 F-R1-2: a successful Try again completes the invite as a first try does", () => {
+  test("MU-6232: an invite whose answer was lost, then a Try again that is answered: the username field is cleared (as after a first-try success), and the same key and body were sent", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    api.defaults.lookup = (username) =>
+      ok(username === "jamie" ? [{ id: JAMIE_ID, username: "jamie" }] : []);
+    api.next.command.push({ ok: false, kind: "uncertain" });
+    mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
+    const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
+    const field = () =>
+      must(within(dialog).queryByLabelText(copy.USERNAME_LABEL));
+    fireEvent.change(field(), { target: { value: "jamie" } });
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.INVITE })),
+    );
+    const retry = await present(() =>
+      within(dialog).queryByRole("button", { name: base.TRY_AGAIN }),
+    );
+    // Premise: the uncertain first try keeps what was typed.
+    expect(field()).toHaveValue("jamie");
+    fireEvent.click(retry);
+    await waitFor(() => expect(api.sentCommands).toHaveLength(2));
+    expect(api.sentCommands[1]).toEqual(api.sentCommands[0]);
+    await waitFor(() => expect(field()).toHaveValue(""));
+    expect(
+      within(dialog).queryByRole("button", { name: base.TRY_AGAIN }),
+    ).toBeNull();
+  });
+
+  test("control: a first-try success clears the username field", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    api.defaults.lookup = () => ok([{ id: JAMIE_ID, username: "jamie" }]);
+    mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
+    const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
+    const field = () =>
+      must(within(dialog).queryByLabelText(copy.USERNAME_LABEL));
+    fireEvent.change(field(), { target: { value: "jamie" } });
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.INVITE })),
+    );
+    await waitFor(() => expect(api.sentCommands).toHaveLength(1));
+    await waitFor(() => expect(field()).toHaveValue(""));
+  });
+});
+
+describe("Review 1 F-R1-3: an invitation refused for the recipient's cap is worded by its cause", () => {
+  test("MU-6234: invite_to_household answered 503 slice_capacity (the RECIPIENT has 200 pending invitations) says so, never 'you're already in 32 households'", async () => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    api.defaults.lookup = () => ok([{ id: JAMIE_ID, username: "jamie" }]);
+    api.next.command.push({ ok: false, kind: "capacity", requestId: "r-cap" });
+    mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
+    const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
+    fireEvent.change(
+      must(within(dialog).queryByLabelText(copy.USERNAME_LABEL)),
+      { target: { value: "jamie" } },
+    );
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.INVITE })),
+    );
+    expect(
+      await present(() =>
+        within(dialog).queryByText(copy.INVITE_CAPACITY_REFUSED),
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(copy.CAPACITY_REFUSED)).toBeNull();
+    expect(must(within(dialog).queryByText(/r-cap/))).toBeInTheDocument();
+  });
+});
