@@ -435,7 +435,12 @@ describe("R17: the source budget the pinned backend counts, and each stack's rec
       DEFAULT_STACKS.filter((s) => s.files?.some((f) => f.endsWith(file))).map(
         (s) => s.name,
       );
-    expect(owners("integration.sharing.spec.ts")).toEqual(["sharing"]);
+    // WEB-12b: the sharing spec's I-SH17b needs a backend with its directory disabled, a second sharing-only stack (R22 keeps each case
+    // in exactly one of the two).
+    expect(owners("integration.sharing.spec.ts")).toEqual([
+      "sharing",
+      "sharing-directory-off",
+    ]);
     expect(owners("integration.snapshot.spec.ts")).toEqual(["snapshot"]);
     expect(owners("integration.people.spec.ts")).toEqual(["people"]);
     expect(owners("integration.password-path.spec.ts")).toEqual([
