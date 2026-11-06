@@ -731,10 +731,22 @@ export function judgeStack({
     failed = true;
     reasons.push(`Playwright exited ${exitCode}`);
   }
-  if (refusals.length > 0 && !deliberateThrottle) {
+  // WEB-12b: a planned case that provokes a PRODUCT cap's own 429 (CAP_REFUSALS) makes those refusals expected; any other 429 still
+  // fails the stack, as before.
+  const capped = CAP_REFUSALS.filter((cap) =>
+    [...planned.keys()].some((key) => key.includes(cap.provokedBy)),
+  );
+  const unexpected = refusals.filter(
+    (r) =>
+      !capped.some(
+        (cap) =>
+          cap.method === r.method && cap.path === (r.path ?? "").split("?")[0],
+      ),
+  );
+  if (unexpected.length > 0 && !deliberateThrottle) {
     failed = true;
     reasons.push(
-      `the backend refused ${refusals.length} request(s) with 429 (first: ${refusals[0].method} ${refusals[0].path}): this stack's throttle budget was not its own`,
+      `the backend refused ${unexpected.length} request(s) with 429 (first: ${unexpected[0].method} ${unexpected[0].path}): this stack's throttle budget was not its own`,
     );
   }
   if (report === null) return unproven("no result file");
@@ -839,6 +851,19 @@ export function judgeStack({
  * limiter is a 429, which the throttle check below fails.
  */
 export const SOURCE_BUDGET = { limit: 120, windowMs: 60_000 };
+/**
+ * WEB-12b: 429s that are a PRODUCT cap, not the throttle. At the pinned backend (`7dc51e39`, v0.31.0-rc.1) `POST /account-invitations`
+ * (`onboarding.rs` `invite`) calls no `source_attempt`/`account_attempt`: its only 429 is `issue`'s 20-unredeemed-per-issuer cap
+ * (`ensure!(count < 20, RateLimited)`), which I-SH14 provokes on purpose. Such a refusal is expected ONLY in a stack that plans that case;
+ * every other 429 (and this one anywhere else) still fails the stack.
+ */
+export const CAP_REFUSALS = [
+  {
+    method: "POST",
+    path: `/api/experimental/v1/account-invitations`,
+    provokedBy: "I-SH14:",
+  },
+];
 const API_PREFIX = "/api/experimental/v1";
 export const SOURCE_BUDGET_CONSUMERS = [
   ["POST", "/sessions"],

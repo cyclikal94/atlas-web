@@ -32,6 +32,11 @@ export const DESIGNED_SKIPS: Array<{
 }>;
 export function stackArgs(stack: Stack): string[];
 export const BACKEND_ENV_ALLOWED: string[];
+export const CAP_REFUSALS: Array<{
+  method: string;
+  path: string;
+  provokedBy: string;
+}>;
 export function backendEnvOf(stack: Stack): Record<string, string>;
 export function directoryModeOf(stack: Stack): "on" | "off";
 export const PLAYWRIGHT_POLICY: string[];

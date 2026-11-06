@@ -20,6 +20,7 @@ import {
   assignCases,
   BACKEND_ENV_ALLOWED,
   backendEnvOf,
+  CAP_REFUSALS,
   DEFAULT_STACKS,
   DESIGNED_SKIPS,
   designedSkip,
@@ -2127,5 +2128,58 @@ describe("WEB-12b: a stack's backend settings are allow-listed (the directory-of
         env: { ATLAS_INTEGRATION_DIRECTORY: "off" },
       }),
     ).toBeNull();
+  });
+});
+
+describe("WEB-12b: a product cap's own 429 is expected only where its case is planned (I-SH14)", () => {
+  const ISH14 =
+    "integration-firefox › integration.sharing.spec.ts › I-SH14: the 20-per-issuer cap (A5) › 21st";
+  const OTHER =
+    "integration-firefox › integration.sharing.spec.ts › I-SH1 and I-SH2: x › y";
+  const cap = {
+    method: "POST",
+    path: "/api/experimental/v1/account-invitations",
+    at: 1,
+  };
+  const throttled = (keys: string[], refusals: Array<typeof cap>) =>
+    judgeStack({
+      planned: new Map(keys.map((k) => [k, 1])),
+      report: null,
+      exitCode: 0,
+      startedAt: 0,
+      project: "integration-firefox",
+      context: { env: {}, oidc: false, postgres: false },
+      refusals,
+    }).reasons.some((r) => r.includes("throttle budget was not its own"));
+
+  test("the cap is the account-invitations issuance, provoked by I-SH14", () => {
+    expect(CAP_REFUSALS).toEqual([
+      {
+        method: "POST",
+        path: "/api/experimental/v1/account-invitations",
+        provokedBy: "I-SH14:",
+      },
+    ]);
+  });
+  test("with I-SH14 planned, its cap refusal is expected; any other 429 still fails the stack", () => {
+    expect(throttled([ISH14, OTHER], [cap])).toBe(false);
+    expect(
+      throttled(
+        [ISH14],
+        [
+          cap,
+          {
+            method: "POST",
+            path: "/api/experimental/v1/browser-sessions",
+            at: 2,
+          },
+        ],
+      ),
+    ).toBe(true);
+    expect(throttled([ISH14], [{ ...cap, method: "GET" }])).toBe(true);
+  });
+  test("without I-SH14 planned, the same refusal fails the stack (control)", () => {
+    expect(throttled([OTHER], [cap])).toBe(true);
+    expect(throttled([OTHER], [])).toBe(false);
   });
 });
