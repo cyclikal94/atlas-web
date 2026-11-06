@@ -18,9 +18,12 @@ import {
 } from "../../scripts/integration/schedule.mjs";
 import {
   assignCases,
+  BACKEND_ENV_ALLOWED,
+  backendEnvOf,
   DEFAULT_STACKS,
   DESIGNED_SKIPS,
   designedSkip,
+  directoryModeOf,
   judgeStack,
   planStacks,
   reportCases,
@@ -441,7 +444,9 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         settings: 10,
         lifecycle: 17,
         "lifecycle-restart": 16,
-        sharing: 7,
+        // WEB-12b: I-SH10..I-SH17 join WEB-12a's seven; I-SH17b has a stack of its own (the backend's directory disabled).
+        sharing: 15,
+        "sharing-directory-off": 1,
         snapshot: 6,
         // WEB-10a's 22 and WEB-10c's 22 task cases (revision 11 split I-10C-M4 into M4a/M4b; revision 14, review 15's R38, added the
         // task-day rollover control I-10C-M4c); WEB-08d's labels retain their own stack.
@@ -450,13 +455,17 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(301); // WEB-10c: +22 task cases; WEB-11b: +7 People cases (I-PPL17..I-PPL23)
+      expect(inBrowser(whole, browser)).toHaveLength(310); // WEB-10c: +22 task cases; WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-12b: +9 sharing cases
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
       expect(
         s.keys.some((k) => /integration\.(sharing|snapshot)\.spec/.test(k)),
-      ).toBe(s.name === "sharing" || s.name === "snapshot");
+      ).toBe(
+        s.name === "sharing" ||
+          s.name === "sharing-directory-off" ||
+          s.name === "snapshot",
+      );
   }, 120_000);
 
   test("compared with the schedule review 14 ran, sharing, snapshot, pages, password-path, People and task cases have their own fresh stacks", async () => {
@@ -505,7 +514,9 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
     }
     // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 23 (WEB-11b: +7).
     expect(moved).toEqual({
-      sharing: 21,
+      // WEB-12b: +8 sharing cases in three engines; I-SH17b in its own stack.
+      sharing: 45,
+      "sharing-directory-off": 3,
       snapshot: 18,
       pages: 54,
       "password-path": 24,
@@ -642,8 +653,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 301,
-        passed: 294,
+        planned_cases: 310,
+        passed: 303,
         designed_skips: 7,
         failed: 0,
         interrupted: 0,
@@ -1260,6 +1271,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-lifecycle",
     "-lifecycle-restart",
     "-sharing",
+    "-sharing-directory-off",
     "-snapshot",
     "-tasks",
     "-labels",
@@ -2059,4 +2071,61 @@ describe("C5 (revision 16): one invocation owns its evidence directory", () => {
     const fresh = await world();
     expect(fresh.status).toBe(0);
   }, 120_000);
+});
+
+describe("WEB-12b: a stack's backend settings are allow-listed (the directory-off stack)", () => {
+  test("only ATLAS_DIRECTORY_ENABLED may be set, by the sharing-directory-off stack alone; anything else is refused before a backend starts", () => {
+    expect(BACKEND_ENV_ALLOWED).toEqual(["ATLAS_DIRECTORY_ENABLED"]);
+    expect(
+      DEFAULT_STACKS.filter((s) => s.backendEnv !== undefined).map((s) => [
+        s.name,
+        s.backendEnv,
+      ]),
+    ).toEqual([
+      ["sharing-directory-off", { ATLAS_DIRECTORY_ENABLED: "false" }],
+    ]);
+    const off = DEFAULT_STACKS.find((s) => s.name === "sharing-directory-off");
+    const on = DEFAULT_STACKS.find((s) => s.name === "sharing");
+    expect(off && directoryModeOf(off)).toBe("off");
+    expect(on && directoryModeOf(on)).toBe("on");
+    expect(off?.grep).toBe("I-SH17b");
+    expect(on?.grepInvert).toBe("I-SH17b");
+    const bad = { name: "x", suffix: "-x", oidc: false };
+    expect(() =>
+      backendEnvOf({ ...bad, backendEnv: { ATLAS_SECRET_KEY: "00" } }),
+    ).toThrow(/not allowed: ATLAS_SECRET_KEY/);
+    expect(() =>
+      backendEnvOf({
+        ...bad,
+        backendEnv: { ATLAS_DIRECTORY_ENABLED: false as unknown as string },
+      }),
+    ).toThrow(/not allowed/);
+    expect(backendEnvOf(bad)).toEqual({});
+  });
+
+  test("I-SH17b is a designed skip only where the directory is enabled", () => {
+    const skipped = {
+      annotations: [
+        {
+          type: "skip",
+          description:
+            "this stack's directory is enabled (I-SH17b runs in sharing-directory-off)",
+        },
+      ],
+      results: [],
+    };
+    const context = { oidc: false, postgres: false };
+    expect(
+      designedSkip("integration.sharing.spec.ts", skipped as never, {
+        ...context,
+        env: {},
+      }),
+    ).not.toBeNull();
+    expect(
+      designedSkip("integration.sharing.spec.ts", skipped as never, {
+        ...context,
+        env: { ATLAS_INTEGRATION_DIRECTORY: "off" },
+      }),
+    ).toBeNull();
+  });
 });

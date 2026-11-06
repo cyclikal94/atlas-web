@@ -63,7 +63,13 @@ import { membersOf, processTable, stopMembers } from "./ownership.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
 import { ownedGroups } from "./process-groups.mjs";
 import { playwrightLister, runIntegration } from "./schedule.mjs";
-import { PLAYWRIGHT_POLICY, planStacks, stackArgs } from "./stacks.mjs";
+import {
+  backendEnvOf,
+  directoryModeOf,
+  PLAYWRIGHT_POLICY,
+  planStacks,
+  stackArgs,
+} from "./stacks.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
@@ -450,6 +456,7 @@ async function stackRun(browser, stack) {
       names,
       docker,
       labels: { [LABEL_INVOCATION]: invocationId, [LABEL_STACK]: dockerStack },
+      backendEnv: backendEnvOf(stack),
       signal: dockerStop.signal,
       log: (line) => console.error(line),
     });
@@ -540,6 +547,8 @@ async function stackRun(browser, stack) {
         ATLAS_PUBLIC_ORIGIN: origin,
         ATLAS_SECRET_KEY: randomBytes(32).toString("hex"),
         ATLAS_OUTBOUND_ALLOW_ORIGINS: calendar?.origin ?? "",
+        // WEB-12b: the stack's allow-listed backend settings (stacks.mjs BACKEND_ENV_ALLOWED).
+        ...backendEnvOf(stack),
         ...(oidc
           ? {
               ATLAS_OIDC_ISSUER: oidc.issuer,
@@ -621,6 +630,8 @@ async function stackRun(browser, stack) {
     ...(calendar === null ? {} : { ATLAS_INTEGRATION_FEED: calendar.origin }),
     ATLAS_E2E_BROWSERS: browser === "chromium" ? "" : "all",
     ATLAS_INTEGRATION_STATE_DIR: state,
+    // WEB-12b: whether this stack's backend has its directory enabled (I-SH17b runs only where it is not).
+    ATLAS_INTEGRATION_DIRECTORY: directoryModeOf(stack),
     // The browser artefacts (traces, test-results) of this invocation stay with its evidence, in a fresh run directory each time.
     ATLAS_EVIDENCE_DIR: join(evidence, "browser-evidence"),
   };

@@ -167,9 +167,21 @@ export const DEFAULT_STACKS = [
     name: "sharing",
     suffix: "-sharing",
     files: [SPEC("sharing")],
+    grepInvert: "I-SH17b",
     oidc: false,
     mutates:
       "households, invitations, shared resources; paced by its stack ledger",
+  },
+  // WEB-12b (D-12b-5, PPL-4): the same sharing journeys need the backend's OTHER directory mode once. A backend of its own, started with
+  // its directory disabled (`backendEnv`, allow-listed: BACKEND_ENV_ALLOWED), runs only I-SH17b.
+  {
+    name: "sharing-directory-off",
+    suffix: "-sharing-directory-off",
+    files: [SPEC("sharing")],
+    grep: "I-SH17b",
+    oidc: false,
+    backendEnv: { ATLAS_DIRECTORY_ENABLED: "false" },
+    mutates: "one household and invitation; the directory is disabled",
   },
   {
     name: "snapshot",
@@ -210,6 +222,25 @@ export const DEFAULT_STACKS = [
   },
 ];
 
+/**
+ * WEB-12b: the only backend settings a stack may change (`backendEnv`). Anything else is refused before a backend starts, so a stack
+ * can never weaken the backend's security configuration or reach outside its own process.
+ */
+export const BACKEND_ENV_ALLOWED = ["ATLAS_DIRECTORY_ENABLED"];
+/** The stack's validated backend settings ({} when it has none); throws for a key not allowed or a value that is not a string. */
+export function backendEnvOf(stack) {
+  const env = stack.backendEnv ?? {};
+  for (const [key, value] of Object.entries(env))
+    if (!BACKEND_ENV_ALLOWED.includes(key) || typeof value !== "string")
+      throw new Error(
+        `stack ${stack.name}: backend setting not allowed: ${key}`,
+      );
+  return { ...env };
+}
+/** What the specs are told of the stack's directory mode (`ATLAS_INTEGRATION_DIRECTORY`). */
+export const directoryModeOf = (stack) =>
+  backendEnvOf(stack).ATLAS_DIRECTORY_ENABLED === "false" ? "off" : "on";
+
 /** Discovered by Playwright but NOT run by the default suite: a separate, mandatory command. Never counted as passed by it. */
 export const SEPARATE = [];
 
@@ -218,6 +249,13 @@ export const SEPARATE = [];
  * makes the stack incomplete. A designed skip is reported as not run, never as passed.
  */
 export const DESIGNED_SKIPS = [
+  {
+    // WEB-12b: I-SH17b needs a backend whose directory is disabled: only the `sharing-directory-off` stack starts one.
+    file: "integration.sharing.spec.ts",
+    description:
+      "this stack's directory is enabled (I-SH17b runs in sharing-directory-off)",
+    when: ({ env }) => env.ATLAS_INTEGRATION_DIRECTORY !== "off",
+  },
   {
     file: "integration.profile.spec.ts",
     description: "not run: measurements are taken by `pnpm profile:session`",
@@ -358,6 +396,7 @@ export function planStacks({ grep, passthrough, oidc, postgres, only = [] }) {
         },
       ],
     };
+  for (const stack of DEFAULT_STACKS) backendEnvOf(stack);
   const manifest = DEFAULT_STACKS.map((stack) => ({
     ...stack,
     oidc: stack.oidc && !postgres,

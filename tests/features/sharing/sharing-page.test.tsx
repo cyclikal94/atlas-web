@@ -31,6 +31,7 @@ import {
 } from "../../support/sharing/fake-households";
 import { mountHouseholds } from "../../support/sharing/households";
 import { mountSharing } from "../../support/sharing/mount";
+import { must, present, presentAll } from "../../support/sharing/present";
 
 /**
  * A8, A9 (component layer): the household cases WEB-12a wrote against its demonstration subset (`HouseholdsMinimal`), RE-TARGETED by WEB-12b
@@ -58,11 +59,12 @@ const home = household({
   ],
 });
 
-const createButton = () => screen.getByRole("button", { name: hh.CREATE });
+const createButton = () =>
+  must(screen.queryByRole("button", { name: hh.CREATE }));
 /** The New household form (its Create sits in the dialog's footer, associated with it). */
 const createForm = () =>
   document.querySelector("[data-households-new]") as HTMLFormElement;
-const nameField = () => screen.findByLabelText(hh.NAME_LABEL);
+const nameField = () => present(() => screen.queryByLabelText(hh.NAME_LABEL));
 const reasonOf = (button: HTMLElement) =>
   document.getElementById(button.getAttribute("aria-describedby") ?? "")
     ?.textContent;
@@ -76,9 +78,9 @@ describe("the households subset (A8)", () => {
     const t = mountHouseholds(`/sharing/households/${HOME}/invitations`, {
       api,
     });
-    const row = (await screen.findAllByText("Home"))[0]?.closest(
-      "[data-household]",
-    ) as HTMLElement;
+    const row = (
+      await presentAll(() => screen.queryAllByText("Home"))
+    )[0]?.closest("[data-household]") as HTMLElement;
     // Re-targeted: the role is the pane row's "you manage it"; the members are the detail's rows.
     expect(row).toHaveTextContent(hh.YOU_MANAGE);
     const members = [
@@ -86,13 +88,17 @@ describe("the households subset (A8)", () => {
     ].map((m) => m.textContent);
     expect(members.join(" ")).toContain("me");
     expect(members.join(" ")).toContain("sam");
-    const dialog = await screen.findByRole("dialog", {
-      name: hh.INVITATIONS_TITLE_FOR("Home"),
-    });
-    fireEvent.change(within(dialog).getByLabelText(hh.USERNAME_LABEL), {
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: hh.INVITATIONS_TITLE_FOR("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(hh.USERNAME_LABEL)), {
       target: { value: "jamie" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: hh.INVITE }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: hh.INVITE })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands).toEqual([
       {
@@ -123,15 +129,19 @@ describe("the households subset (A8)", () => {
     const t = mountHouseholds(`/sharing/households/${HOME}/invitations`, {
       api,
     });
-    const dialog = await screen.findByRole("dialog", {
-      name: hh.INVITATIONS_TITLE_FOR("Home"),
-    });
-    fireEvent.change(within(dialog).getByLabelText(hh.USERNAME_LABEL), {
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: hh.INVITATIONS_TITLE_FOR("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(hh.USERNAME_LABEL)), {
       target: { value: "nobody" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: hh.INVITE }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: hh.INVITE })),
+    );
     expect(
-      await screen.findByText(copy.INVITE_NOT_FOUND, BANNER),
+      await present(() => screen.queryByText(copy.INVITE_NOT_FOUND, BANNER)),
     ).toBeInTheDocument();
     expect(t.api.sentCommands).toEqual([]);
   });
@@ -152,10 +162,12 @@ describe("the households subset (A8)", () => {
     api.next.command.push({ ok: false, kind: "gone", requestId: "r-1" });
     const t = mountHouseholds("/sharing/invitations", { api });
     fireEvent.click(
-      await screen.findByRole("button", { name: `${hh.ACCEPT}: Flat` }),
+      await present(() =>
+        screen.queryByRole("button", { name: `${hh.ACCEPT}: Flat` }),
+      ),
     );
     expect(
-      await screen.findByText(copy.INVITATION_EXPIRED, BANNER),
+      await present(() => screen.queryByText(copy.INVITATION_EXPIRED, BANNER)),
     ).toBeInTheDocument();
     expect(t.api.sentCommands[0]?.commands).toEqual([
       {
@@ -173,9 +185,13 @@ describe("the households subset (A8)", () => {
     const t = mountHouseholds("/sharing/new", { api });
     fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
     fireEvent.click(createButton());
-    expect(await screen.findByText(copy.UNCERTAIN, BANNER)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.UNCERTAIN, BANNER)),
+    ).toBeInTheDocument();
     expect(createButton()).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(2));
     expect(t.api.sentCommands[1]).toEqual(t.api.sentCommands[0]);
   });
@@ -185,8 +201,10 @@ describe("the households subset (A8)", () => {
     env.setDefaults(record(snapshot({ households: [home] })));
     const api = fakeHouseholdApi();
     mountHouseholds("/sharing/new", { env, api, sharing: { online: false } });
-    expect((await screen.findAllByText("Home")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/As of/).length).toBeGreaterThan(0);
+    expect(
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/As of/).length).toBeGreaterThan(0);
     // Re-targeted: the create is the New household dialog's.
     expect(createButton()).toBeDisabled();
     expect(api.calls).toEqual([]);
@@ -317,7 +335,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     const t = mountHouseholds("/sharing/new", { api, ...sharing });
     fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
     fireEvent.click(createButton());
-    expect(await screen.findByText(copy.UNCERTAIN, BANNER)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.UNCERTAIN, BANNER)),
+    ).toBeInTheDocument();
     expect(invocations(api)).toBe(1);
     return { t, first: structuredClone(api.sentCommands[0]) };
   }
@@ -326,7 +346,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     const api = fakeHouseholdApi();
     const { first } = await uncertainCreate(api);
     api.next.command.push({ ok: false, kind: "offline" });
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(2));
     await act(async () => {});
     // The earlier request may have committed: it is still the one to try again, and nothing new can be sent.
@@ -338,7 +360,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     expect(reasonOf(createButton())).toBe(copy.UNCERTAIN_PENDING);
     fireEvent.submit(createForm());
     expect(invocations(api)).toBe(2);
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(3));
     expect(api.sentCommands[2]).toEqual(first);
     // The receipt ends it: a new create is admitted again (re-targeted: the receipt shows the household it made, so New household is
@@ -352,7 +376,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     const api = fakeHouseholdApi();
     const { t, first } = await uncertainCreate(api);
     t.setSharing({ online: false });
-    const offlineRetry = screen.getByRole("button", { name: copy.TRY_AGAIN });
+    const offlineRetry = must(
+      screen.queryByRole("button", { name: copy.TRY_AGAIN }),
+    );
     expect(offlineRetry).toBeDisabled();
     expect(reasonOf(offlineRetry)).toBe(copy.SAVE_OFFLINE_REASON);
     fireEvent.click(offlineRetry);
@@ -361,7 +387,7 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     t.setSharing({ online: true });
     expect(createButton()).toBeDisabled();
     expect(reasonOf(createButton())).toBe(copy.UNCERTAIN_PENDING);
-    const retry = screen.getByRole("button", { name: copy.TRY_AGAIN });
+    const retry = must(screen.queryByRole("button", { name: copy.TRY_AGAIN }));
     expect(retry).not.toBeDisabled();
     fireEvent.click(retry);
     await waitFor(() => expect(invocations(api)).toBe(2));
@@ -374,7 +400,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     api.next.command.push({ ok: false, kind: "not_sent" });
     for (let n = 0; n < 6; n += 1)
       api.next.command.push({ ok: false, kind: "not_sent" });
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(8), { timeout: 5_000 });
     await waitFor(() =>
       expect(screen.queryByText(copy.NOT_SENT, BANNER)).not.toBeNull(),
@@ -386,7 +414,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
       requestId: "r-9",
       message: "no",
     });
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(9));
     expect(api.sentCommands[8]).toEqual(first);
     await waitFor(() =>
@@ -399,7 +429,7 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     const api = fakeHouseholdApi();
     const { first } = await uncertainCreate(api);
     const reads = api.count("households");
-    fireEvent.click(screen.getByRole("button", { name: copy.RELOAD }));
+    fireEvent.click(must(screen.queryByRole("button", { name: copy.RELOAD })));
     await waitFor(() => expect(api.count("households")).toBeGreaterThan(reads));
     await act(async () => {});
     expect(createButton()).toBeDisabled();
@@ -407,7 +437,9 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     expect(
       screen.queryByRole("button", { name: copy.TRY_AGAIN }),
     ).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(2));
     expect(api.sentCommands[1]).toEqual(first);
   });
@@ -429,13 +461,17 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     const t = mountHouseholds(`/sharing/households/${HOME}/invitations`, {
       api,
     });
-    const dialog = await screen.findByRole("dialog", {
-      name: hh.INVITATIONS_TITLE_FOR("Home"),
-    });
-    fireEvent.change(within(dialog).getByLabelText(hh.USERNAME_LABEL), {
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: hh.INVITATIONS_TITLE_FOR("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(hh.USERNAME_LABEL)), {
       target: { value: "jamie" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: hh.INVITE }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: hh.INVITE })),
+    );
     await waitFor(() => expect(api.count("lookup")).toBe(1));
     await t.navigate("/sharing/new");
     fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
@@ -526,9 +562,11 @@ describe("DA-M2 (design assessment, review 6): offline, B5's households are said
     expect(screen.queryByText(hh.EMPTY)).toBeNull();
     expect(screen.queryByText(hh.SNAPSHOT_NONE)).not.toBeNull();
     expect(
-      within(
-        document.querySelector("[data-households-pane]") as HTMLElement,
-      ).getByText(copy.AS_OF(formatWhen(T1, T2))),
+      must(
+        within(
+          document.querySelector("[data-households-pane]") as HTMLElement,
+        ).queryByText(copy.AS_OF(formatWhen(T1, T2))),
+      ),
     ).toBeInTheDocument();
     view.unmount();
     forgetHouseholdsMemory();
@@ -540,7 +578,9 @@ describe("DA-M2 (design assessment, review 6): offline, B5's households are said
       env: subset,
       sharing: { online: false, now: () => T2 },
     });
-    expect((await screen.findAllByText("Home")).length).toBeGreaterThan(0);
+    expect(
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
     expect(
       document.querySelector('[data-households-from="snapshot"]')?.textContent,
     ).toBe(`${hh.FROM_SNAPSHOT} ${copy.AS_OF(formatWhen(T1, T2))}`);
@@ -550,7 +590,9 @@ describe("DA-M2 (design assessment, review 6): offline, B5's households are said
     const api = fakeHouseholdApi();
     api.defaults.households = ok([]);
     mountHouseholds("/sharing", { api });
-    expect(await screen.findByText(hh.EMPTY)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(hh.EMPTY)),
+    ).toBeInTheDocument();
     expect(screen.queryByText(hh.SNAPSHOT_NONE)).toBeNull();
   });
 
@@ -566,7 +608,9 @@ describe("DA-M2 (design assessment, review 6): offline, B5's households are said
       api,
       sharing: { now: () => T2 },
     });
-    expect((await screen.findAllByText("Home")).length).toBeGreaterThan(0);
+    expect(
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
     t.setSharing({ online: false });
     expect(
       document.querySelector('[data-households-from="complete"]')?.textContent,

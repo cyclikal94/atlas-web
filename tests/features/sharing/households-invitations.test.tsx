@@ -32,6 +32,7 @@ import {
   PRIYA_ID,
 } from "../../support/sharing/households";
 import { mountSharing } from "../../support/sharing/mount";
+import { must, present } from "../../support/sharing/present";
 
 /**
  * WEB-12b S-HH10, S-HH11 and S-HH17 (plan §8.2): WF-SHARING-02's For you, Invite and Sent by you (Q16), and WF-SHARING-05's browse mode
@@ -60,7 +61,8 @@ const row = (n: number, over: Partial<SentInvitation> = {}) =>
     recipient_username: `person${n}`,
     ...over,
   });
-const dialogNamed = (name: string) => screen.findByRole("dialog", { name });
+const dialogNamed = (name: string) =>
+  present(() => screen.queryByRole("dialog", { name }));
 const section = (which: string) =>
   document.querySelector(`[data-invitations="${which}"]`) as HTMLElement;
 
@@ -74,10 +76,14 @@ describe("S-HH10: For you", () => {
     });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE);
     expect(
-      await within(dialog).findByText(copy.INVITED_YOU("Flat", 5)),
+      await present(() =>
+        within(dialog).queryByText(copy.INVITED_YOU("Flat", 5)),
+      ),
     ).toBeInTheDocument();
     fireEvent.click(
-      within(dialog).getByRole("button", { name: `${copy.DECLINE}: Flat` }),
+      must(
+        within(dialog).queryByRole("button", { name: `${copy.DECLINE}: Flat` }),
+      ),
     );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands).toEqual([
@@ -99,16 +105,22 @@ describe("S-HH10: For you", () => {
     mountHouseholds("/sharing/invitations", { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE);
     fireEvent.click(
-      await within(dialog).findByRole("button", {
-        name: `${copy.ACCEPT}: Flat`,
-      }),
+      await present(() =>
+        within(dialog).queryByRole("button", {
+          name: `${copy.ACCEPT}: Flat`,
+        }),
+      ),
     );
     // Once the list is read again the row is gone, and what its answer said is shown at the section's top.
     await waitFor(() =>
-      expect(within(dialog).getByText(copy.FOR_YOU_NONE)).toBeInTheDocument(),
+      expect(
+        must(within(dialog).queryByText(copy.FOR_YOU_NONE)),
+      ).toBeInTheDocument(),
     );
-    expect(within(dialog).getByText(copy.NOT_FOUND)).toBeInTheDocument();
-    expect(within(dialog).getByText(/r-404/)).toBeInTheDocument();
+    expect(
+      must(within(dialog).queryByText(copy.NOT_FOUND)),
+    ).toBeInTheDocument();
+    expect(must(within(dialog).queryByText(/r-404/))).toBeInTheDocument();
     expect(api.count("invitations")).toBeGreaterThanOrEqual(2);
     expect(within(dialog).queryByText(copy.STATUS.expired)).toBeNull();
   });
@@ -125,15 +137,12 @@ describe("S-HH10: For you", () => {
     api.defaults.invitations = ok([invitationFor()]);
     mountHouseholds("/sharing/invitations", { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE);
-    await within(dialog)
-      .findByText(copy.INVITED_YOU("Flat", 0), {
-        exact: false,
-      })
-      .catch(() => undefined);
     await waitFor(() =>
-      expect(screen.getByText(copy.CAPACITY(32))).toBeInTheDocument(),
+      expect(must(screen.queryByText(copy.CAPACITY(32)))).toBeInTheDocument(),
     );
-    const accept = within(dialog).getByRole("button", { name: copy.ACCEPT });
+    const accept = must(
+      within(dialog).queryByRole("button", { name: copy.ACCEPT }),
+    );
     expect(accept).toBeDisabled();
   });
 });
@@ -176,7 +185,11 @@ describe("S-HH11: Sent by you (Q16, sender-keyed)", () => {
     ]);
     expect(section("sent")).toHaveTextContent(copy.SENT_NOTE);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: `${copy.REVOKE}: person0` }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: `${copy.REVOKE}: person0`,
+        }),
+      ),
     );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands).toEqual([
@@ -216,7 +229,7 @@ describe("S-HH11: Sent by you (Q16, sender-keyed)", () => {
     mountHouseholds("/sharing/invitations", { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE);
     expect(
-      await within(dialog).findByText(copy.SENT_TRUNCATED),
+      await present(() => within(dialog).queryByText(copy.SENT_TRUNCATED)),
     ).toBeInTheDocument();
     // One page, the refused page, then a fresh walk of ten pages.
     expect(api.count("sent")).toBe(12);
@@ -248,7 +261,11 @@ describe("S-HH11: Sent by you (Q16, sender-keyed)", () => {
       `[data-sent-group="${HOME_ID}"]`,
     ) as HTMLElement;
     expect(
-      within(managed).getByRole("button", { name: `${copy.REVOKE}: person1` }),
+      must(
+        within(managed).queryByRole("button", {
+          name: `${copy.REVOKE}: person1`,
+        }),
+      ),
     ).toBeInTheDocument();
   });
 });
@@ -270,13 +287,20 @@ describe("D-12b-14: inviting", () => {
       });
     mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
-    fireEvent.change(within(dialog).getByLabelText(copy.USERNAME_LABEL), {
-      target: { value: "jamie" },
-    });
+    fireEvent.change(
+      must(within(dialog).queryByLabelText(copy.USERNAME_LABEL)),
+      {
+        target: { value: "jamie" },
+      },
+    );
     invited = true;
-    fireEvent.click(within(dialog).getByRole("button", { name: copy.INVITE }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.INVITE })),
+    );
     expect(
-      await within(dialog).findByText(copy.INVITE_CONFLICT.invited("jamie")),
+      await present(() =>
+        within(dialog).queryByText(copy.INVITE_CONFLICT.invited("jamie")),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -287,12 +311,19 @@ describe("D-12b-14: inviting", () => {
     api.next.command.push({ ok: false, kind: "conflict" });
     mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
-    fireEvent.change(within(dialog).getByLabelText(copy.USERNAME_LABEL), {
-      target: { value: "sam" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: copy.INVITE }));
+    fireEvent.change(
+      must(within(dialog).queryByLabelText(copy.USERNAME_LABEL)),
+      {
+        target: { value: "sam" },
+      },
+    );
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.INVITE })),
+    );
     expect(
-      await within(dialog).findByText(copy.INVITE_CONFLICT.member("sam")),
+      await present(() =>
+        within(dialog).queryByText(copy.INVITE_CONFLICT.member("sam")),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -304,12 +335,17 @@ describe("D-12b-14: inviting", () => {
       api,
     });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
-    fireEvent.change(within(dialog).getByLabelText(copy.USERNAME_LABEL), {
-      target: { value: "me" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: copy.INVITE }));
+    fireEvent.change(
+      must(within(dialog).queryByLabelText(copy.USERNAME_LABEL)),
+      {
+        target: { value: "me" },
+      },
+    );
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.INVITE })),
+    );
     expect(
-      await within(dialog).findByText(copy.INVITE_SELF),
+      await present(() => within(dialog).queryByText(copy.INVITE_SELF)),
     ).toBeInTheDocument();
     expect(t.api.sentCommands).toEqual([]);
   });
@@ -320,14 +356,16 @@ describe("D-12b-14: inviting", () => {
     mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
     expect(
-      await within(dialog).findByText(copy.INVITE_MANAGERS_ONLY),
+      await present(() =>
+        within(dialog).queryByText(copy.INVITE_MANAGERS_ONLY),
+      ),
     ).toBeInTheDocument();
     expect(within(dialog).queryByLabelText(copy.USERNAME_LABEL)).toBeNull();
   });
 });
 
 describe("S-HH17: the directory lookup's browse mode (PPL-4)", () => {
-  test("Find an account browses without a query, filters here (case-insensitive substring), excludes your own account, notes the first 100, and the choice fills the username", async () => {
+  test("MU-6217: Find an account browses without a query, filters here (case-insensitive substring), excludes your own account, notes the first 100, and the choice fills the username", async () => {
     const api = fakeHouseholdApi();
     api.defaults.households = ok([homeOf()]);
     api.defaults.browse = ok([
@@ -342,27 +380,44 @@ describe("S-HH17: the directory lookup's browse mode (PPL-4)", () => {
     mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, { api });
     const dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
     fireEvent.click(
-      within(dialog).getByRole("button", { name: copy.FIND_ACCOUNT }),
+      must(within(dialog).queryByRole("button", { name: copy.FIND_ACCOUNT })),
     );
     fireEvent.change(
-      await within(dialog).findByLabelText(base.LOOKUP_SEARCH_LABEL),
+      await present(() =>
+        within(dialog).queryByLabelText(base.LOOKUP_SEARCH_LABEL),
+      ),
       {
-        target: { value: "am" },
+        // "m" matches "me" (your own account) and "Jamie": only Jamie is offered (MU-6217).
+        target: { value: "m" },
       },
     );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: base.LOOKUP_SEARCH_BUTTON }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: base.LOOKUP_SEARCH_BUTTON,
+        }),
+      ),
     );
-    fireEvent.click(
-      await within(dialog).findByRole("button", {
+    const jamie = await present(() =>
+      within(dialog).queryByRole("button", {
         name: `${base.LOOKUP_CHOOSE}: Jamie`,
       }),
     );
+    expect(
+      within(dialog).queryByRole("button", {
+        name: `${base.LOOKUP_CHOOSE}: me`,
+      }),
+    ).toBeNull();
+    expect(within(dialog).queryByText(base.LOOKUP_FIRST_100)).not.toBeNull();
+    fireEvent.click(jamie);
     expect(api.calls.filter((c) => c.op === "browse")).toHaveLength(1);
     expect(api.count("lookup")).toBe(0);
     expect(
-      (within(dialog).getByLabelText(copy.USERNAME_LABEL) as HTMLInputElement)
-        .value,
+      (
+        must(
+          within(dialog).queryByLabelText(copy.USERNAME_LABEL),
+        ) as HTMLInputElement
+      ).value,
     ).toBe("Jamie");
   });
 
@@ -383,52 +438,74 @@ describe("S-HH17: the directory lookup's browse mode (PPL-4)", () => {
     });
     let dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
     fireEvent.click(
-      within(dialog).getByRole("button", { name: copy.FIND_ACCOUNT }),
+      must(within(dialog).queryByRole("button", { name: copy.FIND_ACCOUNT })),
     );
     fireEvent.change(
-      await within(dialog).findByLabelText(base.LOOKUP_SEARCH_LABEL),
+      await present(() =>
+        within(dialog).queryByLabelText(base.LOOKUP_SEARCH_LABEL),
+      ),
       {
         target: { value: "jam" },
       },
     );
-    fireEvent.change(within(dialog).getByLabelText(base.LOOKUP_EXACT_LABEL), {
-      target: { value: "jamie" },
-    });
+    fireEvent.change(
+      must(within(dialog).queryByLabelText(base.LOOKUP_EXACT_LABEL)),
+      {
+        target: { value: "jamie" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: base.LOOKUP_SEARCH_BUTTON }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: base.LOOKUP_SEARCH_BUTTON,
+        }),
+      ),
     );
     await waitFor(() => expect(api.count("browse")).toBe(1));
     // The 403 remounts the protected tree: the route reopens the dialog, the lookup view and its typed input from page memory.
     t.remount();
     dialog = await dialogNamed(copy.INVITATIONS_TITLE_FOR("Home"));
     expect(
-      await within(dialog).findByText(base.LOOKUP_EXACT_ONLY),
+      await present(() => within(dialog).queryByText(base.LOOKUP_EXACT_ONLY)),
     ).toBeInTheDocument();
     expect(
       (
-        within(dialog).getByLabelText(
-          base.LOOKUP_EXACT_LABEL,
+        must(
+          within(dialog).queryByLabelText(base.LOOKUP_EXACT_LABEL),
         ) as HTMLInputElement
       ).value,
     ).toBe("jamie");
     await act(async () => {});
     expect(api.count("browse")).toBe(1);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: base.LOOKUP_EXACT_BUTTON }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: base.LOOKUP_EXACT_BUTTON,
+        }),
+      ),
     );
     expect(
-      await within(dialog).findByRole("button", {
-        name: `${base.LOOKUP_CHOOSE}: jamie`,
-      }),
+      await present(() =>
+        within(dialog).queryByRole("button", {
+          name: `${base.LOOKUP_CHOOSE}: jamie`,
+        }),
+      ),
     ).toBeInTheDocument();
-    fireEvent.change(within(dialog).getByLabelText(base.LOOKUP_EXACT_LABEL), {
-      target: { value: "me" },
-    });
+    fireEvent.change(
+      must(within(dialog).queryByLabelText(base.LOOKUP_EXACT_LABEL)),
+      {
+        target: { value: "me" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: base.LOOKUP_EXACT_BUTTON }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: base.LOOKUP_EXACT_BUTTON,
+        }),
+      ),
     );
     expect(
-      await within(dialog).findByText(base.LOOKUP_NONE),
+      await present(() => within(dialog).queryByText(base.LOOKUP_NONE)),
     ).toBeInTheDocument();
     expect(api.count("browse")).toBe(1);
   });
@@ -443,11 +520,11 @@ describe("S-HH17: the directory lookup's browse mode (PPL-4)", () => {
       />,
       { api },
     );
-    fireEvent.change(screen.getByLabelText(base.LOOKUP_SEARCH_LABEL), {
+    fireEvent.change(must(screen.queryByLabelText(base.LOOKUP_SEARCH_LABEL)), {
       target: { value: "sa" },
     });
     fireEvent.click(
-      screen.getByRole("button", { name: base.LOOKUP_SEARCH_BUTTON }),
+      must(screen.queryByRole("button", { name: base.LOOKUP_SEARCH_BUTTON })),
     );
     await waitFor(() =>
       expect(api.calls.filter((c) => c.op === "lookup")).toEqual([
@@ -465,13 +542,17 @@ describe("D-12b-12: the header Invitations count", () => {
     api.next.invitations.push(answer.answer);
     mountHouseholds("/sharing", { api });
     expect(
-      await screen.findByRole("link", { name: copy.INVITATIONS_ACTION(null) }),
+      await present(() =>
+        screen.queryByRole("link", { name: copy.INVITATIONS_ACTION(null) }),
+      ),
     ).toBeInTheDocument();
     await act(async () => {
       answer.release(ok([invitationFor(), invitationFor({ id: SAM })]));
     });
     expect(
-      await screen.findByRole("link", { name: copy.INVITATIONS_ACTION(2) }),
+      await present(() =>
+        screen.queryByRole("link", { name: copy.INVITATIONS_ACTION(2) }),
+      ),
     ).toBeInTheDocument();
   });
 });

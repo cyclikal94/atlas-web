@@ -24,6 +24,7 @@ import {
   homeOf,
   mountHouseholds,
 } from "../../support/sharing/households";
+import { must, present, presentAll } from "../../support/sharing/present";
 
 /**
  * WEB-12b S-HH13..S-HH16 (plan §8.2): Q21 group 2, a household's signup invitations (issue, list, revoke), in the application's own router
@@ -54,12 +55,15 @@ async function openSignup(api = fakeHouseholdApi(), households = [homeOf()]) {
   api.defaults.households = ok(households);
   const announced: string[] = [];
   const t = mountHouseholds(`/sharing/households/${HOME_ID}/signup`, { api });
-  const dialog = await screen.findByRole("dialog", {
-    name: copy.SIGNUP_TITLE("Home"),
-  });
+  const dialog = await present(() =>
+    screen.queryByRole("dialog", {
+      name: copy.SIGNUP_TITLE("Home"),
+    }),
+  );
   return { t, api, dialog, announced };
 }
-const newButton = () => screen.getByRole("button", { name: copy.SIGNUP_NEW });
+const newButton = () =>
+  must(screen.queryByRole("button", { name: copy.SIGNUP_NEW }));
 
 describe("S-HH13: issue → a fragment link shown once", () => {
   test("MU-6207/MU-6208: New invitation shows /join#t=<token> (never ?t=), Copy writes it on the click, Done forgets it; nothing reaches storage, the URL or the announcer", async () => {
@@ -75,14 +79,16 @@ describe("S-HH13: issue → a fragment link shown once", () => {
     const { t, dialog } = await openSignup(api);
     await waitFor(() => expect(newButton()).not.toBeDisabled());
     fireEvent.click(newButton());
-    const field = (await within(dialog).findByLabelText(
-      copy.SIGNUP_LINK_LABEL,
+    const field = (await present(() =>
+      within(dialog).queryByLabelText(copy.SIGNUP_LINK_LABEL),
     )) as HTMLInputElement;
     expect(field.value).toBe(`${window.location.origin}/join#t=${TOKEN}`);
     expect(field.value).not.toContain("?t=");
-    expect(within(dialog).getByText(copy.SIGNUP_ISSUED)).toBeInTheDocument();
+    expect(
+      must(within(dialog).queryByText(copy.SIGNUP_ISSUED)),
+    ).toBeInTheDocument();
     fireEvent.click(
-      within(dialog).getByRole("button", { name: copy.SIGNUP_COPY }),
+      must(within(dialog).queryByRole("button", { name: copy.SIGNUP_COPY })),
     );
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(field.value));
     expect(t.router().state.location.href).not.toContain(TOKEN);
@@ -97,15 +103,20 @@ describe("S-HH13: issue → a fragment link shown once", () => {
     ).toBe(false);
     // A remount (any 403) keeps it until Done.
     t.remount();
-    const again = await screen.findByRole("dialog", {
-      name: copy.SIGNUP_TITLE("Home"),
-    });
+    const again = await present(() =>
+      screen.queryByRole("dialog", {
+        name: copy.SIGNUP_TITLE("Home"),
+      }),
+    );
     expect(
-      (within(again).getByLabelText(copy.SIGNUP_LINK_LABEL) as HTMLInputElement)
-        .value,
+      (
+        must(
+          within(again).queryByLabelText(copy.SIGNUP_LINK_LABEL),
+        ) as HTMLInputElement
+      ).value,
     ).toContain(TOKEN);
     fireEvent.click(
-      within(again).getByRole("button", { name: copy.SIGNUP_DONE }),
+      must(within(again).queryByRole("button", { name: copy.SIGNUP_DONE })),
     );
     expect(within(again).queryByLabelText(copy.SIGNUP_LINK_LABEL)).toBeNull();
     expect(document.body.innerHTML).not.toContain(TOKEN);
@@ -122,13 +133,17 @@ describe("S-HH13: issue → a fragment link shown once", () => {
     await waitFor(() => expect(newButton()).not.toBeDisabled());
     fireEvent.click(newButton());
     fireEvent.click(
-      await within(dialog).findByRole("button", { name: copy.SIGNUP_COPY }),
+      await present(() =>
+        within(dialog).queryByRole("button", { name: copy.SIGNUP_COPY }),
+      ),
     );
     expect(
-      await within(dialog).findByText(copy.SIGNUP_COPY_FALLBACK),
+      await present(() =>
+        within(dialog).queryByText(copy.SIGNUP_COPY_FALLBACK),
+      ),
     ).toBeInTheDocument();
     expect(document.activeElement).toBe(
-      within(dialog).getByLabelText(copy.SIGNUP_LINK_LABEL),
+      must(within(dialog).queryByLabelText(copy.SIGNUP_LINK_LABEL)),
     );
   });
 
@@ -147,9 +162,11 @@ describe("S-HH13: issue → a fragment link shown once", () => {
       copy.SIGNUP_ID(id(1)),
     );
     fireEvent.click(
-      within(dialog).getByRole("button", {
-        name: copy.SIGNUP_REVOKE(copy.SIGNUP_ID(id(1))),
-      }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: copy.SIGNUP_REVOKE(copy.SIGNUP_ID(id(1))),
+        }),
+      ),
     );
     await waitFor(() => expect(api.count("signupRevoke")).toBe(1));
     expect(api.calls.find((c) => c.op === "signupRevoke")?.args).toEqual([
@@ -167,7 +184,7 @@ describe("S-HH14: the cap (20 per issuer)", () => {
     await waitFor(() => expect(newButton()).not.toBeDisabled());
     fireEvent.click(newButton());
     expect(
-      await within(dialog).findAllByText(copy.SIGNUP_LIMIT),
+      await presentAll(() => within(dialog).queryAllByText(copy.SIGNUP_LIMIT)),
     ).not.toHaveLength(0);
     await waitFor(() => expect(newButton()).toBeDisabled());
     expect(reasonOf(newButton())).toBe(copy.SIGNUP_LIMIT);
@@ -175,9 +192,11 @@ describe("S-HH14: the cap (20 per issuer)", () => {
     // A revoke changes the list: New invitation is offered again.
     api.defaults.signupList = ok([]);
     fireEvent.click(
-      within(dialog).getByRole("button", {
-        name: copy.SIGNUP_REVOKE(copy.SIGNUP_ID(id(1))),
-      }),
+      must(
+        within(dialog).queryByRole("button", {
+          name: copy.SIGNUP_REVOKE(copy.SIGNUP_ID(id(1))),
+        }),
+      ),
     );
     await waitFor(() => expect(newButton()).not.toBeDisabled());
   });
@@ -193,7 +212,7 @@ describe("S-HH15: a lost issuance is recovered by listing, never by retrying (SH
     await waitFor(() => expect(newButton()).not.toBeDisabled());
     fireEvent.click(newButton());
     expect(
-      await within(dialog).findByText(copy.SIGNUP_UNCERTAIN),
+      await present(() => within(dialog).queryByText(copy.SIGNUP_UNCERTAIN)),
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(
@@ -213,20 +232,24 @@ describe("S-HH15: a lost issuance is recovered by listing, never by retrying (SH
     api.next.signupRevoke.push({ ok: false, kind: "uncertain" });
     const { dialog } = await openSignup(api);
     const revoke = () =>
-      within(dialog).getByRole("button", {
-        name: copy.SIGNUP_REVOKE(copy.SIGNUP_ID(id(1))),
-      });
+      must(
+        within(dialog).queryByRole("button", {
+          name: copy.SIGNUP_REVOKE(copy.SIGNUP_ID(id(1))),
+        }),
+      );
     await waitFor(() => expect(revoke()).toBeInTheDocument());
     fireEvent.click(revoke());
     expect(
-      await within(dialog).findByText(copy.SIGNUP_REVOKE_UNCERTAIN),
+      await present(() =>
+        within(dialog).queryByText(copy.SIGNUP_REVOKE_UNCERTAIN),
+      ),
     ).toBeInTheDocument();
     await waitFor(() => expect(revoke()).not.toBeDisabled());
     api.defaults.signupList = ok([]);
     fireEvent.click(revoke());
     await waitFor(() => expect(api.count("signupRevoke")).toBe(2));
     expect(
-      await within(dialog).findByText(copy.SIGNUP_NONE),
+      await present(() => within(dialog).queryByText(copy.SIGNUP_NONE)),
     ).toBeInTheDocument();
   });
 });
@@ -254,7 +277,7 @@ describe("S-HH16: role loss and offline", () => {
     });
     fireEvent.click(newButton());
     expect(
-      await within(dialog).findByText(copy.SIGNUP_ROLE_LOST),
+      await present(() => within(dialog).queryByText(copy.SIGNUP_ROLE_LOST)),
     ).toBeInTheDocument();
     expect(
       within(dialog).queryByRole("button", { name: copy.SIGNUP_NEW }),
@@ -267,18 +290,26 @@ describe("S-HH16: role loss and offline", () => {
     const api = fakeHouseholdApi();
     api.defaults.households = ok([homeOf()]);
     const t = mountHouseholds(`/sharing/households/${HOME_ID}`, { api });
-    await screen.findByRole("heading", { level: 2, name: "Home" });
+    await present(() =>
+      screen.queryByRole("heading", { level: 2, name: "Home" }),
+    );
     t.setSharing({ online: false });
     await t.navigate(`/sharing/households/${HOME_ID}/signup`);
-    const dialog = await screen.findByRole("dialog", {
-      name: copy.SIGNUP_TITLE("Home"),
-    });
-    const button = within(dialog).getByRole("button", {
-      name: copy.SIGNUP_NEW,
-    });
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: copy.SIGNUP_TITLE("Home"),
+      }),
+    );
+    const button = must(
+      within(dialog).queryByRole("button", {
+        name: copy.SIGNUP_NEW,
+      }),
+    );
     expect(button).toBeDisabled();
     expect(api.count("signupList")).toBe(0);
-    expect(within(dialog).getByText(copy.NEEDS_CONNECTION)).toBeInTheDocument();
+    expect(
+      must(within(dialog).queryByText(copy.NEEDS_CONNECTION)),
+    ).toBeInTheDocument();
   });
 
   test("below 768 px each row is a stacked card with labelled fields (design-coverage §7)", async () => {
@@ -308,7 +339,7 @@ describe("S-HH16: role loss and offline", () => {
     await act(async () => {});
     expect(api.count("signupIssue")).toBe(1);
     expect(
-      within(dialog).getByRole("button", { name: copy.SIGNUP_NEW }),
+      must(within(dialog).queryByRole("button", { name: copy.SIGNUP_NEW })),
     ).toBeDisabled();
   });
 });

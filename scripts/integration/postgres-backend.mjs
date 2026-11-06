@@ -43,6 +43,7 @@ export async function startPostgresBackend({
   names,
   docker,
   labels,
+  backendEnv = {},
   signal,
   at = async () => undefined,
   log = () => undefined,
@@ -172,6 +173,11 @@ export async function startPostgresBackend({
       `ATLAS_PUBLIC_ORIGIN=${origin}`,
       "-e",
       `ATLAS_DATABASE_URL=${url}`,
+      // WEB-12b: the stack's allow-listed backend settings (stacks.mjs BACKEND_ENV_ALLOWED), validated by the caller.
+      ...Object.entries(backendEnv).flatMap(([key, value]) => [
+        "-e",
+        `${key}=${value}`,
+      ]),
       BACKEND_IMAGE,
     ],
     "start backend",

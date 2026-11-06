@@ -27,6 +27,7 @@ import {
   mountHouseholds,
   PRIYA_ID,
 } from "../../support/sharing/households";
+import { must, present, presentAll } from "../../support/sharing/present";
 
 /**
  * WEB-12b S-HH1..S-HH9 and S-HH12 (plan §8.2): the households page, its detail and the household commands, in the application's own router
@@ -56,7 +57,7 @@ const detail = () =>
   document.querySelector("[data-household-detail]") as HTMLElement;
 const member = (id: string) =>
   document.querySelector(`[data-member="${id}"]`) as HTMLElement;
-const confirmDialog = () => screen.findByRole("dialog");
+const confirmDialog = () => present(() => screen.queryByRole("dialog"));
 async function mountHome(
   households: SnapshotHousehold[] = [homeOf()],
   options: Parameters<typeof mountHouseholds>[1] & { path?: string } = {},
@@ -68,10 +69,12 @@ async function mountHome(
     api,
     ...(options.sharing ? { sharing: options.sharing } : {}),
   });
-  await screen.findByRole("heading", {
-    level: 2,
-    name: households[0]?.name ?? "Home",
-  });
+  await present(() =>
+    screen.queryByRole("heading", {
+      level: 2,
+      name: households[0]?.name ?? "Home",
+    }),
+  );
   return t;
 }
 
@@ -111,7 +114,7 @@ describe("S-HH1: rendering", () => {
       `Flat${copy.PEOPLE(2)} · ${copy.MEMBER}`,
       `Home${copy.MAIN_BADGE}${copy.PEOPLE(2)} · ${copy.YOU_MANAGE}`,
     ]);
-    expect(screen.getByText(copy.CAPACITY(2))).toBeInTheDocument();
+    expect(must(screen.queryByText(copy.CAPACITY(2)))).toBeInTheDocument();
   });
 });
 
@@ -120,11 +123,15 @@ describe("S-HH2: the E / L / Er / O states", () => {
     const env = stubEnv();
     const api = fakeHouseholdApi();
     mountHouseholds("/sharing", { env, api, sharing: { online: false } });
-    expect(await screen.findByText(copy.OFFLINE_NEVER)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.OFFLINE_NEVER)),
+    ).toBeInTheDocument();
     expect(screen.queryByText(copy.EMPTY)).toBeNull();
-    const invitations = screen.getByRole("button", {
-      name: copy.INVITATIONS_ACTION(null),
-    });
+    const invitations = must(
+      screen.queryByRole("button", {
+        name: copy.INVITATIONS_ACTION(null),
+      }),
+    );
     expect(invitations).toBeDisabled();
     expect(reasonOf(invitations)).toBe(copy.NEEDS_CONNECTION);
     expect(api.calls).toEqual([]);
@@ -145,9 +152,13 @@ describe("S-HH2: the E / L / Er / O states", () => {
       },
     ]);
     mountHouseholds("/sharing", { api });
-    expect(await screen.findByText(copy.EMPTY)).toBeInTheDocument();
     expect(
-      await screen.findByRole("link", { name: copy.INVITATIONS_ACTION(1) }),
+      await present(() => screen.queryByText(copy.EMPTY)),
+    ).toBeInTheDocument();
+    expect(
+      await present(() =>
+        screen.queryByRole("link", { name: copy.INVITATIONS_ACTION(1) }),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -160,14 +171,20 @@ describe("S-HH2: the E / L / Er / O states", () => {
     });
     api.defaults.households = ok([homeOf()]);
     mountHouseholds("/sharing", { api });
-    expect(await screen.findByText(copy.FAILED, BANNER)).toBeInTheDocument();
-    expect(screen.getByText(/abcd1234/)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.FAILED, BANNER)),
+    ).toBeInTheDocument();
+    expect(must(screen.queryByText(/abcd1234/))).toBeInTheDocument();
     fireEvent.click(
-      within(
-        document.querySelector("[data-households-pane]") as HTMLElement,
-      ).getByRole("button", { name: base.TRY_AGAIN }),
+      must(
+        within(
+          document.querySelector("[data-households-pane]") as HTMLElement,
+        ).queryByRole("button", { name: base.TRY_AGAIN }),
+      ),
     );
-    expect((await screen.findAllByText("Home")).length).toBeGreaterThan(0);
+    expect(
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
   });
 });
 
@@ -176,9 +193,11 @@ describe("S-HH3: a household you are not in", () => {
     const api = fakeHouseholdApi();
     api.defaults.households = ok([homeOf()]);
     mountHouseholds(`/sharing/households/${FLAT_ID}`, { api });
-    expect(await screen.findByText(copy.NOT_IN_IT)).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: copy.NOT_IN_IT_LINK }),
+      await present(() => screen.queryByText(copy.NOT_IN_IT)),
+    ).toBeInTheDocument();
+    expect(
+      must(screen.queryByRole("link", { name: copy.NOT_IN_IT_LINK })),
     ).toBeInTheDocument();
   });
 });
@@ -187,7 +206,11 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
   test("Promote sends set_household_role with the household's version; Remove (confirmed) sends remove_household_member", async () => {
     const t = await mountHome();
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.PROMOTE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.PROMOTE}: sam`,
+        }),
+      ),
     );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands).toEqual([
@@ -201,17 +224,25 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
     ]);
     await waitFor(() =>
       expect(
-        within(member(SAM)).getByRole("button", {
-          name: `${copy.REMOVE}: sam`,
-        }),
+        must(
+          within(member(SAM)).queryByRole("button", {
+            name: `${copy.REMOVE}: sam`,
+          }),
+        ),
       ).not.toBeDisabled(),
     );
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.REMOVE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.REMOVE}: sam`,
+        }),
+      ),
     );
     const dialog = await confirmDialog();
     expect(dialog).toHaveTextContent(copy.REMOVE_CONFIRM("sam", "Home"));
-    fireEvent.click(within(dialog).getByRole("button", { name: copy.CONFIRM }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.CONFIRM })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(2));
     expect(t.api.sentCommands[1]?.commands).toEqual([
       {
@@ -225,14 +256,18 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
 
   test("MU-6214: the last manager's Leave and own demotion are unavailable with the reason and fix; a sole member is told they can't leave", async () => {
     const t = await mountHome();
-    const leave = within(member(ME)).getByRole("button", {
-      name: `${copy.LEAVE}: Home`,
-    });
+    const leave = must(
+      within(member(ME)).queryByRole("button", {
+        name: `${copy.LEAVE}: Home`,
+      }),
+    );
     expect(leave).toBeDisabled();
     expect(reasonOf(leave)).toBe(copy.LAST_MANAGER("Home"));
-    const demote = within(member(ME)).getByRole("button", {
-      name: `${copy.DEMOTE}: me`,
-    });
+    const demote = must(
+      within(member(ME)).queryByRole("button", {
+        name: `${copy.DEMOTE}: me`,
+      }),
+    );
     expect(demote).toBeDisabled();
     expect(reasonOf(demote)).toBe(copy.LAST_MANAGER_DEMOTE);
     t.unmount();
@@ -242,9 +277,11 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
         members: [{ account_id: ME, username: "me", role: "manager" }],
       }),
     ]);
-    const alone = within(member(ME)).getByRole("button", {
-      name: `${copy.LEAVE}: Home`,
-    });
+    const alone = must(
+      within(member(ME)).queryByRole("button", {
+        name: `${copy.LEAVE}: Home`,
+      }),
+    );
     expect(alone).toBeDisabled();
     expect(reasonOf(alone)).toBe(copy.SOLE_MEMBER("Home"));
   });
@@ -266,11 +303,17 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
       expect(within(detail()).queryByRole("link", { name })).toBeNull();
     expect(detail()).toHaveTextContent(copy.MEMBERS_CANT_MANAGE);
     fireEvent.click(
-      within(member(ME)).getByRole("button", { name: `${copy.LEAVE}: Home` }),
+      must(
+        within(member(ME)).queryByRole("button", {
+          name: `${copy.LEAVE}: Home`,
+        }),
+      ),
     );
     const dialog = await confirmDialog();
     expect(dialog).toHaveTextContent(copy.LEAVE_CONFIRM("Home", true));
-    fireEvent.click(within(dialog).getByRole("button", { name: copy.CONFIRM }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.CONFIRM })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands).toEqual([
       {
@@ -296,18 +339,28 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
     const t = await mountHome([homeOf()], { api });
     const reads = api.count("households");
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.PROMOTE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.PROMOTE}: sam`,
+        }),
+      ),
     );
     expect(
-      await screen.findByText(copy.LAST_MANAGER_REFUSED, BANNER),
+      await present(() =>
+        screen.queryByText(copy.LAST_MANAGER_REFUSED, BANNER),
+      ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/r-last/)).toBeInTheDocument();
+    expect(must(screen.queryByText(/r-last/))).toBeInTheDocument();
     await waitFor(() => expect(api.count("households")).toBeGreaterThan(reads));
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.PROMOTE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.PROMOTE}: sam`,
+        }),
+      ),
     );
     expect(
-      await screen.findByText(copy.CHANGED_ELSEWHERE, BANNER),
+      await present(() => screen.queryByText(copy.CHANGED_ELSEWHERE, BANNER)),
     ).toBeInTheDocument();
     expect(t.api.sentCommands).toHaveLength(2);
   });
@@ -317,7 +370,9 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
     const env = homeWithB5(null);
     api.next.command.push({ ok: true, value: { revision: 1 } });
     const t = await mountHome([homeOf()], { api, env });
-    fireEvent.click(screen.getByRole("button", { name: copy.MAKE_MAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.MAKE_MAIN })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands).toEqual([
       {
@@ -328,13 +383,17 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
     ]);
     act(() => env.setDefaults(record(snapshot({ primary: HOME_ID }))));
     fireEvent.click(
-      await screen.findByRole("button", { name: copy.STOP_MAIN }),
+      await present(() =>
+        screen.queryByRole("button", { name: copy.STOP_MAIN }),
+      ),
     );
     const dialog = await confirmDialog();
     expect(dialog).toHaveTextContent(copy.STOP_MAIN_CONFIRM("Home"));
     api.next.command.push({ ok: false, kind: "conflict", requestId: "r-p" });
     const before = t.env.calls.length;
-    fireEvent.click(within(dialog).getByRole("button", { name: copy.CONFIRM }));
+    fireEvent.click(
+      must(within(dialog).queryByRole("button", { name: copy.CONFIRM })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(2));
     expect(t.api.sentCommands[1]?.commands).toEqual([
       {
@@ -344,7 +403,7 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
       },
     ]);
     expect(
-      await screen.findByText(copy.MAIN_CHANGED, BANNER),
+      await present(() => screen.queryByText(copy.MAIN_CHANGED, BANNER)),
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(
@@ -357,7 +416,7 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
 
   test("with no B5 record the main household action waits", async () => {
     await mountHome([homeOf()], { env: stubEnv() });
-    const make = screen.getByRole("button", { name: copy.MAKE_MAIN });
+    const make = must(screen.queryByRole("button", { name: copy.MAKE_MAIN }));
     expect(make).toBeDisabled();
     expect(reasonOf(make)).toBe(copy.MAIN_WAIT);
   });
@@ -369,18 +428,28 @@ describe("S-HH5: an uncertain household command (R8)", () => {
     api.next.command.push({ ok: false, kind: "uncertain" });
     const t = await mountHome([homeOf()], { api });
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.PROMOTE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.PROMOTE}: sam`,
+        }),
+      ),
     );
-    expect(await screen.findByText(base.UNCERTAIN, BANNER)).toBeInTheDocument();
-    const remove = within(member(SAM)).getByRole("button", {
-      name: `${copy.REMOVE}: sam`,
-    });
+    expect(
+      await present(() => screen.queryByText(base.UNCERTAIN, BANNER)),
+    ).toBeInTheDocument();
+    const remove = must(
+      within(member(SAM)).queryByRole("button", {
+        name: `${copy.REMOVE}: sam`,
+      }),
+    );
     expect(remove).toBeDisabled();
     expect(reasonOf(remove)).toBe(base.UNCERTAIN_PENDING);
-    fireEvent.click(screen.getByRole("button", { name: base.RELOAD }));
+    fireEvent.click(must(screen.queryByRole("button", { name: base.RELOAD })));
     await act(async () => {});
     expect(screen.queryByText(base.UNCERTAIN, BANNER)).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: base.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: base.TRY_AGAIN })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(2));
     expect(t.api.sentCommands[1]).toEqual(t.api.sentCommands[0]);
     await waitFor(() =>
@@ -402,11 +471,16 @@ describe("S-HH6: capacity (32 households)", () => {
     api.defaults.households = ok(many);
     // B5 names one household only.
     const t = mountHouseholds("/sharing/new", { api, env: homeWithB5() });
-    expect(await screen.findByText(copy.CAPACITY(32))).toBeInTheDocument();
-    fireEvent.change(await screen.findByLabelText(copy.NAME_LABEL), {
-      target: { value: "Another" },
-    });
-    const create = screen.getByRole("button", { name: copy.CREATE });
+    expect(
+      await present(() => screen.queryByText(copy.CAPACITY(32))),
+    ).toBeInTheDocument();
+    fireEvent.change(
+      await present(() => screen.queryByLabelText(copy.NAME_LABEL)),
+      {
+        target: { value: "Another" },
+      },
+    );
+    const create = must(screen.queryByRole("button", { name: copy.CREATE }));
     expect(create).toBeDisabled();
     expect(reasonOf(create)).toBe(copy.AT_CAPACITY);
     expect(t.api.sentCommands).toEqual([]);
@@ -416,17 +490,20 @@ describe("S-HH6: capacity (32 households)", () => {
     const api = fakeHouseholdApi();
     api.next.command.push({ ok: false, kind: "capacity", requestId: "r-cap" });
     mountHouseholds("/sharing/new", { api });
-    fireEvent.change(await screen.findByLabelText(copy.NAME_LABEL), {
-      target: { value: "Another" },
-    });
+    fireEvent.change(
+      await present(() => screen.queryByLabelText(copy.NAME_LABEL)),
+      {
+        target: { value: "Another" },
+      },
+    );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: copy.CREATE }),
+        must(screen.queryByRole("button", { name: copy.CREATE })),
       ).not.toBeDisabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE }));
+    fireEvent.click(must(screen.queryByRole("button", { name: copy.CREATE })));
     expect(
-      await screen.findByText(copy.CAPACITY_REFUSED, BANNER),
+      await present(() => screen.queryByText(copy.CAPACITY_REFUSED, BANNER)),
     ).toBeInTheDocument();
     expect(screen.queryByText(base.UNCERTAIN, BANNER)).toBeNull();
     expect(screen.queryByRole("button", { name: base.TRY_AGAIN })).toBeNull();
@@ -440,7 +517,11 @@ describe("S-HH7: a manager command refused 403 (role lost) survives the remount"
     api.next.command.push(answer.answer);
     const t = await mountHome([homeOf()], { api });
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.PROMOTE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.PROMOTE}: sam`,
+        }),
+      ),
     );
     await waitFor(() => expect(answer.asked()).toBe(true));
     // The session's 403 handling: the protected tree is unmounted before the answer is seen, then mounted again.
@@ -458,10 +539,14 @@ describe("S-HH7: a manager command refused 403 (role lost) survives the remount"
     await act(async () => {
       answer.release({ ok: false, kind: "forbidden", requestId: "r-403" });
     });
-    expect(await screen.findByText(copy.FORBIDDEN, BANNER)).toBeInTheDocument();
-    expect(screen.getByText(/r-403/)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.FORBIDDEN, BANNER)),
+    ).toBeInTheDocument();
+    expect(must(screen.queryByText(/r-403/))).toBeInTheDocument();
     await waitFor(() => expect(api.count("households")).toBeGreaterThan(reads));
-    expect(await screen.findByText(copy.LOST_MANAGER)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.LOST_MANAGER)),
+    ).toBeInTheDocument();
     expect(
       within(detail()).queryByRole("button", { name: /Make manager/ }),
     ).toBeNull();
@@ -476,29 +561,36 @@ describe("S-HH7: a manager command refused 403 (role lost) survives the remount"
       api,
       path: `/sharing/households/${HOME_ID}/rename`,
     });
-    const dialog = await screen.findByRole("dialog", {
-      name: copy.RENAME_TITLE("Home"),
-    });
-    fireEvent.change(within(dialog).getByLabelText(copy.NAME_LABEL), {
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: copy.RENAME_TITLE("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(copy.NAME_LABEL)), {
       target: { value: "Our place" },
     });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: copy.SAVE_NAME }),
+      must(within(dialog).queryByRole("button", { name: copy.SAVE_NAME })),
     );
     await waitFor(() => expect(answer.asked()).toBe(true));
     t.remount();
     await act(async () => {
       answer.release({ ok: false, kind: "forbidden", requestId: "r-403" });
     });
-    const reopened = await screen.findByRole("dialog", {
-      name: copy.RENAME_TITLE("Home"),
-    });
+    const reopened = await present(() =>
+      screen.queryByRole("dialog", {
+        name: copy.RENAME_TITLE("Home"),
+      }),
+    );
     expect(
-      await within(reopened).findByText(copy.FORBIDDEN),
+      await present(() => within(reopened).queryByText(copy.FORBIDDEN)),
     ).toBeInTheDocument();
     expect(
-      (within(reopened).getByLabelText(copy.NAME_LABEL) as HTMLInputElement)
-        .value,
+      (
+        must(
+          within(reopened).queryByLabelText(copy.NAME_LABEL),
+        ) as HTMLInputElement
+      ).value,
     ).toBe("Our place");
     expect(api.count("command")).toBe(1);
   });
@@ -509,7 +601,11 @@ describe("S-HH8: B5 is read again after every change (R7)", () => {
     const t = await mountHome();
     const before = t.env.calls.length;
     fireEvent.click(
-      within(member(SAM)).getByRole("button", { name: `${copy.PROMOTE}: sam` }),
+      must(
+        within(member(SAM)).queryByRole("button", {
+          name: `${copy.PROMOTE}: sam`,
+        }),
+      ),
     );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     await waitFor(() =>
@@ -533,25 +629,31 @@ describe("S-HH9: identity isolation", () => {
     const api = fakeHouseholdApi();
     api.next.command.push({ ok: false, kind: "uncertain" });
     const t = mountHouseholds("/sharing/new", { api });
-    fireEvent.change(await screen.findByLabelText(copy.NAME_LABEL), {
-      target: { value: "Secret name" },
-    });
+    fireEvent.change(
+      await present(() => screen.queryByLabelText(copy.NAME_LABEL)),
+      {
+        target: { value: "Secret name" },
+      },
+    );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: copy.CREATE }),
+        must(screen.queryByRole("button", { name: copy.CREATE })),
       ).not.toBeDisabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE }));
-    expect(await screen.findByText(base.UNCERTAIN, BANNER)).toBeInTheDocument();
+    fireEvent.click(must(screen.queryByRole("button", { name: copy.CREATE })));
+    expect(
+      await present(() => screen.queryByText(base.UNCERTAIN, BANNER)),
+    ).toBeInTheDocument();
     const late = held<SnapshotHousehold[]>();
     api.next.households.push(late.answer);
-    fireEvent.click(screen.getByRole("button", { name: base.RELOAD }));
+    fireEvent.click(must(screen.queryByRole("button", { name: base.RELOAD })));
     await waitFor(() => expect(late.asked()).toBe(true));
     t.setSharing({ accountId: OTHER, identity: `${OTHER}:1` });
     await act(async () => {});
     expect(screen.queryByText(base.UNCERTAIN, BANNER)).toBeNull();
     expect(
-      (screen.getByLabelText(copy.NAME_LABEL) as HTMLInputElement).value,
+      (must(screen.queryByLabelText(copy.NAME_LABEL)) as HTMLInputElement)
+        .value,
     ).toBe("");
     await act(async () => {
       late.release(ok([homeOf({ name: "First identity's home" })]));
@@ -565,18 +667,25 @@ describe("S-HH12: Decision H, a same-named create asks first", () => {
     const api = fakeHouseholdApi();
     api.defaults.households = ok([homeOf()]);
     const t = mountHouseholds("/sharing/new", { api });
-    fireEvent.change(await screen.findByLabelText(copy.NAME_LABEL), {
-      target: { value: "  home " },
-    });
+    fireEvent.change(
+      await present(() => screen.queryByLabelText(copy.NAME_LABEL)),
+      {
+        target: { value: "  home " },
+      },
+    );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: copy.CREATE }),
+        must(screen.queryByRole("button", { name: copy.CREATE })),
       ).not.toBeDisabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE }));
-    expect(await screen.findByText(copy.SAME_NAME("Home"))).toBeInTheDocument();
+    fireEvent.click(must(screen.queryByRole("button", { name: copy.CREATE })));
+    expect(
+      await present(() => screen.queryByText(copy.SAME_NAME("Home"))),
+    ).toBeInTheDocument();
     expect(t.api.sentCommands).toEqual([]);
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE_ANOTHER }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.CREATE_ANOTHER })),
+    );
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     expect(t.api.sentCommands[0]?.commands[0]).toMatchObject({
       kind: "create_household",
@@ -588,15 +697,18 @@ describe("S-HH12: Decision H, a same-named create asks first", () => {
     const api = fakeHouseholdApi();
     api.defaults.households = ok([homeOf()]);
     const t = mountHouseholds("/sharing/new", { api });
-    fireEvent.change(await screen.findByLabelText(copy.NAME_LABEL), {
-      target: { value: "Flat" },
-    });
+    fireEvent.change(
+      await present(() => screen.queryByLabelText(copy.NAME_LABEL)),
+      {
+        target: { value: "Flat" },
+      },
+    );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: copy.CREATE }),
+        must(screen.queryByRole("button", { name: copy.CREATE })),
       ).not.toBeDisabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE }));
+    fireEvent.click(must(screen.queryByRole("button", { name: copy.CREATE })));
     await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     await waitFor(() =>
       expect(t.router().state.location.pathname).toMatch(
@@ -612,11 +724,13 @@ describe("D-12b-1: the responsive layout", () => {
     const api = fakeHouseholdApi();
     api.defaults.households = ok([homeOf()]);
     const t = mountHouseholds("/sharing", { api, env: homeWithB5() });
-    await screen.findByText(copy.CAPACITY(1));
+    await present(() => screen.queryByText(copy.CAPACITY(1)));
     expect(document.querySelector("[data-household-detail]")).toBeNull();
     await t.navigate(`/sharing/households/${HOME_ID}`);
     expect(
-      await screen.findByRole("link", { name: copy.BACK_TO_HOUSEHOLDS }),
+      await present(() =>
+        screen.queryByRole("link", { name: copy.BACK_TO_HOUSEHOLDS }),
+      ),
     ).toBeInTheDocument();
     expect(document.querySelector("[data-households-pane]")).toBeNull();
     expect(detail()).not.toBeNull();

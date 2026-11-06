@@ -21,6 +21,7 @@ import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
 import { ENGINE_10C, UNIT_10C } from "./catalogue-web10c.mjs";
 import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
+import { ENGINE_WEB12B, UNIT_WEB12B } from "./catalogue-web12b.mjs";
 
 export class PatchError extends Error {}
 
@@ -14916,14 +14917,15 @@ export const UNIT = [
     id: "MU-1174",
     title:
       "WEB-12a review 2 R7: after a household change the snapshot is refreshed by a read that may predate the change",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S53/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "      void defaults.acquire(defaults.boundary());\n",
-        "      void defaults.refresh();\n",
+        "  void ctx.defaults.acquire(ctx.defaults.boundary());\n}\n",
+        "  void (ctx.defaults as unknown as { refresh(): Promise<unknown> }).refresh();\n}\n",
       ),
   },
   {
@@ -14948,87 +14950,93 @@ export const UNIT = [
     id: "MU-1178",
     title:
       "WEB-12a review 3 R8: a household Try again that is not sent (offline, closed) forgets the earlier uncertain attempt (a new create is admitted under a new id and key)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S55/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "        if (earlier !== null) {\n          setProblem({\n            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,\n          });\n          return false;\n        }\n        break;\n",
-        "        hold(null);\n        break;\n",
+        "      if (earlier !== null) {\n        hold(memory, { ...earlier, heldBack: false });\n        return result;\n      }\n",
+        "      hold(memory, null);\n",
       ),
   },
   {
     id: "MU-1179",
     title:
       "WEB-12a review 3 R8: the household Try again is admitted offline (two sites: the button is offered, and the action does not check the connection)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S56/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         sub(
           t,
-          "  const retryBlocked = !env.online\n    ? copy.SAVE_OFFLINE_REASON\n    : !env.writable\n",
-          "  const retryBlocked = !env.writable\n",
+          "  return now === null || !now.online\n    ? base.SAVE_OFFLINE_REASON\n",
+          "  return now === null\n    ? base.SAVE_OFFLINE_REASON\n",
         ),
-        "    if (!now.online) return copy.SAVE_OFFLINE_REASON;\n",
-        "",
+        "  if (now === null || !now.online) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
+        "  if (now === null) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
       ),
   },
   {
     id: "MU-1180",
     title:
       "WEB-12a review 3 R8: Reload ends the unresolved household attempt before anything shows what happened to it",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S57/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "                    // Shows the households and invitations again; the unconfirmed change stays to be tried again (R8).\n                    reloadHouseholds();\n",
-        "                    hold(null);\n                    reloadHouseholds();\n",
+        "export function reloadAll(ctx: Ctx): void {\n",
+        "export function reloadAll(ctx: Ctx): void {\n  hold(ctx.memory, null);\n",
       ),
   },
   {
     id: "MU-1181",
     title:
       "WEB-12a review 3 DA-H1: an invitation's directory lookup is not part of the operation (the page is admitted only once it answers, so another command can be sent meanwhile)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S58/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "    const token = admit(false);\n    if (token === null) return false;\n    const api = live.current.api;\n    const found = await untilSent(() => api.lookup(username), {\n      isCurrent: () => owns(token),\n    });\n",
-        "    const api = live.current.api;\n    const found = await untilSent(() => api.lookup(username));\n    const token = admit(false);\n    if (token === null) return false;\n",
+        "  const token = admit(memory, false);\n  if (token === null) return false;\n  memory.note(surface, null);\n  const api = ctx.api;\n  const found = await untilSent(() => api.lookup(username), {\n    isCurrent: () => owns(memory, token),\n  });\n",
+        "  const api = ctx.api;\n  const found = await untilSent(() => api.lookup(username));\n  const token = admit(memory, false);\n  if (token === null) return false;\n  memory.note(surface, null);\n",
       ),
   },
   {
     id: "MU-1182",
     title:
       "WEB-12a review 3 DA-H1: a lookup's continuation sends the invite without checking the connection and the server's compatibility as they are now",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S59/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "    const reason = !live.current.online\n      ? copy.SAVE_OFFLINE_REASON\n      : !live.current.writable\n        ? copy.SAVE_COMPAT_REASON\n        : null;\n",
-        "    const reason: string | null = null;\n",
+        "  const reason = liveReason(memory);\n",
+        "  const reason: string | null = null;\n",
       ),
   },
   {
     id: "MU-1183",
     title:
       "WEB-12a review 3 DA-H1: household admission ignores the operation already owning the page (two submissions in one turn send two commands)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S60/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "    if (operation.current !== null) return copy.SAVE_BUSY_REASON;\n",
+        "  if (memory.operation !== null) return base.SAVE_BUSY_REASON;\n",
         "",
       ),
   },
@@ -15436,28 +15444,30 @@ export const UNIT = [
     id: "MU-1293",
     title:
       "WEB-12a design assessment DA-M2: offline, an empty B5 household subset says you are in no household",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/HouseholdsPane.tsx",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S82/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
         '      ) : shown.from === "snapshot" && shown.list.length === 0 ? (\n',
-        "      ) : false ? (\n",
+        "      ) : (false as boolean) ? (\n",
       ),
   },
   {
     id: "MU-1294",
     title:
       "WEB-12a design assessment DA-M2: offline, a complete list read on the page is labelled with the B5 snapshot's time",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/HouseholdsPane.tsx",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S83/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        '      ? { from: "complete", list: households.value, at: households.at }\n',
-        '      ? { from: "complete", list: households.value, at: defaults.record?.fetched_at ?? households.at }\n',
+        '      ? { from: "complete", list: complete.value, at: complete.at }\n',
+        '      ? { from: "complete", list: complete.value, at: snapshot?.at ?? complete.at }\n',
       ),
   },
 
@@ -27530,6 +27540,7 @@ export const UNIT = [
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
   ...UNIT_WEB11B,
+  ...UNIT_WEB12B,
 ];
 
 /**
@@ -30170,23 +30181,24 @@ export const ENGINE = [
     id: "MU-1188",
     title:
       "WEB-12a review 3 R8: (REAL ENGINE) the reviewed defect restored: the household Try again is admitted offline and a Try again not sent forgets the uncertain create (three sites)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     spec: "tests/e2e/fixture.sharing.spec.ts",
     grep: "E-SH14:",
     expect: /E-SH14:/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         sub(
           sub(
             t,
-            "  const retryBlocked = !env.online\n    ? copy.SAVE_OFFLINE_REASON\n    : !env.writable\n",
-            "  const retryBlocked = !env.writable\n",
+            "  return now === null || !now.online\n    ? base.SAVE_OFFLINE_REASON\n",
+            "  return now === null\n    ? base.SAVE_OFFLINE_REASON\n",
           ),
-          "    if (!now.online) return copy.SAVE_OFFLINE_REASON;\n",
-          "",
+          "  if (now === null || !now.online) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
+          "  if (now === null) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
         ),
-        "        if (earlier !== null) {\n          setProblem({\n            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,\n          });\n          return false;\n        }\n        break;\n",
-        "        hold(null);\n        break;\n",
+        "      if (earlier !== null) {\n        hold(memory, { ...earlier, heldBack: false });\n        return result;\n      }\n",
+        "      hold(memory, null);\n",
       ),
   },
   {
@@ -31645,4 +31657,5 @@ export const ENGINE = [
   ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
   ...ENGINE_WEB11B,
+  ...ENGINE_WEB12B,
 ];

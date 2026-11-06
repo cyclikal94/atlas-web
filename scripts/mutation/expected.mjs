@@ -1,8 +1,8 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2641;
-export const EXPECTED_ENGINE = 319;
+export const EXPECTED_UNIT = 2665;
+export const EXPECTED_ENGINE = 324;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
@@ -72,3 +72,6 @@ export const EXPECTED_ENGINE = 319;
 // WEB-11b revision 4 (review 4, R1: sender name-choice ownership): +7 unit (MU-4171..MU-4177) and +1 real-engine (MU-4178 over E-R21).
 // WEB-10c maintenance merge of accepted main 2c4e7fb (5 November 2026): base a7e0b7d (2235 unit, 296 engine) plus WEB-10c (343 unit, 11 engine) plus
 // WEB-11b (63 unit, 12 engine) = 2641 unit, 319 engine, counted from the merged catalogue; IDs do not overlap (MU-3001..MU-3368 against MU-4101..MU-4178).
+// WEB-12b: +24 unit (MU-6201..MU-6221, MU-6223..MU-6225; MU-6222 not catalogued, reason in `catalogue-web12b.mjs`) and +5 real-engine
+// (MU-6301..MU-6305) in `catalogue-web12b.mjs`; WEB-12a's MU-1174, MU-1178..MU-1183, MU-1293, MU-1294 and the real-engine MU-1188 re-anchored
+// (HouseholdsMinimal replaced by the household screens; the same defects over the moved code).

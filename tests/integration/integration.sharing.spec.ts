@@ -280,6 +280,14 @@ async function reopenBound(
   }, account);
 }
 
+/** The household the page's route names (`/sharing/households/<id>`), once the app has navigated there. */
+async function householdIdFromUrl(page: Page): Promise<string> {
+  await expect
+    .poll(() => new URL(page.url()).pathname, { timeout: 30_000 })
+    .toMatch(/^\/sharing\/households\/[0-9a-f-]{36}/);
+  return new URL(page.url()).pathname.split("/")[3] as string;
+}
+
 async function bootMain(context: BrowserContext, route = "/today") {
   const page = await bootHarness(context, "/today");
   const id = await signedIn(page, main);
@@ -806,17 +814,30 @@ test.describe("I-SH7 and I-SH8: the household demonstration, and owner-only", ()
         page.getByRole("heading", { name: "Your households" }),
       ).toBeVisible({ timeout: 30_000 });
       const name = `I-SH Flat ${Date.now() % 100_000}`;
+      // WEB-12b adaptation (D-12b-1): the create is the New household dialog, the invite the household's Invitations dialog, and the
+      // member's "Invitations for you" the header-level Invitations dialog. Every assertion is kept.
+      await go(page, "/sharing/new");
       await page.getByLabel("Household name").fill(name);
       await page.getByRole("button", { name: "Create household" }).click();
       const row = page.locator("[data-household]").filter({ hasText: name });
       await expect(row).toBeVisible({ timeout: 30_000 });
-      await row
-        .getByLabel(`Invite to “${name}” by exact username`)
+      const householdId = await householdIdFromUrl(page);
+      await go(page, `/sharing/households/${householdId}/invitations`);
+      await page
+        .getByRole("dialog")
+        .getByLabel("Their username")
         .fill(ACCOUNTS.bob.username);
-      await row.getByRole("button", { name: "Invite" }).click();
+      await page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Invite", exact: true })
+        .click();
+      await expect(
+        page.getByRole("dialog").locator("[data-sent-status=pending]"),
+      ).toHaveCount(1, { timeout: 30_000 });
       // The member accepts in their own browser.
       const theirs = await bootHarness(member, "/sharing");
       const bobId = await signedIn(theirs, "bob");
+      await go(theirs, "/sharing/invitations");
       await theirs
         .getByRole("button", { name: new RegExp(`^Accept: ${name}`) })
         .click({ timeout: 30_000 });
@@ -988,6 +1009,906 @@ test.describe("I-SH9: a membership B5 does not name is offered by the defaults e
         b5After: after.households.map((h) => h.id),
         version: scope.list.version,
       }),
+    });
+  });
+});
+
+// ---- WEB-12b: household membership and the full sharing surface (plan §8.4) -------------------------------------------------------
+/**
+ * WEB-12b against the same released backend (v0.31.0-rc.1, whose contract has Q1, Q16 and CH1), on dedicated accounts (frank..quinn), so
+ * WEB-12a's rotation (alice, carol, dave, erin) and its households are untouched. FOCUSED REAL-BACKEND EVIDENCE for a fixture-stage card:
+ * BE-Q1, BE-Q16 and BE-CH1 have no formal completion record, so this is NOT integration acceptance. `expired` cannot be produced on a
+ * seven-day server and is covered at fixture level only. I-SH17b runs in a stack of its own whose backend has its directory disabled.
+ */
+async function bootAs(context: BrowserContext, who: Who, route = "/sharing") {
+  const page = await bootHarness(context, "/today");
+  const id = await signedIn(page, who);
+  await leader(page, id.account_id);
+  await reopenBound(page, id.account_id, route);
+  return { page, id };
+}
+/** One management command, stamped by the page's own session (a fresh key). */
+const manage = (page: Page, id: Id, command: Record<string, unknown>) =>
+  raw(
+    page,
+    id,
+    "POST",
+    "/management-commands",
+    { commands: [command] },
+    crypto.randomUUID(),
+  );
+interface Hh {
+  id: string;
+  name: string;
+  version: number;
+  role: string;
+  members: Array<{ account_id: string; username: string; role: string }>;
+}
+const householdsOf = async (page: Page, id: Id) =>
+  (await raw(page, id, "GET", "/households")).body as Hh[];
+const householdNamed = async (page: Page, id: Id, name: string) =>
+  (await householdsOf(page, id)).find((h) => h.name === name);
+/** A household made by `id` with a raw command (the UI's own create is I-SH10's). */
+async function rawHousehold(page: Page, id: Id, name: string): Promise<Hh> {
+  const made = await manage(page, id, {
+    kind: "create_household",
+    id: crypto.randomUUID(),
+    name,
+  });
+  expect(made.status, JSON.stringify(made.body)).toBe(200);
+  const h = await householdNamed(page, id, name);
+  if (!h) throw new Error(`no household ${name}`);
+  return h;
+}
+const unique = (label: string) => `${label} ${Date.now() % 100_000}`;
+const dialog = (page: Page) => page.getByRole("dialog");
+const sentRows = (page: Page) => dialog(page).locator("[data-sent]");
+
+test.describe("I-SH10: a household created, renamed, joined, managed and left, in the UI (A1, A2, A3, A9)", () => {
+  test("frank creates and renames; grace (no household) accepts from the header-level Invitations and it becomes her main household; frank promotes, demotes and removes her; a fresh context of frank shows the invitation accepted; grace's deep link says she is no longer in it", async ({
+    browser,
+  }, info) => {
+    const owner = await browser.newContext();
+    const guest = await browser.newContext();
+    try {
+      const { page, id } = await bootAs(owner, "frank", "/sharing/new");
+      const name = unique("I-SH10 Home");
+      await page.getByLabel("Household name").fill(name);
+      await page.getByRole("button", { name: "Create household" }).click();
+      const hid = await householdIdFromUrl(page);
+      await expect(
+        page.locator(`[data-household-detail="${hid}"]`),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      await page.getByRole("link", { name: "Rename" }).click();
+      const renamed = `${name} renamed`;
+      await dialog(page).getByLabel("Household name").fill(renamed);
+      await dialog(page).getByRole("button", { name: "Save name" }).click();
+      await expect(
+        page.getByRole("heading", { level: 2, name: renamed }),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      await go(page, `/sharing/households/${hid}/invitations`);
+      await dialog(page)
+        .getByLabel("Their username")
+        .fill(ACCOUNTS.grace.username);
+      await dialog(page)
+        .getByRole("button", { name: "Invite", exact: true })
+        .click();
+      await expect(
+        sentRows(page).filter({ hasText: ACCOUNTS.grace.username }),
+      ).toHaveAttribute("data-sent-status", "pending", { timeout: 30_000 });
+      // grace, in a browser of her own, with no household yet.
+      const theirs = await bootAs(guest, "grace", "/sharing");
+      await expect(
+        theirs.page.getByText("You're not in a household", { exact: true }),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      await go(theirs.page, "/sharing/invitations");
+      await theirs.page
+        .getByRole("button", { name: `Accept: ${renamed}` })
+        .click({ timeout: 30_000 });
+      await expect
+        .poll(
+          async () =>
+            (
+              (await raw(theirs.page, theirs.id, "GET", "/defaults/snapshot"))
+                .body as {
+                defaults: { primary_household_id: string | null };
+              }
+            ).defaults.primary_household_id,
+          { timeout: 30_000 },
+        )
+        .toBe(hid);
+      // frank promotes, demotes and removes her, each with the household's version.
+      await go(page, `/sharing/households/${hid}`);
+      const member = page
+        .locator("[data-member]")
+        .filter({ hasText: ACCOUNTS.grace.username });
+      await expect(member).toBeVisible({ timeout: 30_000 });
+      await member
+        .getByRole("button", {
+          name: `Make manager: ${ACCOUNTS.grace.username}`,
+        })
+        .click();
+      await expect
+        .poll(
+          async () =>
+            (await householdNamed(page, id, renamed))?.members.find(
+              (m) => m.account_id === theirs.id.account_id,
+            )?.role,
+          {
+            timeout: 30_000,
+          },
+        )
+        .toBe("manager");
+      await member
+        .getByRole("button", {
+          name: `Make member: ${ACCOUNTS.grace.username}`,
+        })
+        .click();
+      await dialog(page).getByRole("button", { name: "Confirm" }).click();
+      await expect
+        .poll(
+          async () =>
+            (await householdNamed(page, id, renamed))?.members.find(
+              (m) => m.account_id === theirs.id.account_id,
+            )?.role,
+          {
+            timeout: 30_000,
+          },
+        )
+        .toBe("member");
+      await member
+        .getByRole("button", { name: `Remove: ${ACCOUNTS.grace.username}` })
+        .click();
+      await dialog(page).getByRole("button", { name: "Confirm" }).click();
+      await expect
+        .poll(
+          async () => (await householdNamed(page, id, renamed))?.members.length,
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+      // Q16, cross-device: a fresh context of frank reads the durable history.
+      const fresh = await browser.newContext();
+      try {
+        const again = await bootAs(
+          fresh,
+          "frank",
+          `/sharing/households/${hid}/invitations`,
+        );
+        await expect(
+          again.page
+            .getByRole("dialog")
+            .locator("[data-sent]")
+            .filter({ hasText: ACCOUNTS.grace.username }),
+        ).toHaveAttribute("data-sent-status", "accepted", { timeout: 30_000 });
+      } finally {
+        await fresh.close();
+      }
+      // grace's own deep link, read again: she is no longer in it.
+      await reopenBound(
+        theirs.page,
+        theirs.id.account_id,
+        `/sharing/households/${hid}`,
+      );
+      await expect(
+        theirs.page.getByText(
+          "You're no longer in this household, or it doesn't exist.",
+        ),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ household: hid }),
+      });
+    } finally {
+      await owner.close();
+      await guest.close();
+    }
+  });
+});
+
+test.describe("I-SH11: SHARE-6 and SHARE-9 against the server, and the UI's stale path (A2)", () => {
+  test("a sole manager's leave is 409 last_manager; an invite with a stale household version and a response with the household's (not the invitation's) version are conflicts; the UI's stale rename is explained and read again", async ({
+    browser,
+  }) => {
+    const a = await browser.newContext();
+    const b = await browser.newContext();
+    try {
+      const { page, id } = await bootAs(a, "olga", "/sharing");
+      const pete = await bootAs(b, "pete", "/sharing");
+      const name = unique("I-SH11 Home");
+      const h = await rawHousehold(page, id, name);
+      const leave = await manage(page, id, {
+        kind: "remove_household_member",
+        household_id: h.id,
+        account_id: id.account_id,
+        expected_version: h.version,
+      });
+      expect(leave.status).toBe(409);
+      expect((leave.body as { code: string }).code).toBe("last_manager");
+      const renamed = await manage(page, id, {
+        kind: "rename_household",
+        id: h.id,
+        name: `${name} 2`,
+        expected_version: h.version,
+      });
+      expect(renamed.status).toBe(200);
+      const peteId = await accountIdOf(page, id, ACCOUNTS.pete.username);
+      const stale = await manage(page, id, {
+        kind: "invite_to_household",
+        id: crypto.randomUUID(),
+        household_id: h.id,
+        recipient_id: peteId,
+        expected_version: h.version,
+      });
+      expect(stale.status).toBe(409);
+      expect((stale.body as { code: string }).code).toBe("conflict");
+      const now = (await householdNamed(page, id, `${name} 2`)) as Hh;
+      const invited = await manage(page, id, {
+        kind: "invite_to_household",
+        id: crypto.randomUUID(),
+        household_id: h.id,
+        recipient_id: peteId,
+        expected_version: now.version,
+      });
+      expect(invited.status).toBe(200);
+      const pending = (await raw(pete.page, pete.id, "GET", "/invitations"))
+        .body as Array<{
+        id: string;
+        household_id: string;
+        version: number;
+      }>;
+      const mine = pending.find((i) => i.household_id === h.id);
+      expect(mine).toBeDefined();
+      const household = (await householdNamed(page, id, `${name} 2`)) as Hh;
+      expect(household.version).not.toBe(mine?.version);
+      const wrongCounter = await manage(pete.page, pete.id, {
+        kind: "respond_to_household_invitation",
+        id: mine?.id,
+        expected_version: household.version,
+        accept: true,
+      });
+      expect(wrongCounter.status).toBe(409);
+      // The UI's stale path: the rename dialog was read at one version; the household moves on; Save is refused and explained.
+      await go(page, `/sharing/households/${h.id}/rename`);
+      await expect(dialog(page).getByLabel("Household name")).toHaveValue(
+        `${name} 2`,
+        { timeout: 30_000 },
+      );
+      const moved = await manage(page, id, {
+        kind: "rename_household",
+        id: h.id,
+        name: `${name} 3`,
+        expected_version: household.version,
+      });
+      expect(moved.status).toBe(200);
+      await dialog(page).getByLabel("Household name").fill(`${name} UI`);
+      await dialog(page).getByRole("button", { name: "Save name" }).click();
+      await expect(
+        dialog(page).getByText(
+          "This household changed since it was shown. It has been read again; try again.",
+        ),
+      ).toBeVisible({ timeout: 30_000 });
+      expect((await householdNamed(page, id, `${name} 3`))?.id).toBe(h.id);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+});
+
+test.describe("I-SH12: invitations revoked and declined, in the UI (A3; Q16)", () => {
+  test("heidi invites ivan and revokes it: ivan's For you no longer lists it and Sent by you says revoked; judy declines hers: Sent by you says declined", async ({
+    browser,
+  }) => {
+    const [a, b, c] = [
+      await browser.newContext(),
+      await browser.newContext(),
+      await browser.newContext(),
+    ];
+    try {
+      const { page, id } = await bootAs(a, "heidi", "/sharing");
+      const h = await rawHousehold(page, id, unique("I-SH12 Home"));
+      await go(page, `/sharing/households/${h.id}/invitations`);
+      for (const who of ["ivan", "judy"] as const) {
+        await dialog(page)
+          .getByLabel("Their username")
+          .fill(ACCOUNTS[who].username);
+        await dialog(page)
+          .getByRole("button", { name: "Invite", exact: true })
+          .click();
+        await expect(
+          sentRows(page).filter({ hasText: ACCOUNTS[who].username }),
+        ).toHaveAttribute("data-sent-status", "pending", { timeout: 30_000 });
+      }
+      await dialog(page)
+        .getByRole("button", { name: `Revoke: ${ACCOUNTS.ivan.username}` })
+        .click();
+      await expect(
+        sentRows(page).filter({ hasText: ACCOUNTS.ivan.username }),
+      ).toHaveAttribute("data-sent-status", "revoked", { timeout: 30_000 });
+      const ivan = await bootAs(b, "ivan", "/sharing/invitations");
+      await expect(
+        ivan.page.getByRole("dialog").getByText("No pending invitations"),
+      ).toBeVisible({ timeout: 30_000 });
+      const judy = await bootAs(c, "judy", "/sharing/invitations");
+      await judy.page
+        .getByRole("button", { name: `Decline: ${h.name}` })
+        .click({ timeout: 30_000 });
+      await expect(
+        judy.page.getByRole("dialog").getByText("No pending invitations"),
+      ).toBeVisible({ timeout: 30_000 });
+      await reopenBound(
+        page,
+        id.account_id,
+        `/sharing/households/${h.id}/invitations`,
+      );
+      await expect(
+        sentRows(page).filter({ hasText: ACCOUNTS.judy.username }),
+      ).toHaveAttribute("data-sent-status", "declined", { timeout: 30_000 });
+    } finally {
+      await a.close();
+      await b.close();
+      await c.close();
+    }
+  });
+});
+
+/** The signup link the dialog shows (`<origin>/join#t=<64 hex>`). */
+async function issuedLink(page: Page): Promise<string> {
+  const field = dialog(page).getByLabel("Invitation link");
+  await expect(field).toHaveValue(/\/join#t=[0-9a-f]{64}$/, {
+    timeout: 30_000,
+  });
+  return field.inputValue();
+}
+
+test.describe("I-SH13: a signup link issued in the UI, redeemed, revoked, and read-only after role loss (A5, A6; Q21 group 2)", () => {
+  test("kate's link is <origin>/join#t=<token>; a new person redeems it through the join surface and is a member with it as their main household; a second link revoked in the UI is refused; liam demotes kate: her signup links are gone and her screen is read-only", async ({
+    browser,
+  }, info) => {
+    const [a, b, c] = [
+      await browser.newContext(),
+      await browser.newContext(),
+      await browser.newContext(),
+    ];
+    try {
+      const { page, id } = await bootAs(a, "kate", "/sharing");
+      const h = await rawHousehold(page, id, unique("I-SH13 Home"));
+      const liam = await bootAs(b, "liam", "/sharing");
+      const liamId = liam.id.account_id;
+      expect(
+        (
+          await manage(page, id, {
+            kind: "invite_to_household",
+            id: crypto.randomUUID(),
+            household_id: h.id,
+            recipient_id: liamId,
+            expected_version: h.version,
+          })
+        ).status,
+      ).toBe(200);
+      const invitation = (
+        (await raw(liam.page, liam.id, "GET", "/invitations")).body as Array<{
+          id: string;
+          household_id: string;
+          version: number;
+        }>
+      ).find((i) => i.household_id === h.id);
+      expect(
+        (
+          await manage(liam.page, liam.id, {
+            kind: "respond_to_household_invitation",
+            id: invitation?.id,
+            expected_version: invitation?.version,
+            accept: true,
+          })
+        ).status,
+      ).toBe(200);
+      const joined = (await householdNamed(page, id, h.name)) as Hh;
+      expect(
+        (
+          await manage(page, id, {
+            kind: "set_household_role",
+            household_id: h.id,
+            account_id: liamId,
+            expected_version: joined.version,
+            manager: true,
+          })
+        ).status,
+      ).toBe(200);
+      await go(page, `/sharing/households/${h.id}/signup`);
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      const link = await issuedLink(page);
+      expect(link.startsWith(`${new URL(page.url()).origin}/join#t=`)).toBe(
+        true,
+      );
+      expect(page.url()).not.toContain(link.split("#t=")[1]);
+      await dialog(page)
+        .getByRole("button", { name: "Done", exact: true })
+        .click();
+      const token = link.split("#t=")[1] as string;
+      // A new person redeems it through WEB-08b's join surface.
+      const joiner = await c.newPage();
+      await joiner.goto(`/__session?route=%2Fjoin#t=${token}`);
+      await exposeSession(joiner);
+      const username = `ish13${Date.now() % 100_000}`;
+      await joiner.getByLabel("Username").fill(username);
+      await joiner.getByLabel("Password").fill(`I-SH13-${crypto.randomUUID()}`);
+      await joiner.getByRole("button", { name: "Create account" }).click();
+      await untilView(joiner, "displaying");
+      const joinerId = (await joiner.evaluate(() =>
+        window.__s.identity.get(),
+      )) as Id;
+      const theirHouseholds = (
+        await raw(joiner, joinerId, "GET", "/households")
+      ).body as Hh[];
+      expect(theirHouseholds.map((x) => x.id)).toEqual([h.id]);
+      expect(
+        (
+          (await raw(joiner, joinerId, "GET", "/defaults/snapshot")).body as {
+            defaults: { primary_household_id: string };
+          }
+        ).defaults.primary_household_id,
+      ).toBe(h.id);
+      await reopenBound(page, id.account_id, `/sharing/households/${h.id}`);
+      await expect(
+        page.locator("[data-member]").filter({ hasText: username }),
+      ).toBeVisible({ timeout: 30_000 });
+      // A second link, revoked in the UI, is refused at redemption.
+      await go(page, `/sharing/households/${h.id}/signup`);
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      const second = (await issuedLink(page)).split("#t=")[1] as string;
+      await dialog(page)
+        .getByRole("button", { name: "Done", exact: true })
+        .click();
+      const listed = (
+        (await raw(page, id, "GET", "/account-invitations")).body as {
+          invitations: Array<{ id: string }>;
+        }
+      ).invitations;
+      expect(listed).toHaveLength(1);
+      await dialog(page)
+        .getByRole("button", { name: /^Revoke invitation / })
+        .click();
+      await expect(
+        dialog(page).getByText("No active signup invitations."),
+      ).toBeVisible({ timeout: 30_000 });
+      const preview = await raw(page, id, "POST", "/registration/preview", {
+        token: second,
+      });
+      expect(preview.status).toBe(401);
+      // liam (co-manager) demotes kate: her pending signup links are revoked, and her screen says so, read-only.
+      await go(page, `/sharing/households/${h.id}/signup`);
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      await issuedLink(page);
+      await dialog(page)
+        .getByRole("button", { name: "Done", exact: true })
+        .click();
+      const before = (await householdNamed(liam.page, liam.id, h.name)) as Hh;
+      expect(
+        (
+          await manage(liam.page, liam.id, {
+            kind: "set_household_role",
+            household_id: h.id,
+            account_id: id.account_id,
+            expected_version: before.version,
+            manager: false,
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          (await raw(liam.page, liam.id, "GET", "/account-invitations"))
+            .body as { invitations: unknown[] }
+        ).invitations,
+      ).toEqual([]);
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      await expect(
+        page
+          .getByRole("dialog")
+          .getByText(
+            "You no longer manage this household — its pending signup invitations were revoked automatically.",
+          ),
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        page
+          .getByRole("dialog")
+          .getByRole("button", { name: "New invitation" }),
+      ).toHaveCount(0);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ household: h.id, joined: username }),
+      });
+    } finally {
+      await a.close();
+      await b.close();
+      await c.close();
+    }
+  });
+});
+
+test.describe("I-SH14: the 20-per-issuer cap (A5)", () => {
+  test("19 issued through the page's own client and one in the UI make 20; the 21st in the UI is refused (limit) and New invitation waits with the reason; a revoke frees it; every link revoked afterwards", async ({
+    context,
+  }) => {
+    const { page, id } = await bootAs(context, "mia", "/sharing");
+    const h = await rawHousehold(page, id, unique("I-SH14 Home"));
+    try {
+      for (let n = 0; n < 19; n += 1) {
+        const issued = await raw(page, id, "POST", "/account-invitations", {
+          household_id: h.id,
+        });
+        expect(issued.status, JSON.stringify(issued.body)).toBe(200);
+      }
+      await go(page, `/sharing/households/${h.id}/signup`);
+      await expect(dialog(page).locator("[data-signup]")).toHaveCount(19, {
+        timeout: 30_000,
+      });
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      await issuedLink(page);
+      await dialog(page)
+        .getByRole("button", { name: "Done", exact: true })
+        .click();
+      await expect(dialog(page).locator("[data-signup]")).toHaveCount(20, {
+        timeout: 30_000,
+      });
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      const reason =
+        "Atlas didn't create an invitation: you may already have 20 waiting, or too many requests were made. Revoke one or try again shortly.";
+      await expect(dialog(page).getByText(reason).first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(
+        dialog(page).getByRole("button", { name: "New invitation" }),
+      ).toBeDisabled();
+      await dialog(page)
+        .getByRole("button", { name: /^Revoke invitation / })
+        .first()
+        .click();
+      await expect(dialog(page).locator("[data-signup]")).toHaveCount(19, {
+        timeout: 30_000,
+      });
+      await expect(
+        dialog(page).getByRole("button", { name: "New invitation" }),
+      ).toBeEnabled();
+    } finally {
+      const left = (
+        (await raw(page, id, "GET", "/account-invitations")).body as {
+          invitations: Array<{ id: string }>;
+        }
+      ).invitations;
+      for (const i of left)
+        await page.evaluate(
+          async ({ id, path }) => {
+            await window.__s.api.fetchFor(
+              "ordinary",
+              id.account_id,
+              id.epoch,
+            )(
+              new Request(`${location.origin}/api/experimental/v1${path}`, {
+                method: "DELETE",
+              }),
+            );
+          },
+          { id, path: `/account-invitations/${i.id}` },
+        );
+      expect(
+        (
+          (await raw(page, id, "GET", "/account-invitations")).body as {
+            invitations: unknown[];
+          }
+        ).invitations,
+      ).toEqual([]);
+    }
+  });
+});
+
+test.describe("I-SH15: a lost issuance is recovered by listing, never by retrying (A5; SHARE-7)", () => {
+  test("the proxy drops a committed POST /account-invitations answer: the UI says it is not confirmed, the list read again flags the new id, and exactly one POST was made", async ({
+    context,
+  }) => {
+    const { page, id } = await bootAs(context, "quinn", "/sharing");
+    const h = await rawHousehold(page, id, unique("I-SH15 Home"));
+    await go(page, `/sharing/households/${h.id}/signup`);
+    await expect(
+      dialog(page).getByText("No active signup invitations."),
+    ).toBeVisible({ timeout: 30_000 });
+    const rule = await proxy.addRule({
+      method: "POST",
+      path: `${API}/account-invitations`,
+      ordinal: 1,
+      action: "drop_after_forward",
+    });
+    try {
+      await dialog(page)
+        .getByRole("button", { name: "New invitation" })
+        .click();
+      await expect(
+        dialog(page).getByText(
+          "We couldn't confirm whether an invitation was created. It is not sent again: the list has been read again instead.",
+        ),
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(dialog(page).locator("[data-signup-flagged]")).toHaveCount(
+        1,
+        { timeout: 30_000 },
+      );
+      const posts = (await proxy.log()).filter(
+        (e) => e.method === "POST" && e.path === `${API}/account-invitations`,
+      );
+      expect(posts).toHaveLength(1);
+      await expect(dialog(page).getByLabel("Invitation link")).toHaveCount(0);
+    } finally {
+      await proxy.removeRule(rule.id);
+    }
+  });
+});
+
+test.describe("I-SH16: the task and field sharing sections with full household management, and the dual-ownership review (A10)", () => {
+  test("nora's Home (pete joined): the policy editor grants Home and pete reads it; a create captured with Home's members is refused after pete LEAVES in WEB-12b's UI; the review shows Was/Now; Confirm sends it with the new revision", async ({
+    browser,
+  }, info) => {
+    test.slow();
+    const a = await browser.newContext();
+    const b = await browser.newContext();
+    try {
+      const { page, id } = await bootAs(a, "nora", "/sharing");
+      const home = await rawHousehold(page, id, unique("I-SH16 Home"));
+      const pete = await bootAs(b, "pete", "/sharing");
+      expect(
+        (
+          await manage(page, id, {
+            kind: "invite_to_household",
+            id: crypto.randomUUID(),
+            household_id: home.id,
+            recipient_id: pete.id.account_id,
+            expected_version: home.version,
+          })
+        ).status,
+      ).toBe(200);
+      const inv = (
+        (await raw(pete.page, pete.id, "GET", "/invitations")).body as Array<{
+          id: string;
+          household_id: string;
+          version: number;
+        }>
+      ).find((i) => i.household_id === home.id);
+      expect(
+        (
+          await manage(pete.page, pete.id, {
+            kind: "respond_to_household_invitation",
+            id: inv?.id,
+            expected_version: inv?.version,
+            accept: true,
+          })
+        ).status,
+      ).toBe(200);
+      // nora's main household is Home (her first), so a person she creates now is shared with Home by default.
+      const snapshotOf = async () =>
+        (await raw(page, id, "GET", "/defaults/snapshot")).body as {
+          defaults: { primary_household_id: string | null; revision: string };
+        };
+      expect((await snapshotOf()).defaults.primary_household_id).toBe(home.id);
+      // An item's own sharing section (the shared editor WEB-10/11 embed) grants Home explicitly, and pete can read it.
+      const rid = await createPerson(page, id, "I-SH16 Shared");
+      await go(page, `/sharing/items/${rid}`);
+      const editor = page.getByRole("dialog", {
+        name: "Sharing — I-SH16 Shared",
+      });
+      await expect(editor.locator("[data-audience]")).toContainText(
+        ACCOUNTS.pete.username,
+        { timeout: 30_000 },
+      );
+      await expect
+        .poll(
+          async () =>
+            (
+              (
+                (await raw(pete.page, pete.id, "GET", "/people")).body as {
+                  items?: Projection[];
+                }
+              ).items ?? []
+            ).some((p) => p.id === rid),
+          { timeout: 60_000 },
+        )
+        .toBe(true);
+      // The dual-ownership review: captured with Home's members, then pete leaves in WEB-12b's UI.
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              (acc) =>
+                window.__atlasData
+                  ?.defaultsRecord(acc)
+                  .then((r) => r?.snapshot.defaults.revision ?? null),
+              id.account_id,
+            ),
+          { timeout: 30_000 },
+        )
+        .not.toBeNull();
+      const capture = await page.evaluate(
+        (acc) => window.__atlasData?.captureDefaults(acc, ["person"]),
+        id.account_id,
+      );
+      expect(capture?.kind).toBe("captured");
+      await go(pete.page, `/sharing/households/${home.id}`);
+      await pete.page
+        .getByRole("button", { name: `Leave: ${home.name}` })
+        .click({ timeout: 30_000 });
+      await pete.page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Confirm" })
+        .click();
+      await expect
+        .poll(
+          async () =>
+            (await householdNamed(page, id, home.name))?.members.length,
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+      expect((await snapshotOf()).defaults.revision).not.toBe(
+        capture?.defaultsRevision,
+      );
+      const queuedId = crypto.randomUUID();
+      const queued = await page.evaluate(
+        ({ rid, capture }) =>
+          window.__atlasData?.enqueue({
+            endpoint: "/commands",
+            targets: [
+              {
+                resourceId: rid,
+                role: "primary",
+                basis: "resource",
+                versionChecked: false,
+                seedIfUntracked: 1,
+              },
+            ],
+            command: {
+              commands: [
+                { kind: "create_person", id: rid, name: "I-SH16 Reviewed" },
+              ],
+              defaults_revision: capture?.defaultsRevision,
+            },
+            displayPatch: { [rid]: { label: "I-SH16 Reviewed" } },
+            defaultsRevision: capture?.defaultsRevision ?? null,
+            defaultsContext: capture?.defaultsContext as never,
+            defaultsReview: capture?.defaultsReview,
+          }),
+        { rid: queuedId, capture },
+      );
+      expect(queued?.kind).toBe("queued");
+      await go(page, "/sync?tab=conflicts");
+      await page
+        .getByRole("button", { name: /^Review sharing/ })
+        .click({ timeout: 30_000 });
+      const review = page.getByRole("dialog", { name: "Review sharing" });
+      await expect(review).toContainText("Sharing defaults have changed", {
+        timeout: 30_000,
+      });
+      // Was: Home with pete (as captured); Now: Home without him.
+      await expect(
+        review.locator('[data-review-kind="person"] [data-review-was]'),
+      ).toContainText(ACCOUNTS.pete.username);
+      await expect(
+        review.locator('[data-review-kind="person"] [data-review-now]'),
+      ).not.toContainText(ACCOUNTS.pete.username);
+      await review.locator("[data-confirm]").click();
+      await expect(review).toBeHidden({ timeout: 30_000 });
+      await expect
+        .poll(async () => (await person(page, id, queuedId))?.label, {
+          timeout: 60_000,
+        })
+        .toBe("I-SH16 Reviewed");
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ home: home.id, rid, queuedId }),
+      });
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+});
+
+test.describe("I-SH17: the directory's browse mode, enabled (A4; PPL-4)", () => {
+  test("Find an account lists accounts (yourself excluded); the choice is invited", async ({
+    context,
+  }) => {
+    const { page, id } = await bootAs(context, "judy", "/sharing");
+    const h = await rawHousehold(page, id, unique("I-SH17 Home"));
+    await go(page, `/sharing/households/${h.id}/invitations`);
+    await dialog(page).getByRole("button", { name: "Find an account" }).click();
+    await dialog(page)
+      .getByLabel("Name", { exact: true })
+      .fill(ACCOUNTS.quinn.username.slice(0, 3));
+    await dialog(page)
+      .getByRole("button", { name: "Search", exact: true })
+      .click();
+    await dialog(page)
+      .getByRole("button", { name: `Choose: ${ACCOUNTS.quinn.username}` })
+      .click({ timeout: 30_000 });
+    await expect(
+      dialog(page).getByRole("button", {
+        name: `Choose: ${ACCOUNTS.judy.username}`,
+      }),
+    ).toHaveCount(0);
+    await expect(dialog(page).getByLabel("Their username")).toHaveValue(
+      ACCOUNTS.quinn.username,
+    );
+    await dialog(page)
+      .getByRole("button", { name: "Invite", exact: true })
+      .click();
+    await expect(
+      sentRows(page).filter({ hasText: ACCOUNTS.quinn.username }),
+    ).toHaveAttribute("data-sent-status", "pending", {
+      timeout: 30_000,
+    });
+  });
+});
+
+test.describe("I-SH17b: the directory disabled (A4; PPL-4; stack sharing-directory-off)", () => {
+  test("one GET /directory answers 403 for the page lifetime; the dialog reopens after the remount with the typed username kept; the exact lookup invites", async ({
+    context,
+  }) => {
+    test.skip(
+      process.env.ATLAS_INTEGRATION_DIRECTORY !== "off",
+      "this stack's directory is enabled (I-SH17b runs in sharing-directory-off)",
+    );
+    const { page, id } = await bootAs(context, "frank", "/sharing");
+    const h = await rawHousehold(page, id, unique("I-SH17b Home"));
+    await go(page, `/sharing/households/${h.id}/invitations`);
+    await dialog(page).getByRole("button", { name: "Find an account" }).click();
+    await dialog(page)
+      .getByLabel("Exact username", { exact: true })
+      .fill(ACCOUNTS.grace.username);
+    await dialog(page).getByLabel("Name", { exact: true }).fill("gr");
+    await dialog(page)
+      .getByRole("button", { name: "Search", exact: true })
+      .click();
+    await expect(
+      dialog(page).getByText(
+        "This server finds accounts only by exact username.",
+      ),
+    ).toBeVisible({ timeout: 30_000 });
+    await expect(
+      dialog(page).getByLabel("Exact username", { exact: true }),
+    ).toHaveValue(ACCOUNTS.grace.username);
+    // The observation window: a refused browse read is never asked again by itself.
+    await page.waitForTimeout(3_000);
+    const browses = (await proxy.log()).filter(
+      // The proxy logs the whole request URL: the browse read is exactly `/directory`, with no query.
+      (e) => e.method === "GET" && e.path === `${API}/directory`,
+    );
+    expect(browses.map((e) => e.status)).toEqual([403]);
+    await dialog(page).getByRole("button", { name: "Look up" }).click();
+    await dialog(page)
+      .getByRole("button", { name: `Choose: ${ACCOUNTS.grace.username}` })
+      .click({ timeout: 30_000 });
+    await dialog(page)
+      .getByRole("button", { name: "Invite", exact: true })
+      .click();
+    await expect(
+      sentRows(page).filter({ hasText: ACCOUNTS.grace.username }),
+    ).toHaveAttribute("data-sent-status", "pending", {
+      timeout: 30_000,
     });
   });
 });
