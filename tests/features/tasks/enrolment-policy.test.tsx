@@ -501,6 +501,12 @@ describe("Q3/Q8: one attempt, one captured body; nothing changed afterwards reac
       await click(consentBox());
       expect(sent).toHaveLength(1);
       const original = sent[0] as Sent;
+      // F42-1 hand-off (WEB13B-F42-1-20261106, WEB-13b revision 35): the sent command's audience is ASSERTED before this case changes it, so a
+      // command without one (MU-2213 omits `initial_policy`) fails here by an assertion, never by a TypeError of the next line.
+      expect(
+        original.command.initial_policy,
+        "the sent command carries its audience",
+      ).toBeDefined();
       // Whatever holds a reference to the command, and the server's state since, change.
       original.command.initial_policy.grants.push({
         kind: "account",

@@ -366,7 +366,9 @@ describe("L8: the detail", () => {
           }) as HTMLButtonElement | null
         )?.disabled === true,
     );
-    expect(screen.getByText(DETAIL.atLimit)).not.toBeNull();
+    // F42-1 hand-off (WEB13B-F42-1-20261106, WEB-13b revision 35): `queryByText`, so a missing limit note (MU-2511, MU-2512) fails by this
+    // assertion, never by `getByText`'s thrown error.
+    expect(screen.queryByText(DETAIL.atLimit)).not.toBeNull();
   });
 
   test("L12: Archive queues archive on the list; the archived note and Restore show; the pane filter follows", async () => {

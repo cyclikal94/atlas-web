@@ -70,7 +70,19 @@ const commands = (t: Mounted, kind: string) =>
 const names = (t: Mounted, kind: string) =>
   commands(t, kind).map((c) => c.name);
 const dialog = () => screen.queryByRole("dialog") as HTMLElement | null;
+/**
+ * The dialog, ASSERTED to be shown (F42-1 hand-off, WEB13B-F42-1-20261106, WEB-13b revision 35): a case whose dialog is gone fails by this
+ * assertion, never by `within(null)`'s thrown TypeError (the lists mutants MU-2526, MU-2539, MU-2540, MU-2542, MU-2551, MU-2557, MU-2563
+ * were judged INVALID for it).
+ */
+function shownDialog(): HTMLElement {
+  const shown = dialog();
+  expect(shown, "the dialog is shown").not.toBeNull();
+  return shown as HTMLElement;
+}
 function press(name: string, root: HTMLElement | Document = document) {
+  // F42-1 hand-off (WEB-13b revision 35): the place pressed in is asserted (a caller passes the dialog, which a defect may have closed).
+  expect(root, `the place to press "${name}" in`).not.toBeNull();
   const found = within(root as HTMLElement).queryAllByRole("button", {
     name,
   })[0];
@@ -78,13 +90,11 @@ function press(name: string, root: HTMLElement | Document = document) {
   fireEvent.click(found as HTMLElement);
 }
 const nameField = () =>
-  within(dialog() as HTMLElement).getByLabelText(
-    CREATE.name,
-  ) as HTMLInputElement;
+  within(shownDialog()).getByLabelText(CREATE.name) as HTMLInputElement;
 const typeName = (value: string) =>
   fireEvent.change(nameField(), { target: { value } });
 const saveButton = (label: string) =>
-  within(dialog() as HTMLElement).getByRole("button", {
+  within(shownDialog()).getByRole("button", {
     name: label,
   }) as HTMLButtonElement;
 
@@ -156,7 +166,7 @@ const adds = (t: Mounted) =>
   commands(t, "list_item").map((c) => `${c.included ? "+" : "-"}${c.task_id}`);
 /** The in-dialog sync control, then the sync screens (the dialog is removed); `back` returns (Back mounts it again). */
 async function toSync(t: Mounted) {
-  const chip = within(dialog() as HTMLElement)
+  const chip = within(shownDialog())
     .getAllByRole("button")
     .find((x) => x.hasAttribute("data-sync-tone"));
   expect(chip, "the in-dialog sync control").toBeDefined();
@@ -221,12 +231,22 @@ function lookups(
 const decision = (label: string) =>
   dialog() === null
     ? null
-    : (within(dialog() as HTMLElement).queryByRole("button", {
+    : (within(shownDialog()).queryByRole("button", {
         name: label,
       }) as HTMLButtonElement | null);
+/**
+ * Presses the separate decision (D1), ASSERTING that it is offered first (F42-1 hand-off, WEB-13b revision 35): a decision that is not
+ * offered fails the case by this assertion, never by `fireEvent.click(null)`'s thrown error (MU-2539, MU-2542, MU-2551, MU-2552, MU-2558,
+ * MU-2567).
+ */
+function decide(label: string): void {
+  const control = decision(label);
+  expect(control, `the decision "${label}" is offered`).not.toBeNull();
+  fireEvent.click(control as HTMLButtonElement);
+}
 const noted = (text: string) =>
   dialog() !== null &&
-  within(dialog() as HTMLElement).queryByText(text, { exact: false }) !== null;
+  within(shownDialog()).queryByText(text, { exact: false }) !== null;
 
 describe("R1: create, an answer that may hide a stored save", () => {
   test("lost-after-commit, unchanged retry: looked up, found as sent; one list, nothing sent again, the dialog goes to it", async () => {
@@ -265,7 +285,7 @@ describe("R1: create, an answer that may hide a stored save", () => {
     expect(looked.count).toBe(2);
     expect(t.drafts()).toEqual([]);
     expect(asked).toHaveLength(1);
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
     await closed(t);
     expect(asked).toHaveLength(2);
     expect(sameIds(asked[1], asked[0]), "new list id and local id").toBe(false);
@@ -289,9 +309,7 @@ describe("R1: create, an answer that may hide a stored save", () => {
       expect(dialog(), "the newer input is not consumed").not.toBeNull();
       expect(nameField().value).toBe("Newer name");
       expect(
-        within(dialog() as HTMLElement).queryByText(
-          CREATE.earlier("Original name"),
-        ),
+        within(shownDialog()).queryByText(CREATE.earlier("Original name")),
       ).not.toBeNull();
       expect(t.router.state.location.pathname).toBe("/tasks/lists");
       // The next Save is the newer name under NEW ids: a list of its own, never a duplicate of the first.
@@ -313,7 +331,7 @@ describe("R1: create, an answer that may hide a stored save", () => {
     expect(asked).toHaveLength(1);
     expect(nameField().value).toBe("Newer name");
     expect(noted(CREATE.unknown("Original name"))).toBe(true);
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
     await closed(t);
     expect(names(t, "create_list")).toEqual(["Newer name"]);
     expect(sameIds(asked[1], asked[0])).toBe(false);
@@ -349,9 +367,7 @@ describe("R1: create, an answer that may hide a stored save", () => {
     await t.settle();
     expect(names(t, "create_list")).toEqual(["One"]);
     expect(nameField().value).toBe("One more");
-    expect(
-      within(dialog() as HTMLElement).queryByText(RENAME.newer),
-    ).not.toBeNull();
+    expect(within(shownDialog()).queryByText(RENAME.newer)).not.toBeNull();
     // The next save is under new ids; its answer is lost while yet newer input arrives.
     press(CREATE.submit, dialog() as HTMLElement);
     await t.settle();
@@ -370,7 +386,7 @@ describe("R1: create, an answer that may hide a stored save", () => {
     expect(names(t, "create_list")).toEqual(["One", "One more"]);
     expect(nameField().value).toBe("One more again");
     expect(
-      within(dialog() as HTMLElement).queryByText(CREATE.earlier("One more")),
+      within(shownDialog()).queryByText(CREATE.earlier("One more")),
     ).not.toBeNull();
   });
 });
@@ -421,7 +437,7 @@ describe("R1: rename of a cached list, an answer that may hide a stored save", (
     expect(asked).toHaveLength(1);
     expect(nameField().value).toBe("Newer rename");
     expect(noted(RENAME.unknown("Original rename"))).toBe(true);
-    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    decide(RENAME.again);
     await closed(t);
     expect(names(t, "edit_list")).toEqual(["Newer rename"]);
     expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
@@ -438,9 +454,7 @@ describe("R1: rename of a cached list, an answer that may hide a stored save", (
       expect(dialog()).not.toBeNull();
       expect(nameField().value).toBe("Newer rename");
       expect(
-        within(dialog() as HTMLElement).queryByText(
-          RENAME.earlier("Original rename"),
-        ),
+        within(shownDialog()).queryByText(RENAME.earlier("Original rename")),
       ).not.toBeNull();
       press(RENAME.submit, dialog() as HTMLElement);
       await closed(t);
@@ -519,7 +533,7 @@ describe("R2: the picker retires a saved add's id", () => {
 
   test("the session kept through the sync screens retires it too: chosen again on return, a new add", async () => {
     const { t, id, a, real } = await partialSave();
-    const chip = within(dialog() as HTMLElement)
+    const chip = within(shownDialog())
       .getAllByRole("button")
       .find((x) => x.hasAttribute("data-sync-tone"));
     expect(chip, "the in-dialog sync control").toBeDefined();
@@ -576,7 +590,7 @@ describe("R2: the picker retires a saved add's id", () => {
         expect(asked).toHaveLength(1);
         expect(noted(PICKER.unknown(1))).toBe(true);
         expect(box(a)?.checked, "the selection is kept").toBe(true);
-        fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+        decide(PICKER.again);
         await closed(t);
         expect(dialog()).toBeNull();
         expect(asked[1]?.localId, "a new add").not.toBe(asked[0]?.localId);
@@ -662,7 +676,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
             ? CREATE.earlier("Original")
             : RENAME.earlier("Original");
         expect(
-          within(dialog() as HTMLElement).queryByText(earlier),
+          within(shownDialog()).queryByText(earlier),
           "the earlier save's note",
         ).not.toBeNull();
         expect(saveButton(label(kind)).disabled).toBe(false);
@@ -703,9 +717,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
       expect(nameField().value, "a fresh session").toBe(
         kind === "create" ? "" : "Original",
       );
-      expect(
-        within(dialog() as HTMLElement).queryByText(/earlier save/),
-      ).toBeNull();
+      expect(within(shownDialog()).queryByText(/earlier save/)).toBeNull();
       typeName("Third");
       press(label(kind), dialog() as HTMLElement);
       await closed(t);
@@ -751,16 +763,14 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
     expect(names(t, "create_list")).toEqual(["Renamed"]);
     expect(dialog(), "not shown as saved").not.toBeNull();
     expect(nameField().value).toBe("Renamed");
-    expect(
-      within(dialog() as HTMLElement).queryByText(RENAME.saved),
-    ).toBeNull();
+    expect(within(shownDialog()).queryByText(RENAME.saved)).toBeNull();
     expect(saveButton(RENAME.submit).disabled).toBe(true);
     // A later edit meets the digest this dialog saw (`seen`): the lost edit is never silently overwritten as if unseen.
     typeName("Again");
     press(RENAME.submit, dialog() as HTMLElement);
     await t.settle();
     expect(
-      within(dialog() as HTMLElement).queryByText(RENAME.changedElsewhere),
+      within(shownDialog()).queryByText(RENAME.changedElsewhere),
     ).not.toBeNull();
     expect(names(t, "create_list")).toEqual(["Renamed"]);
     expect(nameField().value).toBe("Again");
@@ -844,9 +854,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     await t.settle();
     expect(dialog(), "not closed as if A were added").not.toBeNull();
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`]);
-    expect(
-      within(dialog() as HTMLElement).queryByText(PICKER.earlier(1)),
-    ).not.toBeNull();
+    expect(within(shownDialog()).queryByText(PICKER.earlier(1))).not.toBeNull();
     // B is a member now: the offered page is read again before A's row is back.
     await t.until(() => box(a) !== null);
     expect((box(a) as HTMLInputElement).checked, "that selection is done").toBe(
@@ -910,7 +918,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     ]);
     expect(requested(asked, a)).toHaveLength(1);
     expect(noted(PICKER.unknown(1))).toBe(true);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${a}`, `+${b}`]);
     const ofA = requested(asked, a);
@@ -967,7 +975,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     await t.settle();
     expect(adds(t), "B's lost add is not sent again").toEqual([`+${a}`]);
     expect(noted(PICKER.unknown(1))).toBe(true);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
     const ofB = requested(asked, b);
@@ -1010,9 +1018,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     expect(
       (screen.getByLabelText(PICKER.searchLabel) as HTMLInputElement).value,
     ).toBe("Sec");
-    expect(
-      within(dialog() as HTMLElement).queryByText(PICKER.newer),
-    ).not.toBeNull();
+    expect(within(shownDialog()).queryByText(PICKER.newer)).not.toBeNull();
     expect(screen.queryByText(PICKER.selected(0))).not.toBeNull();
     expect(adds(t)).toEqual([`+${a}`]);
   });
@@ -1070,7 +1076,7 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     press(PICKER.submit, dialog() as HTMLElement);
     await t.settle();
     expect(adds(t)).toEqual([`+${a}`]);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
     const ofB = asked.filter((r) => taskOf(r) === b);
@@ -1101,9 +1107,7 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     press(DETAIL.add);
     await t.until(() => dialog() !== null);
     expect(screen.queryByText(PICKER.selected(0))).not.toBeNull();
-    expect(
-      within(dialog() as HTMLElement).queryByText(PICKER.newer),
-    ).toBeNull();
+    expect(within(shownDialog()).queryByText(PICKER.newer)).toBeNull();
   });
 
   test("the exact read of a lost add's draft fails: no answer is evidence of nothing; nothing is sent until the decision adds it anew", async () => {
@@ -1124,7 +1128,7 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     expect(adds(t), "no write").toEqual([]);
     expect(asked).toHaveLength(1);
     expect(noted(PICKER.unknown(1))).toBe(true);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${a}`]);
     expect(asked[1]?.localId, "a new add").not.toBe(asked[0]?.localId);
@@ -1167,7 +1171,7 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     expect(nameField().value).toBe("Original");
     expect(noted(CREATE.unknown("Original"))).toBe(true);
     expect(t.router.state.location.pathname).toBe("/tasks/lists");
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
     await closed(t);
     const [made] = t.drafts();
     expect(t.drafts()).toHaveLength(1);
@@ -1271,8 +1275,8 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     await createFirst(t, "Original");
     press(CREATE.submit, dialog() as HTMLElement);
     await t.settle();
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
+    decide(CREATE.again);
     await act(async () => {
       gate.resolve();
     });
@@ -1290,7 +1294,7 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     await createFirst(t, "Original");
     press(CREATE.submit, dialog() as HTMLElement);
     await t.settle();
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
     await t.settle();
     expect(names(t, "create_list")).toEqual(["Original"]);
     expect(dialog()).not.toBeNull();
@@ -1313,7 +1317,7 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     await createFirst(t, "Original");
     press(CREATE.submit, dialog() as HTMLElement);
     await t.settle();
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
     await t.settle();
     expect(t.drafts()).toEqual([]);
     expect(decision(CREATE.again)).not.toBeNull();
@@ -1339,7 +1343,7 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     press(CREATE.submit, dialog() as HTMLElement);
     await t.settle();
     expect(t.drafts()).toEqual([]);
-    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    decide(CREATE.again);
     await closed(t);
     expect(names(t, "create_list")).toEqual(["Original"]);
     expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
@@ -1419,7 +1423,7 @@ describe("D1 (revision 3): rename of a cached list", () => {
     await t.settle();
     expect(t.drafts().map((d) => d.local_id)).toEqual([replacement]);
     expect(noted(RENAME.unknown("Original"))).toBe(true);
-    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    decide(RENAME.again);
     await closed(t);
     const made = t.drafts().find((d) => d.local_id !== replacement);
     expect(made?.local_id).not.toBe(old);
@@ -1455,7 +1459,7 @@ describe("D1 (revision 3): rename of a cached list", () => {
     expect(t.drafts()).toEqual([]);
     await t.commitSync([listRow(id, "Initial", [], { version: 4 })]);
     expect(nameField().value).toBe("Original");
-    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    decide(RENAME.again);
     await closed(t);
     expect(names(t, "edit_list")).toEqual(["Original"]);
   });
@@ -1465,7 +1469,7 @@ describe("D1 (revision 3): rename of a cached list", () => {
     press(RENAME.submit, dialog() as HTMLElement);
     await t.settle();
     typeName("Initial");
-    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    decide(RENAME.again);
     await t.settle();
     expect(noted(RENAME.unchanged)).toBe(true);
     expect(t.drafts()).toEqual([]);
@@ -1514,7 +1518,7 @@ describe("D1 (revision 3): the picker, earlier adds kept apart from the selectio
     expect(ofTask(asked, b)).toHaveLength(0);
     expect(noted(PICKER.unknown(1))).toBe(true);
     expect((box(b) as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${b}`]);
     expect(ofTask(asked, a)).toHaveLength(1);
@@ -1528,7 +1532,7 @@ describe("D1 (revision 3): the picker, earlier adds kept apart from the selectio
     await t.settle();
     expect(adds(t)).toEqual([]);
     expect(asked).toHaveLength(1);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${a}`]);
     expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
@@ -1568,7 +1572,7 @@ describe("D1 (revision 3): the picker, earlier adds kept apart from the selectio
     await t.settle();
     expect(adds(t), "only the other actor's add").toEqual([`+${a}`]);
     expect(noted(PICKER.unknown(1))).toBe(true);
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
   });
@@ -1687,7 +1691,7 @@ describe("D1 (revision 3): the picker, earlier adds kept apart from the selectio
     await t.settle();
     press(PICKER.submit, dialog() as HTMLElement);
     await t.settle();
-    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    decide(PICKER.again);
     await t.until(() => asked.length === 2);
     fireEvent.change(screen.getByLabelText(PICKER.searchLabel), {
       target: { value: "Thi" },

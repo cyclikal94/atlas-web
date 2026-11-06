@@ -138,6 +138,9 @@ describe("a rebuilt record and the save after it", () => {
       stored(w, old),
       reviewed(PROG, "progress", 7),
     ) as EnqueueRequest;
+    // F42-1 hand-off (WEB13B-F42-1-20261106, WEB-13b revision 35): a record that is not rebuilt (MU-2055 looks for the stream among the
+    // primary targets only) fails by this assertion, never by a TypeError of reading its targets.
+    expect(rebuilt, "the record is rebuilt").not.toBeNull();
     expect(rebuilt.targets).toEqual([
       expect.objectContaining({
         resourceId: PROG,

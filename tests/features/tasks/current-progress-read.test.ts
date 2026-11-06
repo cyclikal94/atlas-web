@@ -356,7 +356,9 @@ function held(body: unknown) {
 }
 async function until(done: () => boolean) {
   for (let i = 0; i < 50 && !done(); i += 1) await Promise.resolve();
-  if (!done()) throw new Error("setup: the read never reached its decode");
+  // F42-1 hand-off (WEB13B-F42-1-20261106, WEB-13b revision 35): the premise is ASSERTED, so a walk that never reaches the held page (the
+  // R19 mutants MU-2195, MU-2196 ask a different page) fails the case by an assertion, never by a thrown setup error.
+  expect(done(), "setup: the read reached its decode").toBe(true);
 }
 
 describe("R19 (P5): a scope that ended sends nothing more and answers nothing", () => {
@@ -566,8 +568,8 @@ async function composed(ids: string[]) {
   };
   const reached = async (h: ReturnType<typeof held>) => {
     for (let i = 0; i < 60 && !h.seen.decoding; i += 1) await w.env.settle();
-    if (!h.seen.decoding)
-      throw new Error("setup: the walk never reached the held page");
+    // F42-1 hand-off (WEB-13b revision 35): asserted, as `until` above.
+    expect(h.seen.decoding, "setup: the walk reached the held page").toBe(true);
   };
   return { w, ui, requests, durable, holdAt, reached };
 }

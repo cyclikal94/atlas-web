@@ -42,6 +42,7 @@ import { ENGINE_13B_R23, UNIT_13B_R23 } from "./catalogue-web13b-r23.mjs";
 import { ENGINE_13B_R24, UNIT_13B_R24 } from "./catalogue-web13b-r24.mjs";
 import { UNIT_13B_R25 } from "./catalogue-web13b-r25.mjs";
 import { UNIT_13B_R33 } from "./catalogue-web13b-r33.mjs";
+import { ENGINE_13B_R35 } from "./catalogue-web13b-r35.mjs";
 import { ENGINE_WEB19, UNIT_WEB19 } from "./catalogue-web19.mjs";
 
 export class PatchError extends Error {}
@@ -25117,7 +25118,14 @@ export const UNIT = [
       "WEB-11a R9 F2: a failed read of the person in the editor is taken as no person (the editor shows nothing)",
     file: "src/features/people/field/prerequisites.ts",
     tests: ["tests/features/people/editor-reads.test.tsx"],
-    expect: /the editor's read of the PERSON fails/,
+    // F42-3 inherited hand-off (DELEGATED-WEB13B-F42-3-20261106, beside WEB13B-F42-1-20261106; WEB-13b revision 35): the EXPECTATION
+    // drifted, not the test. WEB-11a revision 17 (e235936, R16.1) made an existing field's person and field one read, said as the field's:
+    // FieldEditorDialog passes the constant READ_WITH_FIELD as the person for an edit, so this line can fail only for "Add a field"
+    // (fieldId null). That revision adapted the edit case (it now expects the field's message, correctly) and added the Add-a-field case
+    // below, but kept this expectation. A/B with each revision's own runner: 4af662a (e235936^) caught by "the editor's read of the
+    // PERSON fails"; e235936 and accepted main 74b0bac wrong_test, caught only by the revision-17 case. The defect and the patch are
+    // unchanged; the expectation names the case that can observe it.
+    expect: /Add a field's read of the person alone fails/,
     patch: (t) =>
       sub(
         t,
@@ -31142,6 +31150,7 @@ export const ENGINE = [
   ...ENGINE_13B_R22,
   ...ENGINE_13B_R23,
   ...ENGINE_13B_R24,
+  ...ENGINE_13B_R35,
   // WEB-11a (plan §7.4, N-P1..N-P3): real-engine mutants, each caught by its native case.
   {
     id: "MU-2719",

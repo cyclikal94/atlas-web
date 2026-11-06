@@ -996,6 +996,61 @@ describe("revision 12 (review 13 R8): the card shows and acknowledges ONE readin
     ).toBeNull();
   });
 
+  // Revision 35 (Review 42 F42-2, MU-5186): since revision 24 a resolved reading is also retired from the panel's memory by an effect, so
+  // the card goes in the NEXT render even without the resolved check. What that check still decides is the commit before it: without it
+  // the resolved reading is drawn (and painted: the effect runs after paint) for one commit. The case above sees only where the screen
+  // ends. Here the resolved reading carries another reason, and every reason the card's element holds in any commit is recorded.
+  test("R8 resolved (list held), never drawn: a reading published resolved is not drawn, not even for one commit, before the card goes", async () => {
+    const { w, p } = await start([...context, missing3]);
+    p.hold("list");
+    expect(present(shown()).getAttribute("data-review-reason")).toBe("missing");
+    const reasons = new Set<string | null>();
+    const cards = new Set<Element>();
+    const isCard = (node: Node): node is Element =>
+      node instanceof Element && node.getAttribute("data-review") === REVIEW;
+    const collect = (records: MutationRecord[]) => {
+      for (const record of records) {
+        if (record.type === "attributes" && isCard(record.target)) {
+          reasons.add(record.oldValue);
+          cards.add(record.target);
+        }
+        for (const node of record.addedNodes)
+          if (node instanceof Element)
+            for (const el of [node, ...node.querySelectorAll("[data-review]")])
+              if (isCard(el)) cards.add(el);
+      }
+    };
+    const observer = new MutationObserver(collect);
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["data-review-reason"],
+      attributeOldValue: true,
+    });
+    try {
+      await publish(
+        w,
+        review(
+          { reason: "cancelled", resolved: true, slot: null },
+          { version: 4 },
+        ),
+      );
+    } finally {
+      collect(observer.takeRecords());
+      observer.disconnect();
+    }
+    // A removed element keeps its attributes: the value each card element ENDED with is one it held.
+    for (const card of cards)
+      reasons.add(card.getAttribute("data-review-reason"));
+    expect(p.count.list).toBeGreaterThan(0);
+    expect(shown()).toBeNull();
+    expect(
+      [...reasons],
+      "the resolved reading's reason was never drawn on the card",
+    ).not.toContain("cancelled");
+  });
+
   test("R8 loading: until the card's own reading arrives it shows neither the list's copy nor an action", async () => {
     const { w, p } = await start([...context, missing3], ["view"]);
     const item = present(shown());

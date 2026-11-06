@@ -471,6 +471,12 @@ test.describe("E-ANC3: set_anchor (queued; case 1)", () => {
     await section(page).getByRole("button", { name: "Anchor…" }).click();
     const dialog = await chooseEvent(page);
     await dialog.getByRole("button", { name: "Save anchor" }).click();
+    // Revision 35 (Review 42 O-1): the change is STORED before the fixture leader is woken, as in the cases above. The fixture leader
+    // is woken only by `send` (a save in the tree posts a hint it does not hear), so a save that committed after `send` waited for the
+    // next sync tick, about 30 s (measured: 28.8 to 29.5 s, against 0.2 to 0.7 s once the save is confirmed first), and the conflict
+    // was shown just after this case's 30 s expectation (the one failure in Review 42's Firefox batch).
+    await expect(dialog).toBeHidden();
+    await expect(section(page)).toContainText("Anchor change waiting to send");
     cal.answers.set("/calendar-commands", [
       { status: 409, body: atlasBody("conflict") },
       { status: 422, body: atlasBody("invalid_value") },
