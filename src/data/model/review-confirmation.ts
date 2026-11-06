@@ -107,19 +107,20 @@ export function targetsOf(
       role: "primary",
       basis: basis.get(id) ?? "resource",
       versionChecked,
-      // A primary that is not version-checked was seeded at its base when the draft was made (a create): the same seed again.
-      ...(versionChecked || base === undefined
-        ? {}
-        : { seedIfUntracked: base }),
+      // The draft's own base, as a seed: used only when nothing else tracks the target once this draft's contribution is retired, i.e.
+      // when this draft seeded it (a create; a first Anyone stream, version-checked or not: WEB-10c revision 1, I-10C-TM5). A base
+      // tracked or cached elsewhere wins, and `build` refuses one that moved.
+      ...(base === undefined ? {} : { seedIfUntracked: base }),
       ...needs[id],
     });
   }
-  for (const id of Object.keys(draft.side_effect_bases))
+  for (const [id, base] of Object.entries(draft.side_effect_bases))
     targets.push({
       resourceId: id,
       role: "side_effect",
       basis: basis.get(id) ?? "resource",
       versionChecked: true,
+      seedIfUntracked: base,
       ...needs[id],
     });
   return targets;

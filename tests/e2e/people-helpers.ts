@@ -142,6 +142,18 @@ export interface Served {
   mergePreviews: Map<string, Record<string, unknown>>;
   directory: Array<{ id: string; username: string }>;
   requestScript: Map<string, Answer[]>;
+  /**
+   * WEB-19: `GET /people/{id}/activity`, kept apart from `log` (whose order earlier cases assert): every request as `GET path?query` in
+   * `activityLog`; `activity` each canonical person's events, NEWEST FIRST; `activityCanonical` merged aliases (alias → canonical);
+   * `activityCoverage` the coverage start (Unix seconds); `activityScript` answers the next requests first, in order. By default the
+   * double pages exactly as the contract does: 404 for a person it does not serve, 422 `invalid_value` for a cursor that is not an
+   * event of the timeline now, `next_after` only while more exist; an empty timeline by default.
+   */
+  activityLog: string[];
+  activity: Map<string, unknown[]>;
+  activityCanonical: Map<string, string>;
+  activityCoverage: number;
+  activityScript: Answer[];
 }
 
 /** Not one of the viewer-safe summary reads (finding 8), which any invalidation repeats: for logs that assert another order. */
@@ -234,6 +246,11 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
     mergePreviews: new Map(),
     directory: [],
     requestScript: new Map(),
+    activityLog: [],
+    activity: new Map(),
+    activityCanonical: new Map(),
+    activityCoverage: 1793750400,
+    activityScript: [],
   };
   const scripted = (name: string) => served.requestScript.get(name)?.shift();
   const summaryOf = (entry: { person: Projection; linked: string | null }) => {
@@ -448,6 +465,35 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
       return route.fulfill(
         json(200, served.duplicates.shift() ?? { items: [], next_after: null }),
       );
+    }
+    const activity = /^\/people\/([0-9a-f-]{36})\/activity$/.exec(path);
+    if (activity) {
+      served.activityLog.push(`GET ${path}${url.search}`);
+      const id = activity[1] as string;
+      const next = served.activityScript.shift();
+      if (next !== undefined && typeof next !== "function")
+        return answer(route, next, () => null);
+      const canonical = served.activityCanonical.get(id) ?? id;
+      if (!served.people.has(id))
+        return route.fulfill(json(404, atlas("not_found")));
+      const events = (served.activity.get(canonical) ?? []) as Array<{
+        id: string;
+      }>;
+      const after = url.searchParams.get("after");
+      const limit = Number(url.searchParams.get("limit") ?? "50");
+      let rest = events;
+      if (after !== null) {
+        const at = events.findIndex((event) => event.id === after);
+        if (at < 0) return route.fulfill(json(422, atlas("invalid_value")));
+        rest = events.slice(at + 1);
+      }
+      const items = rest.slice(0, limit);
+      return answer(route, next, () => ({
+        person_id: canonical,
+        items,
+        next_after: rest.length > limit ? (items.at(-1)?.id ?? null) : null,
+        coverage_started_at: served.activityCoverage,
+      }));
     }
     const person = /^\/people\/([0-9a-f-]{36})$/.exec(path);
     if (person) {

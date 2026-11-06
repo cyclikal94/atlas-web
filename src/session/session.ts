@@ -226,8 +226,8 @@ export function createSessionWithKernel(
   const api: StampedApi = {
     fetchFor: (klass, account, epoch) =>
       createStampedFetch(k, klass, account, epoch),
-    client: (klass, account, epoch) =>
-      createStampedClient(k, klass, account, epoch),
+    client: (klass, account, epoch, send) =>
+      createStampedClient(k, klass, account, epoch, send),
     seal: async (account, epoch, pending) => {
       const result = await sealResult(k, account, epoch, pending);
       // A disposed session hands nothing back (synchronous: nothing asynchronous follows the verdict).

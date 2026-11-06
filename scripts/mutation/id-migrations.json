@@ -1,5 +1,5 @@
 {
-  "description": "Local WEB-14a merge of accepted WEB-10a b9fd602f. IDs on accepted main remain unchanged. The 24 colliding WEB-14a entries move by +1000; their patches and expected tests are unchanged. Historical evidence and approval plans retain their original IDs and candidate identity; apply this explicit mapping to future WEB-14a selections, never reinterpret old results as covering main entries. The accepted WEB-08d merge of 27 October 2026 also moves seven colliding WEB-14a UNIT IDs 1701–1707 to 3701–3707; accepted-main IDs and historical evidence stay unchanged. WEB-14a/WEB-11a integration 2 November 2026: no additional within-layer ID collisions; both parent entries retained, old evidence keeps original identity.",
+  "description": "Local WEB-14a merge of accepted WEB-10a b9fd602f. IDs on accepted main remain unchanged. The 24 colliding WEB-14a entries move by +1000; their patches and expected tests are unchanged. Historical evidence and approval plans retain their original IDs and candidate identity; apply this explicit mapping to future WEB-14a selections, never reinterpret old results as covering main entries. The accepted WEB-08d merge of 27 October 2026 also moves seven colliding WEB-14a UNIT IDs 1701–1707 to 3701–3707; accepted-main IDs and historical evidence stay unchanged. WEB-14a/WEB-11a integration 2 November 2026: no additional within-layer ID collisions; both parent entries retained, old evidence keeps original identity. WEB-14a maintenance merge of accepted main 74b0baca (WEB-10c, accepted at 3f8fdf94, and WEB-19), 6 November 2026: WEB-10c took MU-3001..MU-3368, so the 24 WEB-14a UNIT entries already at MU-3001..MU-3024 move again, by +1000, to MU-4001..MU-4024 (a second hop of the 25 October mapping: MU-2001..MU-2024 to MU-3001..MU-3024 to MU-4001..MU-4024); accepted-main IDs and historical evidence stay unchanged.",
   "mappings": [
     {
       "from": "MU-2012",
@@ -193,6 +193,174 @@
       "layer": "UNIT",
       "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
       "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-3001",
+      "to": "MU-4001",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3002",
+      "to": "MU-4002",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3003",
+      "to": "MU-4003",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3004",
+      "to": "MU-4004",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3005",
+      "to": "MU-4005",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3006",
+      "to": "MU-4006",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3007",
+      "to": "MU-4007",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3008",
+      "to": "MU-4008",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3009",
+      "to": "MU-4009",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3010",
+      "to": "MU-4010",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3011",
+      "to": "MU-4011",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3012",
+      "to": "MU-4012",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3013",
+      "to": "MU-4013",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3014",
+      "to": "MU-4014",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3015",
+      "to": "MU-4015",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3016",
+      "to": "MU-4016",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3017",
+      "to": "MU-4017",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3018",
+      "to": "MU-4018",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3019",
+      "to": "MU-4019",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3020",
+      "to": "MU-4020",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3021",
+      "to": "MU-4021",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3022",
+      "to": "MU-4022",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3023",
+      "to": "MU-4023",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
+    },
+    {
+      "from": "MU-3024",
+      "to": "MU-4024",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10c entry (catalogue-web10c.mjs) at 3f8fdf94; patch and expected tests unchanged",
+      "base": "3f8fdf9463ee6b76dd6b62c916469b27e888c9d5"
     }
   ]
 }

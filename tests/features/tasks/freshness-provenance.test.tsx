@@ -4,10 +4,12 @@ import type { CacheRow } from "../../../src/data";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { forgetAllCorrections } from "../../../src/features/tasks/detail/CorrectionDialog";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
+import { pendingOn } from "../../../src/features/tasks/model/commands";
 import type {
   OccurrencePage,
   OccurrenceView,
 } from "../../../src/features/tasks/model/contract";
+import { completionEntryId } from "../../../src/features/tasks/model/ids";
 import { readWholeDay } from "../../../src/features/tasks/today/useTodayView";
 import {
   type AnswerBasis,
@@ -298,6 +300,198 @@ describe("composeRow: the server's personal fields need a current, covering answ
     expect(amountWith(entryId)).toBe("3");
     // Control: an entry that has NOT landed is layered on.
     expect(amountWith("eeeeeeee-0000-4000-8000-000000000002")).toBe("6");
+  });
+
+  // Revision 1 (review R6; WEB-10a's F4 for a dependency completion): its entries are named as the SERVER names them, from the operation's
+  // key (the draft's local_id), so the synced stream's own entry shows it landed. A minimum of 5 with 3 recorded stays 3, never 6.
+  test("F4 for a completion: the root entry the synced stream lists (by the server's id) is not counted again; its prerequisites' neither", async () => {
+    const operation = "cccccccc-0000-4000-8000-000000000011";
+    const happened = Math.floor(Date.now() / 1000) - 5;
+    const task = await seededTask({
+      definition: {
+        goal: { kind: "numeric", minimum: "5", maximum: null, unit: "cups" },
+      },
+    });
+    const PRE = "aaaaaaaa-0000-4000-8000-0000000000d1";
+    const landedOn = (occurrence: string) => ({
+      id: completionEntryId(operation, occurrence, ME) as string,
+      evidence: { kind: "quantity", amount: "3" },
+      happened_at: happened,
+      recorded_by: ME,
+    });
+    const stream = (entries: object[]) => {
+      const progress = task.rows[3] as CacheRow;
+      const value =
+        typeof progress.value === "string"
+          ? JSON.parse(progress.value)
+          : progress.value;
+      const next = {
+        ...value,
+        action: { outcome: "incomplete", amount: "3", checked: [] },
+        period: { outcome: "incomplete", amount: "3", checked: [] },
+        recent_entries: entries,
+        entry_count: entries.length,
+      };
+      return {
+        ...progress,
+        value: typeof progress.value === "string" ? JSON.stringify(next) : next,
+      } as CacheRow;
+    };
+    const completion = draftRow({
+      local_id: operation,
+      created_seq: 1,
+      kind: "complete_dependencies",
+      endpoint: "/task-commands",
+      account_id: ME,
+      status: "acknowledged",
+      target_resource_ids: [task.occurrenceId, PRE],
+      index_targets: [task.occurrenceId, PRE, task.progressId],
+      command: {
+        command: {
+          kind: "complete_dependencies",
+          occurrence_id: task.occurrenceId,
+          mode: "complete_prerequisites",
+          root_evidence: { kind: "quantity", amount: "3" },
+          happened_at: happened,
+        },
+      },
+    });
+    const amountWith = (progress: CacheRow) => {
+      const r = composeRow(
+        {
+          occurrenceId: task.occurrenceId,
+          progressId: task.progressId,
+          occurrence: task.rows[2] ?? null,
+          task: task.rows[0] ?? null,
+          progress,
+          joint: null,
+          personal: null,
+        },
+        { drafts: [completion], attention: [] },
+        ME,
+        Date.now(),
+      );
+      if (r.kind !== "row" || r.row.personal.kind !== "result")
+        throw new Error("setup");
+      return r.row.personal.action.amount;
+    };
+    expect(amountWith(stream([landedOn(task.occurrenceId)]))).toBe("3");
+    // Control: the same 3 from an ordinary entry, with the completion still to land, is layered on.
+    expect(
+      amountWith(
+        stream([{ ...landedOn(task.occurrenceId), id: crypto.randomUUID() }]),
+      ),
+    ).toBe("6");
+    // The prerequisite's stream: its tick is pending until that stream lists the server's entry for it.
+    const body = { ...completion, command: completion.command } as never;
+    expect(pendingOn([body], ME, PRE, { recent_entries: [] })).toHaveLength(1);
+    expect(
+      pendingOn([body], ME, PRE, { recent_entries: [landedOn(PRE)] }),
+    ).toEqual([]);
+    // The root's landed entry says nothing about the prerequisite's (each occurrence has its own id).
+    expect(
+      pendingOn([body], ME, PRE, {
+        recent_entries: [landedOn(task.occurrenceId)],
+      }),
+    ).toHaveLength(1);
+    // Another account's completion is never mine.
+    expect(pendingOn([body], "someone-else", PRE, null)).toEqual([]);
+  });
+
+  test("R6 (history): the completion's own entry listed by the synced stream is shown once, as synced; another entry and the pending completion are both shown", async () => {
+    const operation = "cccccccc-0000-4000-8000-000000000012";
+    const happened = Math.floor(Date.now() / 1000) - 5;
+    const base = await seededTask({
+      definition: {
+        goal: { kind: "numeric", minimum: "5", maximum: null, unit: "cups" },
+      },
+    });
+    const history = async (entryId: string) => {
+      cleanup();
+      forgetTaskMemory();
+      const progress = base.rows[3] as CacheRow;
+      const value =
+        typeof progress.value === "string"
+          ? JSON.parse(progress.value)
+          : progress.value;
+      const rows = base.rows.map((r) =>
+        r.id === progress.id
+          ? ({
+              ...r,
+              value: {
+                ...value,
+                action: { outcome: "incomplete", amount: "3", checked: [] },
+                period: { outcome: "incomplete", amount: "3", checked: [] },
+                recent_entries: [
+                  {
+                    id: entryId,
+                    evidence: { kind: "quantity", amount: "3" },
+                    happened_at: happened,
+                    recorded_by: ME,
+                  },
+                ],
+                entry_count: 1,
+              },
+            } as CacheRow)
+          : r,
+      );
+      const effect = {
+        resource_id: base.progressId,
+        local_id: operation,
+        resource_version: null,
+        created_at: new Date().toISOString(),
+        submitted_at_page_seq: 0,
+        last_mentioned_page_seq: null,
+        display: null,
+        resolved: null,
+        no_publication_floor: null,
+        receipt_revision: 5,
+      };
+      const t = await mountTasks({
+        path: `/tasks/${base.taskId}?occurrence=${base.occurrenceId}`,
+        rows,
+        env: { online: false },
+        drafts: [
+          draftRow({
+            local_id: operation,
+            created_seq: 1,
+            kind: "complete_dependencies",
+            endpoint: "/task-commands",
+            account_id: ME,
+            status: "acknowledged",
+            target_resource_ids: [base.occurrenceId],
+            index_targets: [base.occurrenceId, base.progressId],
+            command: {
+              command: {
+                kind: "complete_dependencies",
+                occurrence_id: base.occurrenceId,
+                mode: "require_satisfied",
+                root_evidence: { kind: "quantity", amount: "3" },
+                happened_at: happened,
+              },
+            },
+          }),
+        ],
+        effects: [effect, { ...effect, resource_id: base.occurrenceId }],
+      });
+      await t.until(
+        () =>
+          document.querySelector("[data-entry-history] [data-entry]") !== null,
+      );
+      await t.settle();
+      return [...document.querySelectorAll("[data-entry-history] [data-entry]")]
+        .map((n) => n.getAttribute("data-entry-pending") !== null)
+        .sort();
+    };
+    const server = completionEntryId(
+      operation,
+      base.occurrenceId,
+      ME,
+    ) as string;
+    // The completion has landed: one row, synced.
+    expect(await history(server)).toEqual([false]);
+    // Control: an unrelated synced entry and the completion still to land: two rows, one pending.
+    expect(await history(crypto.randomUUID())).toEqual([false, true]);
   });
 
   test("a queued change on a row only the daily answer lists composes over the daily structure (never 'unreadable')", async () => {

@@ -435,7 +435,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         data: 37,
         calendar: 13,
         // WEB-11b: I-PPL17..I-PPL23 (seven tests, revision 1's I-PPL21 both-linked case included) join WEB-11a's 16 People cases.
-        people: 23,
+        // WEB-19: I-PPL24..I-PPL29 (six activity-timeline tests) join them in the People stack.
+        people: 29,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -445,15 +446,17 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        tasks: 22,
+        // WEB-10a's 22 and WEB-10c's 22 task cases (revision 11 split I-10C-M4 into M4a/M4b; revision 14, review 15's R38, added the
+        // task-day rollover control I-10C-M4c); WEB-08d's labels retain their own stack.
+        tasks: 44,
         labels: 15,
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      // 289 default-stack cases plus two separately scheduled PWA cases (WEB-14a). WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-09c:
-      // +1 profiling case (W2-limits).
+      // 317 default-stack cases plus two separately scheduled PWA cases (WEB-14a: +10 default-stack cases and the 2 PWA cases). WEB-10c: +22
+      // task cases; WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-09c: +1 profiling case (W2-limits); WEB-19: +6 (I-PPL24..I-PPL29).
       expect(inBrowser(pwa, browser)).toHaveLength(2);
-      expect(inBrowser(whole, browser)).toHaveLength(291);
+      expect(inBrowser(whole, browser)).toHaveLength(319);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -506,21 +509,23 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 23 (WEB-11b: +7).
+    // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 29 (WEB-11b: +7;
+    // WEB-19: +6).
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
       pages: 54,
       "password-path": 24,
-      people: 69,
-      tasks: 66,
+      people: 87,
+      // WEB-10a's 22 and WEB-10c's 22 task cases (revision 14 added I-10C-M4c), in three engines.
+      tasks: 132,
       labels: 45,
       lists: 24,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
 
-  test("omitting the People stack refuses all 69 unassigned cases before any backend starts", async () => {
+  test("omitting the People stack refuses all 87 unassigned cases before any backend starts", async () => {
     const w = await world({
       stacks: STACKS.filter((s) => s.name !== "people"),
     });
@@ -530,7 +535,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       readFileSync(join(w.evidence, "discovery/discovery.json"), "utf8"),
     );
     expect(discovery.assignment.ok).toBe(false);
-    expect(discovery.assignment.problems).toHaveLength(69);
+    expect(discovery.assignment.problems).toHaveLength(87);
     for (const problem of discovery.assignment.problems)
       expect(problem).toMatch(
         /in no stack: integration-.*integration\.people\.spec\.ts/,
@@ -644,8 +649,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 289,
-        passed: 282,
+        planned_cases: 317,
+        passed: 310,
         designed_skips: 7,
         failed: 0,
         interrupted: 0,

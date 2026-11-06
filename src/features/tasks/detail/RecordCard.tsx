@@ -8,9 +8,11 @@ import { useTasksEnv } from "../env";
 import {
   completeKept,
   type KeptRecovery,
+  type KeptTicket,
   keptKey,
   useKeptInput,
 } from "../kept-input";
+import type { Evidence } from "../model/contract";
 import { parseDecimalInput } from "../model/decimal";
 import { MESSAGES } from "../model/form";
 import { recordBlock } from "../reasons";
@@ -65,6 +67,7 @@ export function RecordCard({
   zone,
   writable,
   focus,
+  gate,
 }: {
   row: RowModel;
   actions: Pick<TaskActions, "record">;
@@ -73,6 +76,11 @@ export function RecordCard({
   writable: boolean;
   /** Arrived from Today's "Record": the card takes focus. */
   focus?: boolean;
+  /**
+   * WEB-10c: evidence that would complete a day still waiting for something opens the preview instead of a plain record (`true`: it
+   * did, and owns the ticket from then on). Absent: every record is queued as before.
+   */
+  gate?: (evidence: Evidence, ticket: KeptTicket | null) => boolean;
 }) {
   const env = useTasksEnv();
   const heading = useId();
@@ -148,16 +156,21 @@ export function RecordCard({
           ) : (
             <Button
               variant={done ? "secondary" : "primary"}
-              onClick={() =>
+              onClick={() => {
+                const evidence: Evidence = {
+                  kind: "checkbox",
+                  complete: !done,
+                };
+                if (gate?.(evidence, null)) return;
                 void run(() =>
                   actions.record(
                     row,
-                    { kind: "checkbox", complete: !done },
+                    evidence,
                     null,
                     done ? copy.ANNOUNCE_NOT_DONE : copy.ANNOUNCE_DONE,
                   ),
-                )
-              }
+                );
+              }}
             >
               {done ? copy.MARK_NOT_DONE : copy.MARK_DONE}
             </Button>
@@ -221,6 +234,8 @@ export function RecordCard({
                     }
                     const ticket = input.submit();
                     if (ticket === null) return;
+                    if (gate?.({ kind: "quantity", amount: value }, ticket))
+                      return;
                     void (async () => {
                       let ok = false;
                       try {
@@ -289,20 +304,22 @@ export function RecordCard({
                     aria-describedby={
                       reason !== null ? `${heading}-reason` : undefined
                     }
-                    onChange={() =>
+                    onChange={() => {
+                      const evidence: Evidence = {
+                        kind: "checklist",
+                        item_id: item.id,
+                        complete: !checked,
+                      };
+                      if (gate?.(evidence, null)) return;
                       void run(() =>
                         actions.record(
                           row,
-                          {
-                            kind: "checklist",
-                            item_id: item.id,
-                            complete: !checked,
-                          },
+                          evidence,
                           null,
                           RECORD_COPY.recorded,
                         ),
-                      )
-                    }
+                      );
+                    }}
                     className="size-[15px]"
                   />
                   {item.label}

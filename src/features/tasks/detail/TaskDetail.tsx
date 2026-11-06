@@ -10,6 +10,7 @@ import {
 } from "../../../data";
 import { PolicyEditorRecoveryHost, ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
+import { CatchUpNotice } from "../catchup/CatchUpNotice";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel, longDayLabel } from "../format";
@@ -20,6 +21,7 @@ import {
 } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import { editable } from "../reasons";
+import { STREAK_COPY } from "../streak/StreakPage";
 import { pillTone } from "../today/TodayRow";
 import type { RowModel } from "../view";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
@@ -28,8 +30,9 @@ import {
   CorrectionDialog,
   CorrectionRecoveryHost,
 } from "./CorrectionDialog";
+import { DayWork } from "./DayWork";
 import { EntryHistory } from "./EntryHistory";
-import { RecordCard } from "./RecordCard";
+import { RotaPanel } from "./Rota";
 import { useTaskDetail } from "./useTaskDetail";
 
 export const DETAIL_COPY = {
@@ -87,7 +90,7 @@ function ReadError({
   );
 }
 
-/** WF-TASK-01: the task detail for one occurrence (not the timer, prerequisite or streak blocks: WEB-10c). */
+/** WF-TASK-01: the task detail for one occurrence, with WEB-10c's "What needs doing first", timer, streak link and rota blocks. */
 export function TaskDetail({
   taskId,
   occurrence,
@@ -237,6 +240,14 @@ export function TaskDetail({
               {DETAIL_COPY.edit}
             </Link>
           )}
+          <Link
+            to="/tasks/$taskId/streak"
+            params={{ taskId: task.id }}
+            className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+            data-streak-link=""
+          >
+            {STREAK_COPY.link}
+          </Link>
           {row === null ? null : row.canEdit ? (
             <Button onClick={() => setCorrecting(row.id)}>
               {CORRECTION_COPY.open}
@@ -269,6 +280,12 @@ export function TaskDetail({
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
       ) : null}
+      <CatchUpNotice
+        key={task.id}
+        taskId={task.id}
+        title={task.label}
+        day={row?.data.slot.date ?? undefined}
+      />
       {view.occurrences.length > 1 ||
       view.days.more ||
       view.days.previous ||
@@ -383,8 +400,8 @@ export function TaskDetail({
               writable={env.writable}
             />
           ) : null}
-          <RecordCard
-            key={`record:${row.id}`}
+          <DayWork
+            key={`day:${row.id}`}
             row={row}
             actions={actions}
             now={view.now}
@@ -405,6 +422,17 @@ export function TaskDetail({
             joint={view.joint}
             progressRows={view.progressRows}
           />
+          {row.data.definition.participation === "anyone" ? (
+            <RotaPanel
+              key={`rota:${task.id}`}
+              row={row}
+              canEditOrder={view.execution?.can_edit === true}
+              days={view.occurrences.flatMap((o) =>
+                o.data === null ? [] : [{ id: o.id, data: o.data }],
+              )}
+              definition={row.data.definition}
+            />
+          ) : null}
           {row.streamPresent && view.synced && sharing === null ? (
             // Revision 37 (WEB-14a R40): a sharing draft left by the page before an update reopens its editor.
             <PolicyEditorRecoveryHost

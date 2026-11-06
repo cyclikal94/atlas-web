@@ -59,6 +59,11 @@ import {
 } from "../../../src/features/people/field/held-store";
 import { peopleMemory } from "../../../src/features/people/memory";
 import {
+  type PersonActivityEvent,
+  type PersonActivityPage,
+  parsePersonActivityPage,
+} from "../../../src/features/people/model/activity";
+import {
   type IncomingRequest,
   type MergePreview,
   parseIncomingRequests,
@@ -143,7 +148,23 @@ export interface FakePeopleApi extends PeopleApi {
     sent: PeopleAnswer<SentPage>[];
     recipientPreview: PeopleAnswer<RecipientPreview>[];
     mergePreview: PeopleAnswer<MergePreview>[];
+    /** WEB-19: scripted answers of `readPersonActivity`, taken in order before the fake server's own. */
+    activity: PeopleAnswer<PersonActivityPage>[];
   };
+  /**
+   * WEB-19's fake server state: each canonical person's recorded events, NEWEST FIRST (commit order), the coverage start (Unix seconds),
+   * and the merged aliases (alias id → canonical id). `readPersonActivity` pages them exactly as the contract does: `not_found` for a
+   * person the fake server does not answer for (`summaryOf`), `invalid` for a cursor that is not an event of the timeline now, at most
+   * `limit` events, `next_after` only while more exist; every page passes the real strict parser (a fixture the contract would not send
+   * fails the test).
+   */
+  activity: {
+    events: Map<string, PersonActivityEvent[]>;
+    coverage: number;
+    canonical: Map<string, string>;
+  };
+  /** WEB-19: every `readPersonActivity` call, kept apart from `calls` (so existing exact `calls` assertions are untouched). */
+  activityCalls: Array<{ id: string; after: string | null; limit: number }>;
   /**
    * WEB-11b's fake server state: the incoming requests (default answer of `readRequests`), the sent history (paged in id order by
    * `readSentRequests`), the recipient previews by request id (absent: `not_found`), and the merge previews' `requires_approval` and token
@@ -171,6 +192,9 @@ export interface FakePeopleApi extends PeopleApi {
   /** The people the fake server answers for (default: every cached person); for a server ahead of or behind the cache. */
   summaryOf(id: string): PersonSummary | null;
 }
+
+/** WEB-19: the fake server's coverage start, 4 November 2026 00:00 UTC (Unix seconds). */
+export const ACTIVITY_COVERAGE = 1793750400;
 
 export const OWNER_ONLY: AudienceSummary = {
   disclosure: "complete",
@@ -259,7 +283,14 @@ export function fakePeopleApi(
       sent: [],
       recipientPreview: [],
       mergePreview: [],
+      activity: [],
     },
+    activity: {
+      events: new Map(),
+      coverage: ACTIVITY_COVERAGE,
+      canonical: new Map(),
+    },
+    activityCalls: [],
     summary: {
       persons: new Map(),
       rails: new Map(),
@@ -344,6 +375,36 @@ export function fakePeopleApi(
             }),
           );
         return { ok: true, value: pageOf(fields, page, parseFieldAudience) };
+      });
+    },
+    async readPersonActivity(id, page) {
+      api.activityCalls.push({ id, after: page.after, limit: page.limit });
+      return take(api.next.activity, () => {
+        if (api.summaryOf(id) === null) return { ok: false, kind: "not_found" };
+        const canonical = api.activity.canonical.get(id) ?? id;
+        const events = api.activity.events.get(canonical) ?? [];
+        let rest = events;
+        if (page.after !== null) {
+          const at = events.findIndex((event) => event.id === page.after);
+          if (at < 0) return { ok: false, kind: "invalid" };
+          rest = events.slice(at + 1);
+        }
+        const items = rest.slice(0, page.limit);
+        const checked = parsePersonActivityPage(
+          JSON.parse(
+            JSON.stringify({
+              person_id: canonical,
+              items,
+              next_after:
+                rest.length > page.limit ? (items.at(-1)?.id ?? null) : null,
+              coverage_started_at: api.activity.coverage,
+            }),
+          ),
+          page.limit,
+        );
+        if (checked === null)
+          throw new Error("the fake activity page breaks the contract");
+        return { ok: true, value: checked };
       });
     },
     async readPerson(id) {

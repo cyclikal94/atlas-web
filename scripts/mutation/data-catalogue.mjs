@@ -19,7 +19,9 @@ import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
+import { ENGINE_10C, UNIT_10C } from "./catalogue-web10c.mjs";
 import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
+import { ENGINE_WEB19, UNIT_WEB19 } from "./catalogue-web19.mjs";
 
 export class PatchError extends Error {}
 
@@ -10914,7 +10916,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /dispatcher's retry lifts a stop the page holds in memory/,
     patch: (t) =>
-      sub(t, "        ...stops.operations(service).filter(covers),\n", ""),
+      // Re-anchored (WEB-10c revision 13, F-10C-13a): the page's memory is narrowed to the outbox's own operations; the same fault.
+      sub(
+        t,
+        "        ...stops\n          .operations(service)\n          .filter(\n            (operation) => outboxOperation(operation) && covers(operation),\n          ),\n",
+        "",
+      ),
   },
   {
     id: "MU-831",
@@ -10925,10 +10932,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /dispatcher's retry lifts a stop the page holds in memory/,
     patch: (t) =>
+      // Re-anchored (WEB-10c revision 13, F-10C-13a): the same fault (every outbox stop of the page, not only the draft's).
       sub(
         t,
-        "        ...stops.operations(service).filter(covers),",
-        "        ...stops.operations(service),",
+        "            (operation) => outboxOperation(operation) && covers(operation),",
+        "            (operation) => outboxOperation(operation),",
       ),
   },
   {
@@ -10943,7 +10951,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "          ...(stops.operations(service).length > 0\n            ? { memoryOnly: true as const }\n            : {}),",
+        // Re-anchored (WEB-10c revision 13, F-10C-13a): the outbox's own memory stops; the same fault.
+        "          ...(stops.operations(service).some(outboxOperation)\n            ? { memoryOnly: true as const }\n            : {}),",
         "          ...{},",
       ),
   },
@@ -27519,6 +27528,8 @@ export const UNIT = [
         "      const result = await sendOnline(\n        env,\n        `rename:${person.id}`,\n        renameProfileBody({\n          personId: person.id,\n          version: person.version,\n          name: name.trim(),\n        }),\n        (attempt) => env.api.peopleCommand(attempt),\n      );\n",
       ),
   },
+  // WEB-10c (catalogue-web10c.mjs).
+  ...UNIT_10C,
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
   {
@@ -28809,7 +28820,7 @@ export const UNIT = [
       sub(t, "    frozen: () => freezes.size > 0,", "    frozen: () => false,"),
   },
   {
-    id: "MU-3012",
+    id: "MU-4012",
     title:
       "WEB-14a revision 2, R3: a form without a freeze counts as held still",
     file: "src/lib/form-recovery/registry.ts",
@@ -28824,7 +28835,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3013",
+    id: "MU-4013",
     title:
       "WEB-14a revision 2, R3: 'Discard instead' stays enabled while an update reload is prepared",
     file: "src/lib/form-recovery/RecoveryBanner.tsx",
@@ -28834,7 +28845,7 @@ export const UNIT = [
     patch: (t) => sub(t, "        {state.disabled ? (", "        {false ? ("),
   },
   {
-    id: "MU-3014",
+    id: "MU-4014",
     title:
       "WEB-14a revision 2, R3: a checkpoint that cannot be met leaves the tab accepting (a retry is ignored; the fallback can still fire)",
     file: "src/lib/pwa/coordinator.ts",
@@ -28849,7 +28860,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3015",
+    id: "MU-4015",
     title:
       "WEB-14a revision 2: a save of the form is not counted as outstanding",
     file: "src/lib/form-recovery/session.ts",
@@ -28862,7 +28873,7 @@ export const UNIT = [
     patch: (t) => sub(t, "  session.pending.add(operation);\n", ""),
   },
   {
-    id: "MU-3016",
+    id: "MU-4016",
     title:
       "WEB-14a revision 2, R3: a clean session is forgotten when its mount goes (the next mount starts afresh: an empty form during a freeze)",
     file: "src/lib/form-recovery/session.ts",
@@ -28881,7 +28892,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3017",
+    id: "MU-4017",
     title:
       "WEB-14a revision 2: a mount resuming its session does not offer the copies other tabs left since",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
@@ -28900,7 +28911,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3018",
+    id: "MU-4018",
     title:
       "WEB-14a revision 2: a mount resuming its session says it is ready before the copies other tabs left since are known",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
@@ -32147,7 +32158,7 @@ export const UNIT = [
     patch: (t) => sub(t, '  !target.closest("[inert]") &&\n', ""),
   },
   {
-    id: "MU-3001",
+    id: "MU-4001",
     title:
       "WEB-14a revision 20 (I3, S10): a target behind the modal gate dialog is focused",
     file: "src/lib/form-recovery/focus.ts",
@@ -32163,7 +32174,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3002",
+    id: "MU-4002",
     title:
       "WEB-14a revision 20 (I4/I12, S18/S21): an unmounted owner does not withdraw its request (it is watched for ever)",
     file: "src/lib/form-recovery/focus.ts",
@@ -32173,7 +32184,7 @@ export const UNIT = [
     patch: (t) => sub(t, "    requests.delete(made);\n", ""),
   },
   {
-    id: "MU-3003",
+    id: "MU-4003",
     title:
       "WEB-14a revision 20 (DA-F2, S30): a later save failure does not cancel a restored-field request still pending",
     file: "src/lib/form-recovery/focus.ts",
@@ -32192,7 +32203,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3004",
+    id: "MU-4004",
     title:
       "WEB-14a revision 20 (DA-F1, S14): the prompt does not wait for a restored field held in the page",
     file: "src/lib/form-recovery/focus.ts",
@@ -32208,7 +32219,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3005",
+    id: "MU-4005",
     title:
       "WEB-14a revision 20 (S11): the neutral root goes before the shell when both hold a pending failure",
     file: "src/lib/form-recovery/focus.ts",
@@ -32223,7 +32234,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3006",
+    id: "MU-4006",
     title:
       "WEB-14a revision 20 (S15): an app dialog returning focus to its opener takes it from the recovery action placed since",
     file: "src/components/ui/dialog.tsx",
@@ -32239,7 +32250,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3007",
+    id: "MU-4007",
     title:
       "WEB-14a revision 20 (S16): a restored field given by a different ref is not attempted until the document changes",
     file: "src/lib/form-recovery/focus.ts",
@@ -32250,7 +32261,7 @@ export const UNIT = [
     patch: (t) => sub(t, "  useEffect(reconcile, [field]);\n", ""),
   },
   {
-    id: "MU-3008",
+    id: "MU-4008",
     title:
       "WEB-14a revision 20 (I5, S21): loaded after a publication, the module takes that state for a new presentation at its next equal publication",
     file: "src/lib/form-recovery/focus.ts",
@@ -32265,7 +32276,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3009",
+    id: "MU-4009",
     title:
       "WEB-14a revision 20 (S10): the close of a modal dialog is not a wake-up",
     file: "src/lib/form-recovery/focus.ts",
@@ -32281,7 +32292,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3010",
+    id: "MU-4010",
     title:
       "WEB-14a revision 20 (S16): a target rendered later is not a wake-up",
     file: "src/lib/form-recovery/focus.ts",
@@ -32292,7 +32303,7 @@ export const UNIT = [
       sub(t, "      childList: true,\n", "      childList: false,\n"),
   },
   {
-    id: "MU-3011",
+    id: "MU-4011",
     title:
       "WEB-14a revision 20 (I5, S11): a presentation focused on one surface is focused again by its other pending surface (no check at the attempt)",
     file: "src/lib/form-recovery/focus.ts",
@@ -32307,7 +32318,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3019",
+    id: "MU-4019",
     title:
       "WEB-14a revision 21 (R26/R27, I2, S2/S6): a change of `class` is not a wake-up",
     file: "src/lib/form-recovery/focus.ts",
@@ -32323,7 +32334,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3020",
+    id: "MU-4020",
     title:
       "WEB-14a revision 21 (R26/R27, I2, S2/S4/S6): a change of `style` is not a wake-up",
     file: "src/lib/form-recovery/focus.ts",
@@ -32339,7 +32350,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3021",
+    id: "MU-4021",
     title:
       "WEB-14a revision 21 (R26/R27, I2, S6): the revision-20 wake list restored (`inert`, `open`, `hidden`, `disabled` only): a stylesheet's attribute selector is not a wake-up",
     file: "src/lib/form-recovery/focus.ts",
@@ -32354,7 +32365,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3022",
+    id: "MU-4022",
     title:
       "WEB-14a revision 21 (R26, C2, S2/S12): only a change of a target itself is a wake-up (an ancestor's reveal is missed)",
     file: "src/lib/form-recovery/focus.ts",
@@ -32370,7 +32381,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3023",
+    id: "MU-4023",
     title:
       "WEB-14a revision 21 (I9): each change is its own attempt (no coalescing of a batch)",
     file: "src/lib/form-recovery/focus.ts",
@@ -32385,7 +32396,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-3024",
+    id: "MU-4024",
     title:
       "WEB-14a revision 21 (I9, S23): the watch is kept when nothing is pending any more",
     file: "src/lib/form-recovery/focus.ts",
@@ -32400,6 +32411,7 @@ export const UNIT = [
       ),
   },
   ...UNIT_WEB11B,
+  ...UNIT_WEB19,
 ];
 
 /**
@@ -36525,7 +36537,8 @@ export const ENGINE = [
         '      if (typeof dialog.close === "function") void dialog;\n',
       ),
   },
-
+  // WEB-10c (catalogue-web10c.mjs).
+  ...ENGINE_10C,
   ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
   {
@@ -36608,4 +36621,5 @@ export const ENGINE = [
       ),
   },
   ...ENGINE_WEB11B,
+  ...ENGINE_WEB19,
 ];
