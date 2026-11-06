@@ -291,7 +291,10 @@ test.describe("E-HH5: an uncertain rename (R8, one attempt per body)", () => {
       context,
       `/sharing/households/${HOME}/rename`,
     );
-    const dialog = dialogNamed(page, copy.RENAME_TITLE("Home"));
+    await expect(dialogNamed(page, copy.RENAME_TITLE("Home"))).toBeVisible();
+    // The only dialog, not found by its title: the lost rename DID commit, so a list read after it (the reconnection's) retitles the
+    // dialog "Rename Our place" (pool run 2026-11-06T06-23-31.063Z-4cfdf022, m4-air Chromium, lost the locator that way).
+    const dialog = page.getByRole("dialog");
     await dialog.getByLabel(copy.NAME_LABEL).fill("Our place");
     served.managementScript.push("abort");
     await dialog.getByRole("button", { name: copy.SAVE_NAME }).click();
@@ -312,6 +315,9 @@ test.describe("E-HH5: an uncertain rename (R8, one attempt per body)", () => {
     expect(served.management[1]).toEqual(original);
     await expect(page.locator("[data-households-unresolved]")).toHaveCount(0);
     expect(served.households[0]?.name).toBe("Our place");
+    await expect(
+      dialogNamed(page, copy.RENAME_TITLE("Our place")),
+    ).toBeVisible();
   });
 });
 
