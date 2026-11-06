@@ -9,6 +9,7 @@ import type {
 } from "../../src/features/tasks/model/contract";
 import { occurrenceId, progressId } from "../../src/features/tasks/model/ids";
 import { slotOn, todayIn } from "../../src/features/tasks/model/time";
+import { HELD, untilDeviceHolds } from "./device-delivery";
 import {
   bootHarness,
   expect,
@@ -33,6 +34,11 @@ import {
  * root read by another account (nothing hidden in the document); I-18-G5 a restricted middle node; I-18-G6 the editor from the
  * authoritative list; I-18-G7a a stale write refused `409` (sync paused); I-18-G7b a stale base seen first (sync running); I-18-G8 the
  * editor's `max_depth=1` read and a real `partial` body; I-18-G9 offline after a shown view.
+ *
+ * The helpers write to the server past the outbox, so nothing tells the device: every wait for "the device holds it" goes through
+ * `untilDeviceHolds` (device-delivery.ts), which nudges sync on every pass and observes the applied revision and the cached rows. A
+ * single nudge followed by a passive wait races the engine's timers (review 3 F-R9); this file never nudges sync itself
+ * (`device-delivery.test.ts` guards it).
  */
 const API = "/api/experimental/v1";
 const HELPER = "x-atlas-test-helper";
@@ -187,6 +193,10 @@ interface Made {
   taskId: string;
   occurrenceId: string;
   progressId: string;
+  title: string;
+  /** The account that wrote it, and its receipt's revision (device-delivery.ts I-3: a bound for that account's device only). */
+  account: string;
+  revision: number;
 }
 async function makeTask(
   page: Page,
@@ -218,7 +228,14 @@ async function makeTask(
       })
     : await call(page, id, "POST", "/task-commands", body, crypto.randomUUID());
   expect(out.status, JSON.stringify(out.body)).toBe(200);
-  return { taskId, occurrenceId: occ, progressId: prog };
+  return {
+    taskId,
+    occurrenceId: occ,
+    progressId: prog,
+    title,
+    account: id.account_id,
+    revision: (out.body as { revision: number }).revision,
+  };
 }
 
 const versionOf = async (page: Page, id: Id, made: Made) => {
@@ -329,7 +346,21 @@ function graphRequests(page: Page) {
   return out;
 }
 
-async function openDialog(page: Page, root: Made) {
+/**
+ * The task page shows the root once this page's device holds it (the dependency section itself is read from the server). The wait
+ * drives sync (device-delivery.ts) instead of waiting for one of the engine's timers to bring the helper's write in.
+ */
+async function untilRootHeld(page: Page, id: Id, root: Made) {
+  expect(
+    await untilDeviceHolds(page, id.account_id, {
+      // I-3: the receipt's revision bounds the writer's own device only; another account's device waits for the row alone.
+      ...(root.account === id.account_id ? { revision: root.revision } : {}),
+      tasks: [root],
+    }),
+  ).toBe(HELD);
+}
+async function openDialog(page: Page, id: Id, root: Made) {
+  await untilRootHeld(page, id, root);
   await go(page, `/tasks/${root.taskId}?occurrence=${root.occurrenceId}`);
   const see = page
     .locator("[data-dependencies]")
@@ -342,7 +373,8 @@ async function openDialog(page: Page, root: Made) {
   });
   return dialog;
 }
-async function openEditor(page: Page, root: Made) {
+async function openEditor(page: Page, id: Id, root: Made) {
+  await untilRootHeld(page, id, root);
   await go(page, `/tasks/${root.taskId}?occurrence=${root.occurrenceId}`);
   const set = page
     .locator("[data-dependencies]")
@@ -402,13 +434,6 @@ async function expectStates(page: Page, g: DependencyGraph) {
       page.locator(`[data-tree-node="${n.occurrence_id}"]`),
     ).toHaveAttribute("data-state", n.dependency_state);
 }
-/** The account's applied sync revision as this page's store holds it (`rows` answers asynchronously). */
-const appliedRevision = (page: Page, account: string) =>
-  page.evaluate(async (a) => {
-    const rows = ((await window.__atlasData?.rows(a, "sync_state")) ??
-      []) as Array<{ applied_revision?: number | null }>;
-    return rows[0]?.applied_revision ?? 0;
-  }, account);
 /** Whether this page's store holds the task (the editor's Task picker reads these rows once, when it opens). */
 const cachedTask = (page: Page, account: string, taskId: string) =>
   page.evaluate(
@@ -453,7 +478,7 @@ test.describe("I-18-G1: a chain (A18-1, A18-10)", () => {
       "ready",
       "satisfied",
     ]);
-    const dialog = await openDialog(page, r);
+    const dialog = await openDialog(page, id, r);
     expect(await mapEdges(page)).toEqual(edgeSet(oracle));
     expect(await treeEdges(page)).toEqual(edgeSet(oracle));
     await expectStates(page, oracle);
@@ -478,7 +503,7 @@ test.describe("I-18-G2: a branch with a shared prerequisite (A18-2, A18-3, A18-1
     await setDeps(page, id, r, [a, b]);
     const oracle = await graphOf(page, id, r);
     expect(oracle.edges).toHaveLength(4);
-    const dialog = await openDialog(page, r);
+    const dialog = await openDialog(page, id, r);
     await expect(dialog.locator("[data-map-edge]")).toHaveCount(4);
     expect(await mapEdges(page)).toEqual(edgeSet(oracle));
     expect(await treeEdges(page)).toEqual(edgeSet(oracle));
@@ -502,7 +527,7 @@ test.describe("I-18-G3: changed dependencies (A18-4, A18-6)", () => {
     const r = await makeTask(page, id, "I-18-G3 root");
     const a = await makeTask(page, id, "I-18-G3 first");
     await setDeps(page, id, r, [a]);
-    const dialog = await openDialog(page, r);
+    const dialog = await openDialog(page, id, r);
     await expect(dialog.locator("[data-tree-node]")).toHaveCount(2);
     await setDeps(page, id, r, []);
     expect((await graphOf(page, id, r)).edges).toEqual([]);
@@ -539,7 +564,7 @@ test.describe("I-18-G4/G5: permission-restricted data (A18-5)", () => {
       expect(oracle.restricted).toBe(true);
       expect(oracle.nodes[0]?.restricted_prerequisites).toBe(true);
       await b.page.evaluate(() => window.__atlasData?.retryOutbox());
-      const dialog = await openDialog(b.page, r);
+      const dialog = await openDialog(b.page, b.id, r);
       await expect(dialog.locator("[data-graph-restricted]")).toBeVisible();
       await expect(dialog.locator("[data-graph-summary]")).toContainText(
         "and something you can't see",
@@ -581,7 +606,7 @@ test.describe("I-18-G4/G5: permission-restricted data (A18-5)", () => {
         (n) => n.occurrence_id === m.occurrenceId,
       );
       expect(middle?.restricted_prerequisites).toBe(true);
-      const dialog = await openDialog(b.page, r);
+      const dialog = await openDialog(b.page, b.id, r);
       await expectStates(b.page, oracle);
       await expect(
         dialog.locator(`[data-tree-node="${m.occurrenceId}"]`),
@@ -600,32 +625,34 @@ test.describe("I-18-G6: the editor from the authoritative list (A18-6)", () => {
   }) => {
     const { page, id } = await bootAs(context, main);
     const r = await makeTask(page, id, "I-18-G6 root");
-    // Review 2's F-R6 order, every run: the device holds R before A, B and C exist, so R's page alone says nothing about C.
-    await page.evaluate(() => window.__atlasData?.nudgeSync());
-    await expect
-      .poll(() => cachedTask(page, id.account_id, r.taskId), {
-        timeout: 30_000,
-        intervals: [250],
-      })
-      .toBe(true);
+    // Review 2's F-R6 order: the device holds R before A, B and C exist, so R's page alone says nothing about C. The driven wait
+    // produces that order on almost every run; only the mutation judge's held sync step GUARANTEES it (design assessment RC4).
+    expect(
+      await untilDeviceHolds(
+        page,
+        id.account_id,
+        { revision: r.revision, tasks: [r] },
+        { timeout: 30_000 },
+      ),
+    ).toBe(HELD);
     const a = await makeTask(page, id, "I-18-G6 A");
     const b = await makeTask(page, id, "I-18-G6 B");
     const c = await makeTask(page, id, "I-18-G6 C");
     const revision = await setDeps(page, id, r, [a, b]);
     await page.evaluate(() => window.__atlasData?.retryOutbox());
-    // The barrier (as G7b): the applied revision has reached the helper's last change, so the device holds every task the picker offers.
-    await expect
-      .poll(
-        async () => {
-          await page.evaluate(() => window.__atlasData?.nudgeSync());
-          return appliedRevision(page, id.account_id);
-        },
-        { timeout: 60_000, intervals: [1_000] },
-      )
-      .toBeGreaterThanOrEqual(revision);
+    // The barrier (as G7b): the applied revision has reached the helper's last change and the device holds every task the picker offers.
+    expect(
+      await untilDeviceHolds(
+        page,
+        id.account_id,
+        { revision, tasks: [a, b, c] },
+        { timeout: 60_000, interval: 1_000 },
+      ),
+    ).toBe(HELD);
+    // The premise, apart from the wait (the mutation judge's M-G6a removes the barrier and must fail HERE).
     for (const t of [a, b, c])
       expect(await cachedTask(page, id.account_id, t.taskId)).toBe(true);
-    const { dialog } = await openEditor(page, r);
+    const { dialog } = await openEditor(page, id, r);
     await expect(
       page.locator(`[data-editor-item="${a.occurrenceId}"]`),
     ).toContainText("I-18-G6 A");
@@ -647,7 +674,7 @@ test.describe("I-18-G6: the editor from the authoritative list (A18-6)", () => {
         timeout: 60_000,
       })
       .toEqual([a.occurrenceId, c.occurrenceId].sort());
-    const view = await openDialog(page, r);
+    const view = await openDialog(page, id, r);
     await expect(view.locator("[data-tree-node]")).toHaveCount(3);
     expect(await treeEdges(page)).toEqual(edgeSet(await graphOf(page, id, r)));
   });
@@ -665,7 +692,7 @@ test.describe("I-18-G7: stale writes are never a silent overwrite (A18-9)", () =
     const b = await makeTask(page, id, "I-18-G7a B");
     await setDeps(page, id, r, [a]);
     await page.evaluate(() => window.__atlasData?.retryOutbox());
-    const { dialog } = await openEditor(page, r);
+    const { dialog } = await openEditor(page, id, r);
     await expect(
       page.locator(`[data-editor-item="${a.occurrenceId}"]`),
     ).toBeVisible();
@@ -704,22 +731,21 @@ test.describe("I-18-G7: stale writes are never a silent overwrite (A18-9)", () =
     const b = await makeTask(page, id, "I-18-G7b B");
     await setDeps(page, id, r, [a]);
     await page.evaluate(() => window.__atlasData?.retryOutbox());
-    const { dialog, editor } = await openEditor(page, r);
+    const { dialog, editor } = await openEditor(page, id, r);
     await expect(
       page.locator(`[data-editor-item="${a.occurrenceId}"]`),
     ).toBeVisible();
     await dialog.getByLabel("Don't allow starting early").check();
     const revision = await setDeps(page, id, r, [b]);
     // The barrier: the account's applied revision has reached the helper's change.
-    await expect
-      .poll(
-        async () => {
-          await page.evaluate(() => window.__atlasData?.nudgeSync());
-          return appliedRevision(page, id.account_id);
-        },
-        { timeout: 60_000, intervals: [1_000] },
-      )
-      .toBeGreaterThanOrEqual(revision);
+    expect(
+      await untilDeviceHolds(
+        page,
+        id.account_id,
+        { revision, tasks: [] },
+        { timeout: 60_000, interval: 1_000 },
+      ),
+    ).toBe(HELD);
     await expect(editor).toHaveAttribute("data-dependency-editor", "changed", {
       timeout: 60_000,
     });
@@ -751,7 +777,7 @@ test.describe("I-18-G8: the editor's depth-one read (A18-7)", () => {
     expect(one.coverage).toBe("partial");
     expect(one.max_depth).toBe(1);
     const reads = graphRequests(page);
-    const { dialog } = await openEditor(page, r);
+    const { dialog } = await openEditor(page, id, r);
     await expect(
       page.locator(`[data-editor-item="${a.occurrenceId}"]`),
     ).toBeVisible();
@@ -767,7 +793,7 @@ test.describe("I-18-G8: the editor's depth-one read (A18-7)", () => {
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(dialog).toHaveCount(0);
     const before = reads.length;
-    const view = await openDialog(page, r);
+    const view = await openDialog(page, id, r);
     const dialogReads = reads
       .slice(before)
       .filter((q) => q.occurrence === r.occurrenceId)
@@ -787,7 +813,7 @@ test.describe("I-18-G9: offline after a shown view (A18-8)", () => {
     const r = await makeTask(page, id, "I-18-G9 root");
     const a = await makeTask(page, id, "I-18-G9 first");
     await setDeps(page, id, r, [a]);
-    const dialog = await openDialog(page, r);
+    const dialog = await openDialog(page, id, r);
     const reads = graphRequests(page);
     await offline(page);
     await expect(dialog).toContainText("Can be checked when you're online.");
