@@ -254,7 +254,7 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
     ]);
   });
 
-  test("MU-6214: the last manager's Leave and own demotion are unavailable with the reason and fix; a sole member is told they can't leave", async () => {
+  test("MU-6214: the last manager's Leave and own demotion are unavailable with the reason and fix, said once; a sole member is told they can't leave", async () => {
     const t = await mountHome();
     const leave = must(
       within(member(ME)).queryByRole("button", {
@@ -263,6 +263,7 @@ describe("S-HH4: the household commands, with their counters and rules", () => {
     );
     expect(leave).toBeDisabled();
     expect(reasonOf(leave)).toBe(copy.LAST_MANAGER("Home"));
+    expect(screen.queryAllByText(copy.LAST_MANAGER("Home"))).toHaveLength(1);
     const demote = must(
       within(member(ME)).queryByRole("button", {
         name: `${copy.DEMOTE}: me`,

@@ -340,11 +340,6 @@ export function HouseholdDetail({
             );
           })}
         </List>
-        {complete && leaveReason !== null ? (
-          <p className="text-[12.5px] text-ink-2" data-household-rule="">
-            {leaveReason}
-          </p>
-        ) : null}
       </section>
       {complete ? (
         <section className="flex flex-col gap-2" data-household-waiting="">

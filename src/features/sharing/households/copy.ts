@@ -54,7 +54,7 @@ export const MAIN_CLEARED = "You no longer have a main household.";
 export const MAIN_CHANGED =
   "Your main household changed elsewhere. It has been read again; try again if you still want this.";
 export const MEMBERS_HEADING = "Members";
-export const MEMBERS_AS_OF = (when: string) => `As of ${when}`;
+export const MEMBERS_AS_OF = (when: string) => `Last read ${when}`;
 export const YOU = "you";
 export const ROLE: Readonly<Record<"manager" | "member", string>> = {
   manager: "Manager",

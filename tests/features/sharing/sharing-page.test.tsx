@@ -204,7 +204,7 @@ describe("the households subset (A8)", () => {
     expect(
       (await presentAll(() => screen.queryAllByText("Home"))).length,
     ).toBeGreaterThan(0);
-    expect(screen.queryAllByText(/As of/).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/Last read/).length).toBeGreaterThan(0);
     // Re-targeted: the create is the New household dialog's.
     expect(createButton()).toBeDisabled();
     expect(api.calls).toEqual([]);

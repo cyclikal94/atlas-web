@@ -15,7 +15,7 @@ export const DEFAULTS_EDIT = "Edit defaults";
 export const DEFAULTS_NONE_YET =
   "These defaults haven't been loaded on this device yet.";
 export const DEFAULTS_LOADING = "Loading your sharing defaults…";
-export const AS_OF = (when: string) => `As of ${when}`;
+export const AS_OF = (when: string) => `Last read ${when}`;
 export const ITEM_SHARING_HEADING = "Sharing a single item";
 export const ITEM_SHARING_BODY =
   "Each item you own has its own sharing, opened from the item itself. Its policy overrides these defaults.";
@@ -54,7 +54,7 @@ export const OWNER_KEEPS =
 export const EXCLUSION_RULE =
   "Exclusions apply to every grant: a direct grant cannot override an exclusion or remove a household grant.";
 export const MEMBERS_AS_OF = (when: string) =>
-  `Household members as of ${when}. The server checks membership when someone opens the item.`;
+  `Household members as last read ${when}. The server checks membership when someone opens the item.`;
 export const PARENT_LIMITED = (parent: string) =>
   `Who can see this is also limited by who can see “${parent}”.`;
 export const PARENT_UNNAMED = "the item it belongs to";
