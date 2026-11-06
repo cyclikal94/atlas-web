@@ -21,6 +21,7 @@ import {
   refusal,
   reloadAll,
   retry,
+  retryRefusal,
   unresolvedOf,
 } from "./operations";
 
@@ -103,15 +104,7 @@ export function UnresolvedBanner({ ctx }: { ctx: Ctx }) {
   const { memory } = ctx;
   const unresolved = unresolvedOf(memory);
   if (unresolved === null) return null;
-  const now = memory.live;
-  const retryBlocked =
-    now === null || !now.online
-      ? base.SAVE_OFFLINE_REASON
-      : !now.writable
-        ? base.SAVE_COMPAT_REASON
-        : memory.operation !== null
-          ? base.SAVE_BUSY_REASON
-          : null;
+  const retryBlocked = retryRefusal(memory);
   return (
     <div data-households-unresolved="">
       <Banner

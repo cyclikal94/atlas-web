@@ -210,7 +210,8 @@ export const SIGNUP_COL_ID = "Invitation";
 export const SIGNUP_COL_EXPIRES = "Expires";
 export const SIGNUP_COL_STATUS = "Status";
 export const SIGNUP_ACTIVE = "Active";
-export const SIGNUP_ID = (id: string) => `${id.slice(0, 8)}…`;
+/** An invitation's id as the wireframe draws it (`inv_8f2c…e91a`): its first 8 and last 4 characters, so two rows never read the same. */
+export const SIGNUP_ID = (id: string) => `${id.slice(0, 8)}…${id.slice(-4)}`;
 export const SIGNUP_MAYBE_NEW =
   "May have just been created — its link can't be shown again. Revoke it if you don't have the link.";
 export const SIGNUP_LIMIT =

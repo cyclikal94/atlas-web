@@ -46,7 +46,10 @@ export function SharingPage() {
   const detailAlone = householdRoute && mode !== "desktop";
   return (
     <div className="flex flex-col gap-8" data-sharing-page="">
-      {detailAlone ? null : (
+      {detailAlone ? (
+        // The detail alone (below 1280 px) is still the Sharing page: its level-one heading stays (the household's name is its h2).
+        <PageHeading>{copy.PAGE_TITLE}</PageHeading>
+      ) : (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex flex-col gap-1">
             <PageHeading>{copy.PAGE_TITLE}</PageHeading>

@@ -24,6 +24,7 @@ import {
   type AccountInvitationSummary,
   cmd,
   conflictCause,
+  formContext,
   type SentInvitation,
   signupLink,
 } from "./model";
@@ -73,6 +74,18 @@ export function refusal(
   if (retry)
     return unresolvedOf(memory) === null ? base.UNCERTAIN_PENDING : null;
   return unresolvedOf(memory) !== null ? base.UNCERTAIN_PENDING : null;
+}
+
+/** Why the unresolved attempt's Try again is not offered now (offline, the server's version, an operation running), or null. */
+export function retryRefusal(memory: HouseholdsMemory): string | null {
+  const now = memory.live;
+  return now === null || !now.online
+    ? base.SAVE_OFFLINE_REASON
+    : !now.writable
+      ? base.SAVE_COMPAT_REASON
+      : memory.operation !== null
+        ? base.SAVE_BUSY_REASON
+        : null;
 }
 
 /** Admits an operation, or returns null. Synchronous: what it checked cannot change before the operation is owned. */
@@ -264,9 +277,11 @@ export async function retry(ctx: Ctx): Promise<void> {
     surface: earlier.surface,
     target: earlier.target,
   });
-  // A create that is now known to have been made: show the household it made.
-  if (result?.ok && earlier.surface === "new" && earlier.target !== null)
+  // A create that is now known to have been made: its name is not kept for another, and the household it made is shown.
+  if (result?.ok && earlier.surface === "new" && earlier.target !== null) {
+    ctx.memory.draft(formContext.create(), null);
     ctx.go(`/sharing/households/${encodeURIComponent(earlier.target)}`);
+  }
 }
 
 /** Reload while an attempt is unresolved: the lists again; the attempt is NOT ended (R8). */
