@@ -20,6 +20,7 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
+import { rootGraph } from "../../support/tasks/graphs";
 import {
   fakeApi,
   ME,
@@ -90,6 +91,28 @@ async function mount(options: {
     (await seededTask({ title: "Run the washing machine" }));
   const api = fakeApi({
     readDependencies: async () => options.preview(root, prerequisite),
+    /*
+     * WEB-18 FIXTURE ADAPTATION (labelled for the reviewer; no assertion of this file changed). Since D-18-7 the editor saves only on its
+     * own fresh depth-one graph read, so this helper answers that read with the root alone (no direct prerequisite), on the cached
+     * occurrence version and with the preview's strict rule: the server state these WEB-10c cases assume, in which the editor starts
+     * empty. The dialog's full read stays unavailable (`uncertain`), so these cases keep exercising the preview's ordered list (now the
+     * labelled fallback, D-18-9). The graph itself is qualified in the WEB-18 suites.
+     */
+    readDependencyGraph: async (_id, maxDepth) => {
+      if (maxDepth !== 1) return { ok: false, kind: "uncertain" };
+      const shown = options.preview(root, prerequisite);
+      const occurrence = root.rows.find((r) => r.id === root.occurrenceId);
+      return {
+        ok: true,
+        value: rootGraph({
+          root: root.occurrenceId,
+          task: root.taskId,
+          title: root.rows[0]?.label ?? "",
+          version: occurrence?.version ?? 1,
+          strict: shown.ok ? shown.value.strict : false,
+        }),
+      };
+    },
   });
   const t = await mountTasks({
     path: path(root),

@@ -44,6 +44,11 @@ export interface DialogProps {
    * tablet orientations (the sharing editors: WEB-05.5 `tablet/sharing-portrait.html` and `sharing-landscape.html`, Q14; WEB-12a R6).
    */
   sheetBelow?: "tablet" | "desktop";
+  /**
+   * WEB-18 (D-18-12): `wide` for a dialog that sets a map beside a list (the dependency graph, TASK-04): 640 px from 768 px and 960 px from
+   * 1280 px, never wider than the viewport less 32 px. The default is the generic 440 px panel, unchanged.
+   */
+  size?: "default" | "wide";
 }
 
 /** The panel's classes: a full-screen sheet below the breakpoint, the centred dialog from it. Written out whole for Tailwind. */
@@ -52,6 +57,14 @@ const PANEL: Readonly<Record<"tablet" | "desktop", string>> = {
     "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[440px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-dialog tablet:border tablet:border-hairline-strong tablet:shadow-modal",
   desktop:
     "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[440px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-dialog desktop:border desktop:border-hairline-strong desktop:shadow-modal",
+};
+
+/** The wide panel's classes (D-18-12), written out whole for Tailwind. */
+const PANEL_WIDE: Readonly<Record<"tablet" | "desktop", string>> = {
+  tablet:
+    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[640px] desktop:w-[960px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-dialog tablet:border tablet:border-hairline-strong tablet:shadow-modal",
+  desktop:
+    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[960px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-dialog desktop:border desktop:border-hairline-strong desktop:shadow-modal",
 };
 
 /**
@@ -93,6 +106,7 @@ export function Dialog({
   returnFocusRef,
   syncControl = true,
   sheetBelow = "tablet",
+  size = "default",
 }: DialogProps) {
   const container = useRequiredPortalContainer();
   const opener = useRef<HTMLElement | null>(null);
@@ -166,7 +180,8 @@ export function Dialog({
           }}
           {...(description ? {} : { "aria-describedby": undefined })}
           data-dialog-sheet-below={sheetBelow}
-          className={PANEL[sheetBelow]}
+          {...(size === "wide" ? { "data-dialog-size": "wide" } : {})}
+          className={(size === "wide" ? PANEL_WIDE : PANEL)[sheetBelow]}
         >
           <header className="flex items-center gap-3 border-b border-hairline px-[18px] py-4">
             {/*

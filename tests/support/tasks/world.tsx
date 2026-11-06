@@ -226,6 +226,12 @@ export interface FakeApi extends TasksApi {
         revision?: number;
       }) => TasksResult<OccurrencePage> | undefined)
     | null;
+  /**
+   * WEB-18: every `readDependencyGraph` asked, in order (`maxDepth` undefined: the full read). The answer is the test's own
+   * (`readDependencyGraph` in `over`); by default the graph is unavailable (`uncertain`), so a suite that does not care sees the
+   * labelled fallback list of the preview and the editor withholds Save.
+   */
+  graphReads: Array<{ occurrenceId: string; maxDepth: number | undefined }>;
 }
 
 export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
@@ -244,6 +250,7 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
     daily: { joint: [], personal: [] },
     queries: [],
     respond: null,
+    graphReads: [],
     readDaily: async (q) => {
       count("readDaily");
       const asked = {
@@ -300,6 +307,10 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
         },
       };
     },
+    readDependencyGraph: async () => {
+      count("readDependencyGraph");
+      return { ok: false, kind: "uncertain" };
+    },
     readTimers: async () => {
       count("readTimers");
       return { ok: true, value: { items: [], next_after: null } };
@@ -334,6 +345,13 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
       return { ok: false, kind: "uncertain" };
     },
     ...over,
+  };
+  // The log is kept whatever answers: a test's own `readDependencyGraph` is wrapped, not replaced.
+  const answerGraph = api.readDependencyGraph;
+  api.readDependencyGraph = (occurrenceId, maxDepth) => {
+    api.graphReads.push({ occurrenceId, maxDepth });
+    if (over.readDependencyGraph) count("readDependencyGraph");
+    return answerGraph(occurrenceId, maxDepth);
   };
   return api;
 }

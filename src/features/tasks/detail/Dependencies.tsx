@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
@@ -8,6 +9,7 @@ import {
   type DraftWithCommand,
   readResourcePageNow,
   readResourcesNow,
+  useAppliedRevision,
   useCachedResources,
   useDataEnv,
   useDraftWithCommand,
@@ -26,9 +28,11 @@ import {
 import {
   commandOf,
   completeDependencies,
+  OCCURRENCE_VERSIONED_KINDS,
   setDependencies,
 } from "../model/commands";
 import {
+  type DependencyGraph,
   type DependencyItem,
   type DependencyPreview,
   type Evidence,
@@ -37,11 +41,15 @@ import {
 } from "../model/contract";
 import {
   admittedMode,
+  baseMatches,
+  baseOf,
   causeOf,
+  type EditorBase,
   editorBlock,
   MAX_PREREQUISITES,
   type Mode,
   modesOf,
+  pendingVersioned,
   prerequisitesOf,
   progressOf,
   rootAdmitted,
@@ -49,8 +57,15 @@ import {
   validateList,
 } from "../model/dependencies";
 import { layer } from "../model/evaluate";
+import { indexGraph } from "../model/graph";
 import { progressId } from "../model/ids";
 import type { RowModel } from "../view";
+import {
+  DependencyGraphSection,
+  GRAPH_COPY,
+  nodeLabel,
+} from "./DependencyGraph";
+import { useDependencyGraph } from "./useDependencyGraph";
 import { type PreviewRead, usePreview } from "./usePreview";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
@@ -145,9 +160,30 @@ export const DEPENDENCY_COPY = {
   },
   noDays: "This task has no saved days on this device.",
   undated: "No date",
+  // WEB-18 (D-18-7/8): the editor built from the authoritative direct list.
+  editorChanged: "What this waits for has changed since you started.",
+  editorRestart: "Start again from the current list",
+  editorPending:
+    "Another change to this day hasn't been sent yet. Try again once it's sent or discarded.",
+  editorWaitsNow: "Waits for now:",
 } as const;
 
 const DEP_KINDS = new Set(["set_dependencies", "complete_dependencies"]);
+
+/**
+ * WEB-18 (D-18-5): what makes a shown graph read again besides opening and "Check again": this device's own drafts of the day settling
+ * (any kind: a completion or a correction of the day changes what the graph says) and the account's applied sync revision moving.
+ */
+function useGraphSettled(row: RowModel): string {
+  const revision = useAppliedRevision();
+  // The revision this view first knew: its arrival is not a change (a read on opening is asked once, not twice: request cost, item 9).
+  const first = useRef<number | null | undefined>(undefined);
+  const value = revision.status === "ready" ? revision.value : undefined;
+  if (value !== undefined && first.current === undefined) first.current = value;
+  const moved =
+    value !== undefined && value !== first.current ? String(value) : "";
+  return `${row.drafts.map((d) => `${d.local_id}:${d.status}`).join(",")}|${moved}`;
+}
 
 /** The labels of preview items from the cache: the task's title and the day's date, never an id. */
 function useLabels(
@@ -308,21 +344,11 @@ function DependencyList({
     item.complete ? DEPENDENCY_COPY.done : DEPENDENCY_COPY.toDo;
   return (
     <>
-      {/* The decorative chain of the same boxes in the same order, no edges (none are published, E-1); dropped on narrow screens. */}
-      <div aria-hidden="true" className="hidden desktop:block">
-        <span className="flex flex-wrap items-center gap-1">
-          {preview.items.map((item, i) => (
-            <span key={item.occurrence_id} className="flex items-center gap-1">
-              {i > 0 ? <span className="text-ink-2">›</span> : null}
-              <span className="rounded-control border border-hairline-strong px-2 py-0.5 text-[12px] text-ink-1">
-                {item.occurrence_id === rootId
-                  ? DEPENDENCY_COPY.thisTask
-                  : label(item).title}
-              </span>
-            </span>
-          ))}
-        </span>
-      </div>
+      {/* WEB-18 (D-18-9): the labelled fallback while the graph can't be shown. Its order is the completion order and nothing more: the
+          decorative chain that implied connections from it is gone. */}
+      <p className="text-[12.5px] text-ink-2" data-dependency-fallback="">
+        {GRAPH_COPY.fallback}
+      </p>
       <ol
         className="m-0 flex list-none flex-col gap-1.5 p-0"
         data-dependency-list=""
@@ -410,7 +436,13 @@ export function DependencyDialog({
   const env = useTasksEnv();
   const data = useDataEnv();
   const announcer = useAnnouncer();
+  const navigate = useNavigate();
   const defaults = useSharingDefaults().record;
+  // WEB-18 (D-18-1/5): what the day waits for is DRAWN from one whole graph answer; the modes below still come from the preview alone.
+  const graph = useDependencyGraph(row.id, undefined, {
+    active: open,
+    settled: useGraphSettled(row),
+  });
   const [mode, setMode] = useState<Mode | "wait">(initialMode ?? "wait");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -543,6 +575,28 @@ export function DependencyDialog({
     if (rootEvidence?.ticket) completeKept(rootEvidence.ticket, false);
     onClose();
   };
+  // "Open this task" (D-18-4): closes exactly as Cancel does, then shows that day (its own dialog reads its own graph).
+  const openTask = (node: { task_id: string; occurrence_id: string }) => {
+    close();
+    void navigate({
+      to: "/tasks/$taskId",
+      params: { taskId: node.task_id },
+      search: { occurrence: node.occurrence_id },
+    });
+  };
+  // The preview's ordered list is the labelled fallback only when the graph answered and can't be shown (D-18-9), never beside it.
+  const fallback = graph.view.kind === "error" || graph.view.kind === "refused";
+  const shownGraph =
+    graph.view.kind === "ready" || graph.view.kind === "stale"
+      ? graph.view.graph
+      : null;
+  // D-18-11: what can't be ticked off from here, named from the preview (cache labels) in the mode's reason, never on the graph.
+  const blocked = preview
+    ? prerequisitesOf(preview, row.id).filter(
+        (item) => !item.complete && !item.can_complete,
+      )
+    : [];
+  const blockedLabel = useLabels(blocked);
   const disabledReason = !env.writable
     ? copy.NOT_WRITABLE
     : !env.online
@@ -577,6 +631,7 @@ export function DependencyDialog({
       onClose={close}
       title={DEPENDENCY_COPY.heading}
       description={DEPENDENCY_COPY.preview}
+      size="wide"
       footer={
         <div className="flex flex-col gap-2">
           {message ? (
@@ -645,11 +700,23 @@ export function DependencyDialog({
           </p>
         ) : (
           <>
-            <DependencyList
-              preview={preview}
-              rootId={row.id}
+            <DependencyGraphSection
+              view={graph.view}
               rootTitle={title}
+              onRefresh={() => void graph.refresh()}
+              onOpenTask={openTask}
             />
+            {fallback ? (
+              <DependencyList
+                preview={preview}
+                rootId={row.id}
+                rootTitle={title}
+              />
+            ) : shownGraph !== null && preview.strict ? (
+              <p className="text-[12.5px] text-ink-2" data-dependency-strict="">
+                {DEPENDENCY_COPY.strict(title)}
+              </p>
+            ) : null}
             {rootEvidence !== null && effective === "wait" ? (
               <p className="text-[12px] text-ink-2">
                 {DEPENDENCY_COPY.evidenceKept}
@@ -683,6 +750,11 @@ export function DependencyDialog({
                         availability.complete_prerequisites
                       ]
                     }
+                    {!fallback &&
+                    availability.complete_prerequisites === "cannot_complete" &&
+                    blocked.length > 0
+                      ? ` ${blocked.map((item) => `“${blockedLabel(item).title}”`).join(", ")}.`
+                      : null}
                   </p>
                 ) : null}
                 {availability?.advisory_override ? (
@@ -865,6 +937,10 @@ export function SetConflict({
 interface EditorValue {
   list: string[];
   strict: boolean;
+  /** WEB-18 (D-18-7): the graph read the edit was built from (its root's version and direct list); null until the first one. */
+  base: EditorBase | null;
+  /** WEB-18: the person changed the list or the rule since it was built. */
+  touched: boolean;
 }
 
 /** The days the editor can offer for one task: its saved days on this device, 100 at a time (the day picker's paging). */
@@ -953,11 +1029,15 @@ function useTaskChoices() {
 }
 
 /**
- * The bounded editor (D-10c-7, E-2): it opens only online, with a fresh preview that has nothing private, starts EMPTY (the client cannot
- * know the direct list) and says what saving does; it saves the complete chosen list and the strict rule (pre-set from the preview). The
- * list is checked here (at most 32, unique, never the day itself); visibility and cycles are the server's. `replacing`: "Keep editing"
- * of a conflicted `set_dependencies`, which starts from the SUBMITTED list and supersedes it on the version shown now. What is typed is
- * kept for the screen's logical visit (WEB-10a decisions 44 and 48).
+ * The bounded editor (D-10c-7; WEB-18 D-18-6/7/8): it saves only online, with a fresh preview that has nothing private AND its own fresh
+ * depth-one graph read (`max_depth=1`, the backend's editing read). A new edit starts from that read's AUTHORITATIVE direct list and the
+ * root's strict rule, and is saved on that read's root version (`reviewedBase`), so a server that has moved on answers `conflict` and
+ * nothing is silently overwritten. A later read that moves the base re-seeds an untouched edit and withholds Save from a touched one
+ * until the person starts again from the current list. Save is withheld too when the root has hidden prerequisites (saving would remove
+ * them), when the person may not edit the day, and while another change of the day's version is unsettled. The list is checked here (at
+ * most 32, unique, never the day itself); visibility and cycles are the server's. `replacing`: "Keep editing" of a conflicted
+ * `set_dependencies`, which starts from the SUBMITTED list, shows the current list beside it and supersedes it on the version read now.
+ * What is typed is kept for the screen's logical visit (WEB-10a decisions 44 and 48).
  */
 export function DependencyEditor({
   row,
@@ -983,6 +1063,12 @@ export function DependencyEditor({
   const submitted = replacing ? commandOf(replacing) : null;
   const read = state.read;
   const preview = read.kind === "ready" ? read.preview : null;
+  const graph = useDependencyGraph(row.id, 1, {
+    active: open,
+    settled: useGraphSettled(row),
+  });
+  // Only a current whole answer is a base to save on: a stale one (a failed re-read) is not.
+  const current = graph.view.kind === "ready" ? graph.view.graph : null;
   const input = useKeptInput<EditorValue>(
     keptKey(
       env.identity,
@@ -997,9 +1083,51 @@ export function DependencyEditor({
         typeof submitted?.strict === "boolean"
           ? submitted.strict
           : (preview?.strict ?? false),
+      base: null,
+      touched: false,
     }),
     { consumed: () => null },
   );
+  // D-18-7: built from the editor's own graph read. A new edit takes its direct list and strict rule; "Keep editing" keeps the
+  // submitted list. Either way the base is that read's, and a moved base re-builds an UNTOUCHED edit (never a touched one).
+  const build = (g: DependencyGraph, keepList: boolean) => {
+    const root = g.nodes[0];
+    input.edit((v) => ({
+      list: keepList ? v.list : [...g.direct_prerequisites],
+      strict: keepList ? v.strict : (root?.strict ?? v.strict),
+      base: baseOf(g),
+      touched: false,
+    }));
+  };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each new whole answer is considered once
+  useEffect(() => {
+    if (current === null || input.busy) return;
+    const v = input.value;
+    if (v.base !== null && (v.touched || baseMatches(v.base, current))) return;
+    build(current, replacing !== null);
+  }, [current]);
+  const changed =
+    current !== null &&
+    input.value.base !== null &&
+    input.value.touched &&
+    !baseMatches(input.value.base, current);
+  const pending = pendingVersioned(
+    row.drafts.map((d) => ({
+      local_id: d.local_id,
+      kind: d.kind,
+      status: d.status,
+      command: commandOf(d),
+    })),
+    row.id,
+    OCCURRENCE_VERSIONED_KINDS,
+    replacing?.local_id ?? null,
+  );
+  const graphLabel = (id: string): string | null => {
+    if (current === null || !current.nodes.some((n) => n.occurrence_id === id))
+      return null;
+    const { title, day } = nodeLabel(indexGraph(current), id);
+    return `${title} · ${day}`;
+  };
   const [pickTask, setPickTask] = useState<string | null>(null);
   const [pickDay, setPickDay] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -1015,6 +1143,8 @@ export function DependencyEditor({
       : [],
   );
   const labelOf = (id: string) => {
+    const fromGraph = graphLabel(id);
+    if (fromGraph !== null) return fromGraph;
     const occ = chosen.status === "ready" ? chosen.value[id]?.merged : null;
     const parsed = occ ? parseOccurrenceData(occ.value) : null;
     const task =
@@ -1048,6 +1178,16 @@ export function DependencyEditor({
     online: env.online,
     canEdit: row.canEdit,
     preview: refreshed ? preview : null,
+    root:
+      current !== null && input.value.base !== null
+        ? {
+            can_edit: current.nodes[0]?.can_edit ?? false,
+            restricted_prerequisites:
+              current.nodes[0]?.restricted_prerequisites ?? null,
+          }
+        : null,
+    pending,
+    changed,
   });
   const title = row.title ?? copy.UNTITLED;
   const save = async () => {
@@ -1056,21 +1196,22 @@ export function DependencyEditor({
       setError(DEPENDENCY_COPY.errors[problem]);
       return;
     }
+    const base = input.value.base;
+    if (base === null) return;
     const ticket = input.submit();
     if (ticket === null) return;
+    // Sent on the version of the read the list was built from (D-18-7/8), never the cache's.
     const request = setDependencies({
       occurrenceId: row.id,
       prerequisites: input.value.list,
       strict: input.value.strict,
+      reviewedBase: base.version,
     });
     let ok = false;
     try {
       if (replacing !== null) {
         const out = await data.outbox()?.supersede(replacing.local_id, {
           ...request,
-          targets: request.targets.map((t) =>
-            t.resourceId === row.id ? { ...t, reviewedBase: row.version } : t,
-          ),
           expectDraft: (now) =>
             now.local_id === replacing.local_id &&
             now.status === replacing.status &&
@@ -1099,19 +1240,27 @@ export function DependencyEditor({
       ? DEPENDENCY_COPY.editorOffline
       : block === "denied"
         ? DEPENDENCY_COPY.editorDenied
-        : block === "unavailable"
+        : block === "unavailable" || block === "restricted"
           ? DEPENDENCY_COPY.editorUnavailable
-          : block === "loading"
-            ? refreshed && read.kind === "error"
-              ? DEPENDENCY_COPY.failed
-              : refreshed && read.kind === "refused"
-                ? copy.UNREADABLE
-                : DEPENDENCY_COPY.editorLoading
-            : !env.writable
-              ? copy.NOT_WRITABLE
-              : input.busy
-                ? DEPENDENCY_COPY.sending
-                : null;
+          : block === "pending"
+            ? DEPENDENCY_COPY.editorPending
+            : block === "changed"
+              ? DEPENDENCY_COPY.editorChanged
+              : block === "loading"
+                ? refreshed && read.kind === "error"
+                  ? DEPENDENCY_COPY.failed
+                  : refreshed && read.kind === "refused"
+                    ? copy.UNREADABLE
+                    : graph.view.kind === "error" || graph.view.kind === "stale"
+                      ? DEPENDENCY_COPY.failed
+                      : graph.view.kind === "refused"
+                        ? copy.UNREADABLE
+                        : DEPENDENCY_COPY.editorLoading
+                : !env.writable
+                  ? copy.NOT_WRITABLE
+                  : input.busy
+                    ? DEPENDENCY_COPY.sending
+                    : null;
   const dayChoices = days.rows.filter((r) => r.id !== row.id);
   return (
     <Dialog
@@ -1150,6 +1299,33 @@ export function DependencyEditor({
         className="flex flex-col gap-3"
         data-dependency-editor={block ?? "open"}
       >
+        {block === "changed" && current !== null ? (
+          <div
+            className="flex flex-col gap-1.5 rounded-row border border-conflict-edge bg-conflict-tint p-3"
+            data-editor-changed=""
+          >
+            <p className="text-[13px] text-ink-1">
+              {DEPENDENCY_COPY.editorChanged}
+            </p>
+            <span>
+              <Button onClick={() => build(current, false)}>
+                {DEPENDENCY_COPY.editorRestart}
+              </Button>
+            </span>
+          </div>
+        ) : null}
+        {replacing !== null && current !== null ? (
+          <div className="flex flex-col gap-1" data-editor-now="">
+            <p className="text-[12.5px] text-ink-2">
+              {DEPENDENCY_COPY.editorWaitsNow}{" "}
+              {current.direct_prerequisites.length === 0
+                ? DEPENDENCY_COPY.editorEmpty
+                : current.direct_prerequisites
+                    .map((id) => graphLabel(id) ?? DEPENDENCY_COPY.notHere)
+                    .join("; ")}
+            </p>
+          </div>
+        ) : null}
         <p className="text-[13px] text-ink-1">{DEPENDENCY_COPY.editorNow}</p>
         {input.value.list.length === 0 ? (
           <p className="text-[13px] text-ink-2">
@@ -1175,6 +1351,7 @@ export function DependencyEditor({
                     input.edit((v) => ({
                       ...v,
                       list: v.list.filter((x) => x !== id),
+                      touched: true,
                     }));
                   }}
                 >
@@ -1265,7 +1442,11 @@ export function DependencyEditor({
                   return;
                 }
                 setError(null);
-                input.edit((v) => ({ ...v, list: [...v.list, pickDay] }));
+                input.edit((v) => ({
+                  ...v,
+                  list: [...v.list, pickDay],
+                  touched: true,
+                }));
                 setPickDay("");
               }}
             >
@@ -1286,7 +1467,7 @@ export function DependencyEditor({
             checked={input.value.strict}
             onChange={(event) => {
               const strict = event.target.checked;
-              input.edit((v) => ({ ...v, strict }));
+              input.edit((v) => ({ ...v, strict, touched: true }));
             }}
             className="size-[15px]"
           />

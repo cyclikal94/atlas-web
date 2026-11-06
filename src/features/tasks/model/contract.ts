@@ -1068,3 +1068,292 @@ export function parseStreak(value: unknown): TaskStreak | null {
     longest: value.longest as number | null,
   };
 }
+
+// ---- WEB-18: the dependency graph (`getDependencyGraph`, API 0.29.1, released in `v0.31.0-rc.1`) ---------------------------------
+
+export type DependencyRelation = "root" | "direct" | "transitive";
+export type DependencyState =
+  | "satisfied"
+  | "waiting"
+  | "restricted"
+  | "ready"
+  | "unknown";
+const RELATIONS: readonly DependencyRelation[] = [
+  "root",
+  "direct",
+  "transitive",
+];
+const DEPENDENCY_STATES: readonly DependencyState[] = [
+  "satisfied",
+  "waiting",
+  "restricted",
+  "ready",
+  "unknown",
+];
+/** One visible occurrence of a graph (`DependencyGraphNode`). `version` is its edit precondition only, never a graph revision. */
+export interface DependencyGraphNode {
+  occurrence_id: string;
+  task_id: string;
+  slot: Slot;
+  version: number;
+  can_edit: boolean;
+  strict: boolean;
+  depth: number;
+  relation: DependencyRelation;
+  outcome: Outcome;
+  prerequisites: "expanded" | "unexpanded";
+  /** On an expanded node, whether a stored direct prerequisite is hidden from me (no id, count or progress); null when unexpanded. */
+  restricted_prerequisites: boolean | null;
+  dependency_state: DependencyState;
+}
+/** One stored direct relationship: `dependant_id` requires `prerequisite_id`. */
+export interface DependencyEdge {
+  prerequisite_id: string;
+  dependant_id: string;
+}
+export interface DependencyGraphTask {
+  id: string;
+  title: string;
+}
+/**
+ * `GET /occurrences/{id}/dependency-graph`: one account's WHOLE view of one root at one `max_depth`, from one snapshot. It is replaced
+ * only by a whole newer answer to the same request and never merged with another (backend `docs/tasks.md` "Dependency graph").
+ */
+export interface DependencyGraph {
+  root_id: string;
+  nodes: DependencyGraphNode[];
+  edges: DependencyEdge[];
+  tasks: DependencyGraphTask[];
+  /** The root's visible stored direct prerequisites: the editor's authoritative current list. */
+  direct_prerequisites: string[];
+  coverage: "complete" | "partial";
+  restricted: boolean;
+  max_depth: number;
+}
+
+export const GRAPH_MAX_NODES = 200;
+export const GRAPH_MAX_EDGES = 6400;
+export const GRAPH_MAX_DEPTH = 200;
+const GRAPH_MAX_DIRECT = 32;
+const NODE_KEYS = [
+  "occurrence_id",
+  "task_id",
+  "slot",
+  "version",
+  "can_edit",
+  "strict",
+  "depth",
+  "relation",
+  "outcome",
+  "prerequisites",
+  "restricted_prerequisites",
+  "dependency_state",
+] as const;
+
+function parseGraphNode(raw: unknown): DependencyGraphNode | null {
+  if (!isObject(raw) || !keysAre(raw, NODE_KEYS)) return null;
+  if (!isUuid(raw.occurrence_id) || !isUuid(raw.task_id)) return null;
+  const slot = parseSlot(raw.slot);
+  if (slot === null) return null;
+  if (!isInt(raw.version, 1)) return null;
+  if (typeof raw.can_edit !== "boolean" || typeof raw.strict !== "boolean")
+    return null;
+  if (!isInt(raw.depth, 0, GRAPH_MAX_DEPTH)) return null;
+  if (!RELATIONS.includes(raw.relation as DependencyRelation)) return null;
+  if (!OUTCOMES.includes(raw.outcome as Outcome)) return null;
+  if (raw.prerequisites !== "expanded" && raw.prerequisites !== "unexpanded")
+    return null;
+  // A boolean exactly on an expanded node, null exactly on an unexpanded one.
+  if (
+    raw.prerequisites === "expanded"
+      ? typeof raw.restricted_prerequisites !== "boolean"
+      : raw.restricted_prerequisites !== null
+  )
+    return null;
+  if (!DEPENDENCY_STATES.includes(raw.dependency_state as DependencyState))
+    return null;
+  return {
+    occurrence_id: raw.occurrence_id,
+    task_id: raw.task_id,
+    slot,
+    version: raw.version as number,
+    can_edit: raw.can_edit,
+    strict: raw.strict,
+    depth: raw.depth as number,
+    relation: raw.relation as DependencyRelation,
+    outcome: raw.outcome as Outcome,
+    prerequisites: raw.prerequisites,
+    restricted_prerequisites: raw.restricted_prerequisites as boolean | null,
+    dependency_state: raw.dependency_state as DependencyState,
+  };
+}
+
+/**
+ * A node's `dependency_state` as the contract defines it, from its own outcome, expansion and hidden flag and its VISIBLE direct
+ * prerequisites in this answer (`satisfied` is an own outcome of `complete`).
+ */
+export function definedState(
+  node: Pick<
+    DependencyGraphNode,
+    "outcome" | "prerequisites" | "restricted_prerequisites"
+  >,
+  prerequisites: readonly Pick<DependencyGraphNode, "outcome">[],
+): DependencyState {
+  if (node.outcome === "complete") return "satisfied";
+  if (node.prerequisites === "unexpanded") return "unknown";
+  if (prerequisites.some((p) => p.outcome !== "complete")) return "waiting";
+  return node.restricted_prerequisites === true ? "restricted" : "ready";
+}
+
+/**
+ * `GET /occurrences/{id}/dependency-graph` validated STRICTLY against the request it answers (WEB-18 plan §3.1): the shape and bounds, and
+ * every definitional invariant the contract states, so the screen never draws a hierarchy the answer does not say. Null when the body is
+ * not the contract's answer to THIS request (`uncertain`). Sort orders are not checked: the screen imposes its own and relies on none.
+ */
+export function parseDependencyGraph(
+  value: unknown,
+  request: { rootId: string; maxDepth: number },
+): DependencyGraph | null {
+  if (
+    !isObject(value) ||
+    !keysAre(value, [
+      "root_id",
+      "nodes",
+      "edges",
+      "tasks",
+      "direct_prerequisites",
+      "coverage",
+      "restricted",
+      "max_depth",
+    ])
+  )
+    return null;
+  if (!isUuid(value.root_id) || value.root_id !== request.rootId) return null;
+  if (!isInt(value.max_depth, 1, GRAPH_MAX_DEPTH)) return null;
+  if (value.max_depth !== request.maxDepth) return null;
+  if (value.coverage !== "complete" && value.coverage !== "partial")
+    return null;
+  if (typeof value.restricted !== "boolean") return null;
+  if (
+    !Array.isArray(value.nodes) ||
+    value.nodes.length < 1 ||
+    value.nodes.length > GRAPH_MAX_NODES
+  )
+    return null;
+  if (!Array.isArray(value.edges) || value.edges.length > GRAPH_MAX_EDGES)
+    return null;
+  if (
+    !Array.isArray(value.tasks) ||
+    value.tasks.length < 1 ||
+    value.tasks.length > GRAPH_MAX_NODES
+  )
+    return null;
+  const direct = uuidList(value.direct_prerequisites, GRAPH_MAX_DIRECT, true);
+  if (direct === null) return null;
+
+  const nodes: DependencyGraphNode[] = [];
+  const byId = new Map<string, DependencyGraphNode>();
+  for (const raw of value.nodes) {
+    const node = parseGraphNode(raw);
+    if (node === null) return null;
+    if (byId.has(node.occurrence_id)) return null;
+    byId.set(node.occurrence_id, node);
+    nodes.push(node);
+  }
+  const root = nodes[0] as DependencyGraphNode;
+  // The root comes first, at depth 0, and is always expanded (its at most 32 visible prerequisites always fit the budget).
+  if (root.occurrence_id !== value.root_id) return null;
+  if (root.depth !== 0 || root.relation !== "root") return null;
+  if (root.prerequisites !== "expanded") return null;
+  if (nodes.some((n, i) => i > 0 && (n.relation === "root" || n.depth === 0)))
+    return null;
+
+  const tasks: DependencyGraphTask[] = [];
+  const taskIds = new Set<string>();
+  for (const raw of value.tasks) {
+    if (!isObject(raw) || !keysAre(raw, ["id", "title"])) return null;
+    if (!isUuid(raw.id) || typeof raw.title !== "string") return null;
+    if (taskIds.has(raw.id)) return null;
+    taskIds.add(raw.id);
+    tasks.push({ id: raw.id, title: raw.title });
+  }
+  // One entry per task definition with an occurrence in `nodes`: no more, no fewer.
+  const nodeTasks = new Set(nodes.map((n) => n.task_id));
+  if (nodeTasks.size !== taskIds.size) return null;
+  for (const id of nodeTasks) if (!taskIds.has(id)) return null;
+
+  const edges: DependencyEdge[] = [];
+  const pairs = new Set<string>();
+  const prerequisitesOf = new Map<string, string[]>();
+  for (const raw of value.edges) {
+    if (!isObject(raw) || !keysAre(raw, ["prerequisite_id", "dependant_id"]))
+      return null;
+    const from = raw.prerequisite_id;
+    const to = raw.dependant_id;
+    if (!isUuid(from) || !isUuid(to)) return null;
+    if (from === to) return null;
+    const prerequisite = byId.get(from);
+    const dependant = byId.get(to);
+    // Both ends are returned nodes, and only an expanded node has its edges.
+    if (prerequisite === undefined || dependant === undefined) return null;
+    if (dependant.prerequisites !== "expanded") return null;
+    const pair = `${from}>${to}`;
+    if (pairs.has(pair)) return null;
+    pairs.add(pair);
+    edges.push({ prerequisite_id: from, dependant_id: to });
+    prerequisitesOf.set(to, [...(prerequisitesOf.get(to) ?? []), from]);
+  }
+
+  // The root's direct list is exactly its edges, and those are exactly the `direct` nodes.
+  const rootPrerequisites = new Set(prerequisitesOf.get(root.occurrence_id));
+  if (rootPrerequisites.size !== direct.length) return null;
+  for (const id of direct) if (!rootPrerequisites.has(id)) return null;
+  for (const node of nodes)
+    if (
+      node !== root &&
+      (node.relation === "direct") !== rootPrerequisites.has(node.occurrence_id)
+    )
+      return null;
+
+  // Every node is reachable from the root over edges, at the breadth-first shortest distance it states, within `max_depth`.
+  const distance = new Map<string, number>([[root.occurrence_id, 0]]);
+  const queue = [root.occurrence_id];
+  for (let at = 0; at < queue.length; at += 1) {
+    const id = queue[at] as string;
+    const d = distance.get(id) as number;
+    for (const next of prerequisitesOf.get(id) ?? [])
+      if (!distance.has(next)) {
+        distance.set(next, d + 1);
+        queue.push(next);
+      }
+  }
+  for (const node of nodes) {
+    if (distance.get(node.occurrence_id) !== node.depth) return null;
+    if (node.depth > value.max_depth) return null;
+  }
+
+  // `coverage` and `restricted` are exactly their definitions.
+  const partial = nodes.some((n) => n.prerequisites === "unexpanded");
+  if ((value.coverage === "partial") !== partial) return null;
+  const restricted = nodes.some((n) => n.restricted_prerequisites === true);
+  if (value.restricted !== restricted) return null;
+
+  // Every `dependency_state` is the one the contract defines from this answer.
+  for (const node of nodes) {
+    const visible = (prerequisitesOf.get(node.occurrence_id) ?? []).map(
+      (id) => byId.get(id) as DependencyGraphNode,
+    );
+    if (node.dependency_state !== definedState(node, visible)) return null;
+  }
+
+  return {
+    root_id: value.root_id,
+    nodes,
+    edges,
+    tasks,
+    direct_prerequisites: direct,
+    coverage: value.coverage,
+    restricted: value.restricted,
+    max_depth: value.max_depth,
+  };
+}
