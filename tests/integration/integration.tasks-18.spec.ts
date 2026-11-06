@@ -402,16 +402,13 @@ async function expectStates(page: Page, g: DependencyGraph) {
       page.locator(`[data-tree-node="${n.occurrence_id}"]`),
     ).toHaveAttribute("data-state", n.dependency_state);
 }
+/** The account's applied sync revision as this page's store holds it (`rows` answers asynchronously). */
 const appliedRevision = (page: Page, account: string) =>
-  page.evaluate(
-    (a) =>
-      (
-        (window.__atlasData?.rows(a, "sync_state") ?? []) as Array<{
-          applied_revision?: number | null;
-        }>
-      )[0]?.applied_revision ?? 0,
-    account,
-  );
+  page.evaluate(async (a) => {
+    const rows = ((await window.__atlasData?.rows(a, "sync_state")) ??
+      []) as Array<{ applied_revision?: number | null }>;
+    return rows[0]?.applied_revision ?? 0;
+  }, account);
 const offline = (page: Page) =>
   page.evaluate(() => {
     const w = window as unknown as { __offline?: boolean };
@@ -687,7 +684,7 @@ test.describe("I-18-G7: stale writes are never a silent overwrite (A18-9)", () =
     await expect
       .poll(
         async () => {
-          await page.evaluate(() => window.__atlasData?.restartSync());
+          await page.evaluate(() => window.__atlasData?.nudgeSync());
           return appliedRevision(page, id.account_id);
         },
         { timeout: 60_000, intervals: [1_000] },
