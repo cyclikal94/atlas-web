@@ -4,7 +4,7 @@ import type {
   DraftWithCommand,
   ProjectionPatch,
 } from "../../data";
-import { pendingEvidenceOf } from "./model/commands";
+import { pendingEvidenceListOf } from "./model/commands";
 import {
   type OccurrenceData,
   type OccurrenceView,
@@ -309,10 +309,11 @@ export function composeRow(
         d.index_targets.includes(progressId),
     );
   // An entry the synced stream already lists has landed: it is not pending any more, whatever the overlay read (a separate transaction)
-  // still says, so it is never counted twice (design assessment F4).
+  // still says, so it is never counted twice (design assessment F4). A completion's entries carry the server's own ids (review R6), so
+  // this holds for them too.
   const landed = new Set((progress?.recent_entries ?? []).map((e) => e.id));
   const pending: PendingEvidence[] = drafts
-    .map((d) => pendingEvidenceOf(d, me))
+    .flatMap((d) => pendingEvidenceListOf(d, me))
     .filter(
       (p): p is PendingEvidence & { occurrenceId: string } =>
         p !== null && p.occurrenceId === occurrenceId && !landed.has(p.entryId),

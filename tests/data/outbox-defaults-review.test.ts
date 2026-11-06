@@ -207,7 +207,11 @@ describe("model: the confirmation's rebuild (D-12a-6)", () => {
     expect(() => request.build({ p: 1, s: 4, q: 1 })).toThrow(BasesMoved);
   });
 
-  test("the targets are the draft's own: the create seeded at its base, the side effect version-checked with its recorded basis", () => {
+  // Adaptation (WEB-10c revision 1, I-10C-TM5): this assertion first pinned the side effect WITHOUT a seed. That omission is the defect: a
+  // draft that SEEDED a stream (a first Anyone stream) loses it when its own contribution is retired for the supersession, and is refused
+  // `no_base`. The intent is kept (the draft's own ids, roles, version checks and recorded basis); each target now also carries the
+  // draft's own base as its seed, used only when nothing else tracks it (`resolveTargets`).
+  test("the targets are the draft's own: the create seeded at its base, the side effect version-checked with its recorded basis and its own base as the seed", () => {
     expect(targetsOf(stored, new Map([["s", "progress_stream"]]))).toEqual([
       {
         resourceId: "p",
@@ -221,6 +225,7 @@ describe("model: the confirmation's rebuild (D-12a-6)", () => {
         role: "side_effect",
         basis: "progress_stream",
         versionChecked: true,
+        seedIfUntracked: 4,
       },
     ]);
   });
@@ -654,5 +659,141 @@ describe("R2: the confirmation never overwrites a newer committed edit", () => {
       expect(isReviewedDraft({ ...base, ...changed }, reviewedOf(base))).toBe(
         false,
       );
+  });
+});
+
+/**
+ * WEB-10c revision 1 (found by I-10C-TM5 against the released backend): a draft that SEEDED a version-checked target (the stream a first
+ * Anyone start, completion or record creates: `seedIfUntracked`) and was refused `defaults_changed` is superseded on the person's
+ * confirmation with that same base, because the stream is still untracked once the refused draft's own contribution is retired. The
+ * first version refused it `no_base`, so the reviewed command could never be sent. A base tracked or cached meanwhile wins; one that
+ * moved is refused (`rebuild_refused`), never sent on the old base.
+ */
+describe("a refused draft that seeded its stream is confirmed with the base it seeded (I-10C-TM5)", () => {
+  const stream = "s";
+  const firstStream = (capture: ReturnType<typeof captureDefaults>) =>
+    ({
+      endpoint: "/commands",
+      targets: [
+        target("occ", { seedIfUntracked: undefined }),
+        target(stream, {
+          role: "side_effect",
+          basis: "progress_stream",
+          versionChecked: true,
+          seedIfUntracked: 1,
+        }),
+      ],
+      build: () => ({
+        command: {
+          kind: "start",
+          occurrence: "occ",
+          ...(capture.defaultsRevision === null
+            ? {}
+            : { defaults_revision: capture.defaultsRevision }),
+        },
+        defaultsRevision: capture.defaultsRevision,
+        defaultsContext: capture.defaultsContext,
+        defaultsReview: capture.defaultsReview,
+      }),
+    }) satisfies EnqueueRequest;
+  const confirmNow = async (
+    w: Awaited<ReturnType<typeof started>>,
+    localId: string,
+  ) => {
+    const now = captureDefaults(record(snapshot({ revision: revision(3) })), [
+      "progress",
+    ]);
+    return w.outbox.confirmDefaultsReview(localId, {
+      reviewed: reviewedOf(draftOf(w, localId)),
+      defaultsRevision: now.defaultsRevision as string,
+      defaultsContext: now.defaultsContext,
+      replacementId: "66666666-6666-4666-8666-666666666666",
+    });
+  };
+
+  test("confirmed by a supersession on the seeded base, sent with the reviewed revision and the same base", async () => {
+    const w = await started();
+    w.put("cache", [cacheRow({ id: "occ", version: 2 })]);
+    w.script.push(w.error(409, "defaults_changed"));
+    const out = await w.outbox.enqueue(
+      firstStream(captureDefaults(record(), ["progress"])),
+    );
+    if (out.kind !== "queued") throw new Error("setup");
+    await w.settle();
+    expect(draftOf(w, out.localId)).toMatchObject({
+      status: "in_flight",
+      side_effect_bases: { [stream]: 1 },
+    });
+    expect(await confirmNow(w, out.localId)).toMatchObject({
+      kind: "confirmed",
+      how: "superseded",
+    });
+    await w.settle();
+    expect(w.sent).toHaveLength(2);
+    expect(JSON.parse(w.sent[1]?.body as string).defaults_revision).toBe(
+      revision(3),
+    );
+    expect(w.drafts()[0]?.side_effect_bases).toEqual({ [stream]: 1 });
+  });
+
+  test("a version-checked PRIMARY it seeded (a first Anyone record's stream) is confirmed on that base too", async () => {
+    const w = await started();
+    w.put("cache", [cacheRow({ id: "occ", version: 2 })]);
+    w.script.push(w.error(409, "defaults_changed"));
+    const capture = captureDefaults(record(), ["progress"]);
+    const out = await w.outbox.enqueue({
+      endpoint: "/commands",
+      targets: [
+        target(stream, {
+          basis: "progress_stream",
+          versionChecked: true,
+          seedIfUntracked: 1,
+        }),
+        target("occ", { seedIfUntracked: undefined }),
+      ],
+      build: (bases) => ({
+        command: {
+          kind: "record",
+          stream,
+          expected_version: bases[stream] as number,
+          defaults_revision: capture.defaultsRevision,
+        },
+        defaultsRevision: capture.defaultsRevision,
+        defaultsContext: capture.defaultsContext,
+        defaultsReview: capture.defaultsReview,
+      }),
+    } satisfies EnqueueRequest);
+    if (out.kind !== "queued") throw new Error("setup");
+    await w.settle();
+    expect(await confirmNow(w, out.localId)).toMatchObject({
+      kind: "confirmed",
+      how: "superseded",
+    });
+    await w.settle();
+    expect(JSON.parse(w.sent[1]?.body as string)).toMatchObject({
+      expected_version: 1,
+      defaults_revision: revision(3),
+    });
+  });
+
+  test("control: the stream arrived by sync at ANOTHER version meanwhile: refused (rebuild_refused), never sent on the seeded base", async () => {
+    const w = await started();
+    w.put("cache", [cacheRow({ id: "occ", version: 2 })]);
+    w.script.push(w.error(409, "defaults_changed"));
+    const out = await w.outbox.enqueue(
+      firstStream(captureDefaults(record(), ["progress"])),
+    );
+    if (out.kind !== "queued") throw new Error("setup");
+    await w.settle();
+    w.put("cache", [
+      cacheRow({ id: "occ", version: 2 }),
+      cacheRow({ id: stream, kind: "progress", version: 3 }),
+    ]);
+    expect(await confirmNow(w, out.localId)).toEqual({
+      kind: "refused",
+      reason: "rebuild_refused",
+    });
+    await w.settle();
+    expect(w.sent).toHaveLength(1);
   });
 });

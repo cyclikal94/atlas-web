@@ -18,6 +18,7 @@ import {
   type TaskDefinition,
 } from "./contract";
 import type { PendingEvidence } from "./evaluate";
+import { completionEntryId } from "./ids";
 import { windows } from "./time";
 
 /**
@@ -32,7 +33,7 @@ import { windows } from "./time";
 export const TASK_ENDPOINT = "/task-commands";
 export const TASK_ACCESS_ENDPOINT = "/task-access-commands";
 
-/** The kinds this slice queues (registered in `register.ts`). `enrol` is online-only and never queued. */
+/** The kinds this slice queues (registered in `register.ts`). `enrol`, `set_rota`, `rota_consent` and `materialise` are never queued. */
 export const QUEUED_KINDS = [
   "create_task",
   "revise_task",
@@ -41,6 +42,12 @@ export const QUEUED_KINDS = [
   "resolve",
   "revise_occurrence",
   "archive",
+  // WEB-10c
+  "set_dependencies",
+  "complete_dependencies",
+  "start_timer",
+  "stop_timer",
+  "cancel_timer",
 ] as const;
 export type QueuedKind = (typeof QUEUED_KINDS)[number];
 
@@ -525,6 +532,306 @@ export function reviseOccurrence(
   };
 }
 
+// ---- WEB-10c: dependencies ------------------------------------------------------------------------------------------------------
+export interface SetDependenciesInput {
+  occurrenceId: string;
+  /** The WHOLE direct list (replaces every edge of the occurrence, D-10c-7): at most 32, unique, never the occurrence itself. */
+  prerequisites: readonly string[];
+  strict: boolean;
+  localId?: string;
+}
+
+/**
+ * `set_dependencies` (D-10c-7/10): checked against the occurrence's version and needing its edit access; each chosen prerequisite is an
+ * ordering target (not version-checked), so a prerequisite created offline is sent first. No display patch: edges are not cached.
+ */
+export function setDependencies(input: SetDependenciesInput): EnqueueRequest {
+  const prerequisites = [...input.prerequisites];
+  return {
+    endpoint: TASK_ENDPOINT,
+    targets: [
+      {
+        resourceId: input.occurrenceId,
+        role: "primary",
+        basis: "resource",
+        versionChecked: true,
+        requiresEdit: true,
+      },
+      ...prerequisites.map(
+        (id): TargetSpec => ({
+          resourceId: id,
+          role: "primary",
+          basis: "resource",
+          versionChecked: false,
+        }),
+      ),
+    ],
+    ...(input.localId === undefined ? {} : { localId: input.localId }),
+    build: (bases: Bases) => ({
+      command: body(
+        {
+          kind: "set_dependencies",
+          occurrence_id: input.occurrenceId,
+          expected_version: bases[input.occurrenceId] as number,
+          prerequisites,
+          strict: input.strict,
+        },
+        null,
+      ),
+    }),
+  };
+}
+
+export interface CompleteDependenciesInput {
+  occurrenceId: string;
+  previewToken: string;
+  mode: "require_satisfied" | "complete_prerequisites" | "advisory_override";
+  /** Unix seconds of the person's act. */
+  happenedAt: number;
+  /** The person's evidence for a numeric or checklist root; null for a checkbox root (the server ticks it). */
+  rootEvidence: Evidence | null;
+  /** My stream of the root; `known`: this device holds it or an outstanding draft writes it (else it is created on demand, seeded at 1). */
+  rootStream: { id: string; known: boolean };
+  /** In `complete_prerequisites` mode, every INCOMPLETE prerequisite with my stream there when this device holds it (else null). */
+  prerequisites: ReadonlyArray<{ occurrenceId: string; stream: string | null }>;
+  defaults: DefaultsRecord | null;
+  localId?: string;
+}
+
+/**
+ * `complete_dependencies` (CM-354, TASK-14): one atomic command, re-derived by the server against the preview's token. It writes MY
+ * streams: the root's, and in `complete_prerequisites` mode each incomplete prerequisite's, so each is a side effect whose version the
+ * server raises (WEB-04 §5.2), my root stream needing my edit access and, when it creates it (an Anyone root), the root's
+ * (`joinRequiresEdit`). A prerequisite stream this device does not hold has no known base and is left out (the next sync brings its
+ * version). The occurrences it completes are ordering targets. The `progress` defaults are captured UNCONDITIONALLY (WEB-04 §5.7 item
+ * 4: any stream it writes may be created on demand).
+ */
+export function completeDependencies(
+  input: CompleteDependenciesInput,
+): EnqueueRequest {
+  const captured = capture(input.defaults, ["progress"]);
+  const root = input.occurrenceId;
+  const others =
+    input.mode === "complete_prerequisites" ? input.prerequisites : [];
+  const command: JsonObject = {
+    kind: "complete_dependencies",
+    occurrence_id: input.occurrenceId,
+    preview_token: input.previewToken,
+    mode: input.mode,
+    happened_at: input.happenedAt,
+    ...(input.rootEvidence === null
+      ? {}
+      : { root_evidence: input.rootEvidence as JsonObject }),
+  };
+  return {
+    endpoint: TASK_ENDPOINT,
+    targets: [
+      {
+        resourceId: input.occurrenceId,
+        role: "primary",
+        basis: "resource",
+        versionChecked: false,
+      },
+      ...others.map(
+        (item): TargetSpec => ({
+          resourceId: item.occurrenceId,
+          role: "primary",
+          basis: "resource",
+          versionChecked: false,
+        }),
+      ),
+      {
+        resourceId: input.rootStream.id,
+        role: "side_effect",
+        basis: "progress_stream",
+        versionChecked: true,
+        requiresEdit: true,
+        // Creating my root stream (an Anyone root) needs the root's edit access.
+        joinRequiresEdit: root,
+        ...(input.rootStream.known ? {} : { seedIfUntracked: 1 }),
+      },
+      ...others.flatMap((item): TargetSpec[] =>
+        item.stream === null
+          ? []
+          : [
+              {
+                resourceId: item.stream,
+                role: "side_effect",
+                basis: "progress_stream",
+                versionChecked: true,
+                requiresEdit: true,
+              },
+            ],
+      ),
+    ],
+    ...(input.localId === undefined ? {} : { localId: input.localId }),
+    build: () => ({
+      command: body(command, captured.revision),
+      defaultsRevision: captured.defaultsRevision,
+      defaultsContext: captured.defaultsContext,
+      defaultsReview: captured.defaultsReview,
+    }),
+  };
+}
+
+// ---- WEB-10c: timers (B6) --------------------------------------------------------------------------------------------------------
+export interface StartTimerInput {
+  occurrenceId: string;
+  /** A fresh UUIDv4, chosen at the person's act. */
+  sessionId: string;
+  /** My progress stream's deterministic id under the occurrence. */
+  progressId: string;
+  /** Unix seconds of the person's act. */
+  startedAt: number;
+  /** An Anyone occurrence where neither the cache nor an outstanding draft has my stream: the server creates it (seeded at 1). */
+  firstAnyoneStream: boolean;
+  defaults: DefaultsRecord | null;
+}
+
+/**
+ * `start_timer`: the session is new (a `timer_session` seeded at 1, no `expected_version`); my stream is raised as a side effect (the
+ * server writes it), needing my edit access and, when the start creates it (an Anyone occurrence), the occurrence's; the occurrence
+ * orders it after any queued change of the day. The `progress` defaults are captured when it is the first Anyone stream (WEB-04 §5.7
+ * item 3).
+ */
+export function startTimer(input: StartTimerInput): EnqueueRequest {
+  const { occurrenceId } = input;
+  const capturedDefaults = input.firstAnyoneStream
+    ? capture(input.defaults, ["progress"])
+    : null;
+  const command: JsonObject = {
+    kind: "start_timer",
+    occurrence_id: input.occurrenceId,
+    session_id: input.sessionId,
+    started_at: input.startedAt,
+  };
+  return {
+    endpoint: TASK_ENDPOINT,
+    targets: [
+      {
+        resourceId: input.sessionId,
+        role: "primary",
+        basis: "timer_session",
+        versionChecked: false,
+        seedIfUntracked: 1,
+      },
+      {
+        resourceId: input.progressId,
+        role: "side_effect",
+        basis: "progress_stream",
+        versionChecked: true,
+        requiresEdit: true,
+        joinRequiresEdit: occurrenceId,
+        ...(input.firstAnyoneStream ? { seedIfUntracked: 1 } : {}),
+      },
+      {
+        resourceId: occurrenceId,
+        role: "primary",
+        basis: "resource",
+        versionChecked: false,
+      },
+    ],
+    build: () =>
+      capturedDefaults === null
+        ? { command: body(command, null) }
+        : {
+            command: body(command, capturedDefaults.revision),
+            defaultsRevision: capturedDefaults.defaultsRevision,
+            defaultsContext: capturedDefaults.defaultsContext,
+            defaultsReview: capturedDefaults.defaultsReview,
+          },
+  };
+}
+
+export interface EndTimerInput {
+  occurrenceId: string;
+  sessionId: string;
+  progressId: string;
+  /** My stream is held here or written by an outstanding draft (its version is known); otherwise it is not a target (no known base). */
+  streamKnown: boolean;
+  /**
+   * The session's version as a read or the copy gave it, for a session this device holds no record of; `null` for one this device
+   * started (its own record, seeded at 1, is the base). This device's record wins when it has one.
+   */
+  knownVersion: number | null;
+}
+
+function endTargets(input: EndTimerInput): TargetSpec[] {
+  return [
+    {
+      resourceId: input.sessionId,
+      role: "primary",
+      basis: "timer_session",
+      versionChecked: true,
+      ...(input.knownVersion === null
+        ? {}
+        : { seedIfUntracked: input.knownVersion }),
+    },
+    ...(input.streamKnown
+      ? [
+          {
+            resourceId: input.progressId,
+            role: "side_effect",
+            basis: "progress_stream",
+            versionChecked: true,
+            requiresEdit: true,
+          } satisfies TargetSpec,
+        ]
+      : []),
+    {
+      resourceId: input.occurrenceId,
+      role: "primary",
+      basis: "resource",
+      versionChecked: false,
+    },
+  ];
+}
+
+/**
+ * `stop_timer`: checked against the SESSION's version (never the occurrence's), raising it and my stream (the server records the
+ * duration on it, entry `uuidv5(session, "timer-duration-v1")`). `stoppedAt` is chosen by the screen (`stopChoice`: now, the day's
+ * close, or the first 7 days).
+ */
+export function stopTimer(
+  input: EndTimerInput & { stoppedAt: number },
+): EnqueueRequest {
+  return {
+    endpoint: TASK_ENDPOINT,
+    targets: endTargets(input),
+    build: (bases: Bases) => ({
+      command: body(
+        {
+          kind: "stop_timer",
+          occurrence_id: input.occurrenceId,
+          session_id: input.sessionId,
+          expected_version: bases[input.sessionId] as number,
+          stopped_at: input.stoppedAt,
+        },
+        null,
+      ),
+    }),
+  };
+}
+
+/** `cancel_timer` ("Discard"): checked against the session's version; nothing is recorded, my stream is raised. */
+export function cancelTimer(input: EndTimerInput): EnqueueRequest {
+  return {
+    endpoint: TASK_ENDPOINT,
+    targets: endTargets(input),
+    build: (bases: Bases) => ({
+      command: body(
+        {
+          kind: "cancel_timer",
+          occurrence_id: input.occurrenceId,
+          session_id: input.sessionId,
+          expected_version: bases[input.sessionId] as number,
+        },
+        null,
+      ),
+    }),
+  };
+}
+
 // ---- reading drafts back ----------------------------------------------------------------------------------------------------------
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj =>
@@ -562,4 +869,81 @@ export function pendingEvidenceOf(
     happenedAt: command.happened_at,
     replaces: typeof replaces === "string" ? replaces : null,
   };
+}
+
+/**
+ * Every piece of MY pending evidence a draft carries, by occurrence (WEB-10c): a `record` of my stream (`pendingEvidenceOf`), and a
+ * `complete_dependencies`, which records on my stream of each occurrence it completes (its primary targets: the root, with the person's
+ * root evidence or a tick, and in `complete_prerequisites` mode each incomplete prerequisite, with a tick). Each completion entry carries
+ * the id the SERVER gives it (`completionEntryId`: from the operation's key, which is the draft's `local_id`, the occurrence and me), so a
+ * synced stream that already lists it shows it has landed (`pendingOn`; review R6, design assessment F4). A key that is not a UUID gives no
+ * entry (the server would refuse the command).
+ */
+export function pendingEvidenceListOf(
+  draft: Pick<
+    DraftWithCommand,
+    "command" | "kind" | "local_id" | "account_id" | "target_resource_ids"
+  >,
+  me: string,
+): Array<PendingEvidence & { occurrenceId: string }> {
+  if (draft.kind === "record") {
+    const one = pendingEvidenceOf(draft, me);
+    return one === null ? [] : [one];
+  }
+  if (draft.kind !== "complete_dependencies" || draft.account_id !== me)
+    return [];
+  const command = commandOf(draft);
+  if (
+    command === null ||
+    typeof command.occurrence_id !== "string" ||
+    typeof command.happened_at !== "number"
+  )
+    return [];
+  const root = command.occurrence_id;
+  const rootEvidence =
+    command.root_evidence === undefined || command.root_evidence === null
+      ? ({ kind: "checkbox", complete: true } as Evidence)
+      : parseEvidence(command.root_evidence);
+  if (rootEvidence === null) return [];
+  const happenedAt = command.happened_at;
+  return draft.target_resource_ids.flatMap((occurrenceId) => {
+    const entryId = completionEntryId(draft.local_id, occurrenceId, me);
+    return entryId === null
+      ? []
+      : [
+          {
+            occurrenceId,
+            entryId,
+            evidence:
+              occurrenceId === root
+                ? rootEvidence
+                : ({ kind: "checkbox", complete: true } as Evidence),
+            happenedAt,
+            replaces: null,
+          },
+        ];
+  });
+}
+
+/**
+ * MY pending evidence on `occurrenceId`, in draft order, without what has LANDED: an entry the synced stream already lists is not pending
+ * any more, whatever the overlay read (a separate transaction) still says, so it is never counted twice (design assessment F4; review R6).
+ * The row's own result applies the same rule in `composeRow` (`view.ts`); the entry history keeps every pending entry (a landed
+ * correction still says what it replaced) and shows one already listed once, by its id.
+ */
+export function pendingOn(
+  drafts: ReadonlyArray<
+    Pick<
+      DraftWithCommand,
+      "command" | "kind" | "local_id" | "account_id" | "target_resource_ids"
+    >
+  >,
+  me: string,
+  occurrenceId: string,
+  stream: { recent_entries: ReadonlyArray<{ id: string }> } | null,
+): Array<PendingEvidence & { occurrenceId: string }> {
+  const landed = new Set((stream?.recent_entries ?? []).map((e) => e.id));
+  return drafts
+    .flatMap((d) => pendingEvidenceListOf(d, me))
+    .filter((p) => p.occurrenceId === occurrenceId && !landed.has(p.entryId));
 }

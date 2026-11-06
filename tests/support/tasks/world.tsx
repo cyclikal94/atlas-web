@@ -12,7 +12,10 @@ import {
   type DraftRow,
 } from "../../../src/data";
 import type { ReadResult } from "../../../src/data/engine/identity-task";
-import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
+import {
+  createQuotaGuard,
+  type QuotaGuard,
+} from "../../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../../src/data/engine/sync-channel";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
@@ -275,6 +278,61 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
       count("enrol");
       return { ok: false, kind: "uncertain" };
     },
+    // WEB-10c's reads and commands. By default a day waits for nothing (a root-only preview), lists no sessions and has an empty rota;
+    // the commands and the streak answer nothing (uncertain) unless a test says so.
+    readDependencies: async (occurrence) => {
+      count("readDependencies");
+      return {
+        ok: true,
+        value: {
+          token: "0".repeat(64),
+          items: [
+            {
+              occurrence_id: occurrence,
+              task_id: "00000000-0000-4000-8000-00000000ffff",
+              complete: false,
+              can_complete: true,
+              progress_version: null,
+            },
+          ],
+          unavailable: false,
+          strict: false,
+        },
+      };
+    },
+    readTimers: async () => {
+      count("readTimers");
+      return { ok: true, value: { items: [], next_after: null } };
+    },
+    readAccountTimers: async () => {
+      count("readAccountTimers");
+      return { ok: true, value: { items: [], next_after: null } };
+    },
+    readRota: async () => {
+      count("readRota");
+      return {
+        ok: true,
+        value: {
+          version: 0,
+          participants: [],
+          consent_version: 0,
+          accepted: false,
+          eligible_participants: [],
+        },
+      };
+    },
+    readStreak: async () => {
+      count("readStreak");
+      return { ok: false, kind: "uncertain" };
+    },
+    materialise: async () => {
+      count("materialise");
+      return { ok: false, kind: "uncertain" };
+    },
+    access: async () => {
+      count("access");
+      return { ok: false, kind: "uncertain" };
+    },
     ...over,
   };
   return api;
@@ -372,6 +430,20 @@ export async function mountTasks(options: {
   sharing?: FakeSharingApi;
   /** `GET /defaults/snapshot` (revision 10, R22: the first Join's default audience). Absent: the defaults are never read. */
   defaultsSnapshot?: () => Promise<ReadResult<unknown>>;
+  /** WEB-10c: rows of other stores seeded before the screens mount (catch-up sequences, a timer copy in `sync_state`). */
+  sequences?: object[];
+  timerCopy?: unknown;
+  /** WEB-10c revision 2: failed catch-up discoveries by task (`sync_state.materialise_discovery`), as another page recorded them. */
+  discovery?: Record<string, object>;
+  /** WEB-10c revision 1: overlay rows (`pending_effects`) seeded with the drafts, so an acknowledged draft's effect still stands. */
+  effects?: object[];
+  /** WEB-10c revision 4: further `sync_state` fields seeded as another page left them (the timer order, fence, scopes and floor). */
+  sync?: Partial<SyncStateRow>;
+  /**
+   * WEB-10c revision 7: wraps the production quota guard the data env is given (a test that holds a save's admission, R32). Absent: the
+   * guard as before.
+   */
+  quota?: (guard: QuotaGuard) => QuotaGuard;
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
@@ -386,6 +458,35 @@ export async function mountTasks(options: {
     if (options.rows?.length) world.idb.seed(NAME, "cache", options.rows);
     if (options.drafts?.length)
       world.idb.seed(NAME, "drafts", options.drafts as never);
+    if (options.sequences?.length)
+      world.idb.seed(NAME, "materialise_sequences", options.sequences as never);
+    if (options.effects?.length)
+      world.idb.seed(NAME, "pending_effects", options.effects as never);
+    if (options.timerCopy !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        { ...sync, timer_copy: options.timerCopy },
+      ]);
+    }
+    if (options.discovery !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        { ...sync, materialise_discovery: options.discovery as never },
+      ]);
+    }
+    if (options.sync !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [{ ...sync, ...options.sync }]);
+    }
     if (options.cacheStatus !== undefined) {
       const sync = world.idb.peek(NAME, "sync_state", "singleton") as
         | SyncStateRow
@@ -415,7 +516,9 @@ export async function mountTasks(options: {
     identity,
     loadRuntime: async () => runtime,
     online: new Cell(options.env?.online ?? true),
-    quota: createQuotaGuard({ storage: undefined, now: () => 0 }),
+    quota: (options.quota ?? ((guard) => guard))(
+      createQuotaGuard({ storage: undefined, now: () => 0 }),
+    ),
     ids: { uuid: () => crypto.randomUUID() },
     clock: { iso: () => new Date().toISOString(), now: () => Date.now() },
     fence: () => ({ hasPendingOperation: false, sessionStarted: true }),

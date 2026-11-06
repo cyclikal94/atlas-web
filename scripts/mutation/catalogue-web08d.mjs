@@ -707,8 +707,9 @@ export const UNIT_LABELS = [
     patch: (t) =>
       sub(
         t,
-        "    spec.callerSignal?.aborted === true || spec.withdraw?.aborted === true;",
-        "    spec.callerSignal?.aborted === true;",
+        // Re-anchored (WEB-10c revision 11): the guard also asks `admits` (review R36); the same fault (the withdrawn intent unseen).
+        "    spec.callerSignal?.aborted === true ||\n    spec.withdraw?.aborted === true ||\n    spec.admits?.() === false;",
+        "    spec.callerSignal?.aborted === true ||\n    spec.admits?.() === false;",
       ),
   },
   {

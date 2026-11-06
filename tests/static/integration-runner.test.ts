@@ -444,12 +444,14 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        tasks: 22,
+        // WEB-10a's 22 and WEB-10c's 22 task cases (revision 11 split I-10C-M4 into M4a/M4b; revision 14, review 15's R38, added the
+        // task-day rollover control I-10C-M4c); WEB-08d's labels retain their own stack.
+        tasks: 44,
         labels: 15,
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(285); // WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-09c: +1 profiling case (W2-limits); WEB-19: +6 (I-PPL24..I-PPL29)
+      expect(inBrowser(whole, browser)).toHaveLength(307); // WEB-10c: +22 task cases; WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-19: +6 (I-PPL24..I-PPL29)
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -510,7 +512,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       pages: 54,
       "password-path": 24,
       people: 87,
-      tasks: 66,
+      // WEB-10a's 22 and WEB-10c's 22 task cases (revision 14 added I-10C-M4c), in three engines.
+      tasks: 132,
       labels: 45,
       lists: 24,
     });
@@ -641,8 +644,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 285,
-        passed: 278,
+        planned_cases: 307,
+        passed: 300,
         designed_skips: 7,
         failed: 0,
         interrupted: 0,

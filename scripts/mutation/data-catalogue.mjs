@@ -19,6 +19,7 @@ import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
+import { ENGINE_10C, UNIT_10C } from "./catalogue-web10c.mjs";
 import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
 import { ENGINE_WEB19, UNIT_WEB19 } from "./catalogue-web19.mjs";
 
@@ -10915,7 +10916,12 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /dispatcher's retry lifts a stop the page holds in memory/,
     patch: (t) =>
-      sub(t, "        ...stops.operations(service).filter(covers),\n", ""),
+      // Re-anchored (WEB-10c revision 13, F-10C-13a): the page's memory is narrowed to the outbox's own operations; the same fault.
+      sub(
+        t,
+        "        ...stops\n          .operations(service)\n          .filter(\n            (operation) => outboxOperation(operation) && covers(operation),\n          ),\n",
+        "",
+      ),
   },
   {
     id: "MU-831",
@@ -10926,10 +10932,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /dispatcher's retry lifts a stop the page holds in memory/,
     patch: (t) =>
+      // Re-anchored (WEB-10c revision 13, F-10C-13a): the same fault (every outbox stop of the page, not only the draft's).
       sub(
         t,
-        "        ...stops.operations(service).filter(covers),",
-        "        ...stops.operations(service),",
+        "            (operation) => outboxOperation(operation) && covers(operation),",
+        "            (operation) => outboxOperation(operation),",
       ),
   },
   {
@@ -10944,7 +10951,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "          ...(stops.operations(service).length > 0\n            ? { memoryOnly: true as const }\n            : {}),",
+        // Re-anchored (WEB-10c revision 13, F-10C-13a): the outbox's own memory stops; the same fault.
+        "          ...(stops.operations(service).some(outboxOperation)\n            ? { memoryOnly: true as const }\n            : {}),",
         "          ...{},",
       ),
   },
@@ -27518,6 +27526,8 @@ export const UNIT = [
         "      const result = await sendOnline(\n        env,\n        `rename:${person.id}`,\n        renameProfileBody({\n          personId: person.id,\n          version: person.version,\n          name: name.trim(),\n        }),\n        (attempt) => env.api.peopleCommand(attempt),\n      );\n",
       ),
   },
+  // WEB-10c (catalogue-web10c.mjs).
+  ...UNIT_10C,
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
   ...UNIT_WEB11B,
@@ -31632,7 +31642,8 @@ export const ENGINE = [
         '      if (typeof dialog.close === "function") void dialog;\n',
       ),
   },
-
+  // WEB-10c (catalogue-web10c.mjs).
+  ...ENGINE_10C,
   ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
   ...ENGINE_WEB11B,

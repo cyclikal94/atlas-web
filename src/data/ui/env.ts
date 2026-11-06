@@ -130,7 +130,8 @@ export interface DataEnv {
   service(): AccountService | null;
   /**
    * The page's quota guard (the one the outbox and the defaults record are admitted by), for a slice that writes through a port of its
-   * own over the displayed account's database (WEB-11a's held audience changes, written as form copies through `FormRecoveryPort`).
+   * own over the displayed account's database (WEB-11a's held audience changes, written as form copies through `FormRecoveryPort`), and
+   * for a slice's own server-sized cache write (WEB-10c's W29 timer copy): admitted before it commits.
    */
   readonly quota: QuotaGuard;
   /** The same, observable: a database that another tab creates later appears here without a reload. */

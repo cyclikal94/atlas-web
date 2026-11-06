@@ -208,6 +208,7 @@ describe("Q4 (R25): a refused change keeps the submitted audience and consent, u
           await act(async () => w.t.remount());
           await w.t.settle();
           await w.t.until(() => kept() !== null);
+          expect(kept(), "the draft is kept").not.toBeNull();
           expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
           // Explicit Discard frees the next action, which carries the WINNER's version and audience.
           await click(
@@ -281,6 +282,7 @@ describe("Q5 (R25): neither transmission, a version that moved, nor values that 
       await w.t.settle();
       w.t.rerender(tasksEnv(w.api));
       await w.t.settle();
+      expect(kept(), "the draft is kept").not.toBeNull();
       expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
       onlyKeptChooser();
       expect(w.sent).toHaveLength(1);
@@ -362,6 +364,7 @@ describe("Q6 (R25): a failed read after a refusal neither consumes the draft nor
       w.hold(false);
       await click(button(copy.TRY_AGAIN));
       await w.t.settle();
+      expect(kept(), "the draft is kept").not.toBeNull();
       expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
       expect(settings().textContent).toContain(
         CONTROLS_COPY.audienceLine(SHARED),
@@ -438,6 +441,7 @@ describe("Q3 (R23/R25): every phase of a change's cycle survives a remount; an a
           w.sent[0]?.release({ ok: false, kind: "conflict", code: "conflict" }),
         );
         await w.t.settle();
+        expect(kept(), "the draft is kept").not.toBeNull();
         expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
         expect(w.sent).toHaveLength(1);
       },
@@ -463,6 +467,7 @@ describe("Q3 (R23/R25): every phase of a change's cycle survives a remount; an a
           for (const read of w.held().reverse()) read.release();
         });
         await w.t.settle();
+        expect(kept(), "the draft is kept").not.toBeNull();
         expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
         expect(w.sent).toHaveLength(1);
       },
@@ -489,6 +494,7 @@ describe("Q3 (R23/R25): every phase of a change's cycle survives a remount; an a
         await act(async () => w.t.remount());
         await w.t.settle();
         await w.t.until(() => kept() !== null);
+        expect(kept(), "the draft is kept").not.toBeNull();
         expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
         expect(w.sent).toHaveLength(1);
       },
@@ -518,6 +524,7 @@ describe("Q3 (R23/R25): every phase of a change's cycle survives a remount; an a
         });
         await w.t.settle();
         await w.t.until(() => kept() !== null);
+        expect(kept(), "the draft is kept").not.toBeNull();
         expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
         expect(w.sent).toHaveLength(1);
       },
@@ -538,6 +545,7 @@ describe("Q3 (R23/R25): every phase of a change's cycle survives a remount; an a
       expect(kept()).not.toBeNull();
       await cycleTree(w, "enrolled", true);
       await w.t.until(() => kept() !== null);
+      expect(kept(), "the draft is kept").not.toBeNull();
       expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
       expect(
         within(kept() as HTMLElement).getByRole("button", {
@@ -655,6 +663,7 @@ describe("Q9: a retry submits what it submitted; a later revision or another edi
         `${CONTROLS_COPY.audienceHeading}: ${CONTROLS_COPY.audienceLine(PRIVATE)}`,
       );
       expect(enrolmentDraftOf(IDENTITY, w.task.taskId)).toEqual(later);
+      expect(kept(), "the draft is kept").not.toBeNull();
       expect(chosen("grant", kept() as HTMLElement)).not.toBeNull();
       expect(w.sent).toHaveLength(2);
     },
