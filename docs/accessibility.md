@@ -42,6 +42,14 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - The in-dialog sync control keeps the editors' unsaved choices and says so when the editor reopens ("Your unsaved changes are shown again"); Cancel, Done, Escape and the close icon discard them (ia.md §1.3.3). The defaults review lists each principal of both audiences with its access and each exclusion, as text.
 - Automated: jest-axe on every sharing screen (`tests/features/sharing/*`) and keyboard, viewport and focus checks in the three engines (`tests/e2e/fixture.sharing.spec.ts`). The manual pass below and the real assistive technology passes of Layer 3 apply to these screens too and are not claimed.
 
+### The household screens (WEB-12b)
+
+- Keyboard map: the header's Invitations, Default sharing and New household are links (Tab, Enter); each household in the pane is a link to its detail with `aria-current="page"` when it is the one shown; the detail's Rename, Invitations and Signup links open route-addressed dialogs, and every member action is a button named with its member ("Make manager: sam", "Remove: sam", "Leave: Home"). Escape, the close icon and Cancel close a dialog and focus returns to the control that opened it (E-HH8).
+- Every unavailable action states its reason beside it: offline ("You're offline. Sharing changes need a connection."), an operation running, an unconfirmed change to try first, the last manager's and a sole member's rules (with the fix), 32 households, the main household not yet known, the signup cap. Errors carry a copyable request ID.
+- Live regions: only the announcer (lint R6). Announcements are fixed sentences (the change made, "Invitation link ready to copy", "Link copied"); the signup token is never announced. Error banners announce once, assertively.
+- The household dialogs are full-bleed sheets below 1280 px and centred 440 px dialogs from it (`sheetBelow="desktop"`, E-HH1 at 390, 834, 1112, 1280 and 1440); the directory lookup is a view inside the invitations dialog; below 768 px each signup invitation is a stacked card with labelled fields. Targets are at least 44 px. Below 1280 px a household's detail keeps the page's level-one heading.
+- Automated: jest-axe in every household suite (`tests/features/sharing/households-*`), and layout, keyboard, painted contrast (light and dark) and axe in three engines (`tests/e2e/fixture.households.spec.ts`, browser emulation, not a device). The manual T22 screen-reader pass, real Safari/VoiceOver, TalkBack and devices are WEB-09d's and WEB-15's, open and not claimed.
+
 ### The people screens (WEB-11a)
 
 - One `h1` per screen: "People" while the list is shown; the person's name when the detail stands alone (below 1280 px); the duplicates page its own title. Route changes move focus to it.

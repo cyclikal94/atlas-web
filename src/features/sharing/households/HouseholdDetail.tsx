@@ -54,7 +54,8 @@ export function HouseholdDetail({
   record: DefaultsRecord | null;
 }) {
   const { memory } = ctx;
-  useAsk(ctx, online, ["sent"]);
+  // Opening a household reads its members again (a change made elsewhere shows), once per mount: a remount adds one read, never a loop.
+  useAsk(ctx, online, ["households", "sent"]);
   const heading = useId();
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const read = memory.households;

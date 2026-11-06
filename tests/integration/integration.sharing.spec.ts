@@ -13,6 +13,7 @@ import {
   untilView,
   type Who,
 } from "./helpers";
+import { previewStatus } from "./web08b-support";
 
 /**
  * WEB-12a against the RELEASED backend (v0.27.0-rc.1, whose contract already has B5, Q1 and CH1) on a disposable SQLite database, behind the
@@ -1123,8 +1124,9 @@ test.describe("I-SH10: a household created, renamed, joined, managed and left, i
           { timeout: 30_000 },
         )
         .toBe(hid);
-      // frank promotes, demotes and removes her, each with the household's version.
-      await go(page, `/sharing/households/${hid}`);
+      // frank promotes, demotes and removes her, each with the household's version. His page is opened again, as a person would
+      // see a membership change made elsewhere (each read is separately timed: D-12b-3).
+      await reopenBound(page, id.account_id, `/sharing/households/${hid}`);
       const member = page
         .locator("[data-member]")
         .filter({ hasText: ACCOUNTS.grace.username });
@@ -1484,10 +1486,8 @@ test.describe("I-SH13: a signup link issued in the UI, redeemed, revoked, and re
       await expect(
         dialog(page).getByText("No active signup invitations."),
       ).toBeVisible({ timeout: 30_000 });
-      const preview = await raw(page, id, "POST", "/registration/preview", {
-        token: second,
-      });
-      expect(preview.status).toBe(401);
+      // Asked as WEB-08b's own check does, outside the session (the public preview of a link): a revoked link is refused.
+      expect(await previewStatus(second)).toBe(401);
       // liam (co-manager) demotes kate: her pending signup links are revoked, and her screen says so, read-only.
       await go(page, `/sharing/households/${h.id}/signup`);
       await dialog(page)
@@ -1662,7 +1662,7 @@ test.describe("I-SH15: a lost issuance is recovered by listing, never by retryin
   });
 });
 
-test.describe("I-SH16: the task and field sharing sections with full household management, and the dual-ownership review (A10)", () => {
+test.describe("I-SH16: an item's own sharing section with full household management, and the dual-ownership review (A10)", () => {
   test("nora's Home (pete joined): the policy editor grants Home and pete reads it; a create captured with Home's members is refused after pete LEAVES in WEB-12b's UI; the review shows Was/Now; Confirm sends it with the new revision", async ({
     browser,
   }, info) => {
@@ -1730,20 +1730,29 @@ test.describe("I-SH16: the task and field sharing sections with full household m
           { timeout: 60_000 },
         )
         .toBe(true);
-      // The dual-ownership review: captured with Home's members, then pete leaves in WEB-12b's UI.
+      // The dual-ownership review: captured with Home's members, then pete leaves in WEB-12b's UI. The page's B5 record is read again
+      // only when a screen asks (D-12a-10); the defaults editor acquires a fresh snapshot when it opens, so it is opened, and the
+      // capture waits for a persisted record that names Home, with pete, as the main household (the raw commands above moved it).
+      await go(page, "/sharing/defaults?kind=person");
       await expect
         .poll(
           () =>
             page.evaluate(
-              (acc) =>
-                window.__atlasData
-                  ?.defaultsRecord(acc)
-                  .then((r) => r?.snapshot.defaults.revision ?? null),
-              id.account_id,
+              ({ acc, home }) =>
+                window.__atlasData?.defaultsRecord(acc).then((r) => {
+                  const named = r?.snapshot.households.find(
+                    (h) => h.id === home,
+                  );
+                  return r?.snapshot.defaults.primary_household_id === home
+                    ? (named?.members.length ?? 0)
+                    : 0;
+                }),
+              { acc: id.account_id, home: home.id },
             ),
           { timeout: 30_000 },
         )
-        .not.toBeNull();
+        .toBe(2);
+      await go(page, "/sharing");
       const capture = await page.evaluate(
         (acc) => window.__atlasData?.captureDefaults(acc, ["person"]),
         id.account_id,
