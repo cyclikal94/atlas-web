@@ -13,15 +13,18 @@ import {
   useDraftWithCommand,
   useSharingDefaults,
 } from "../../../data";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel } from "../format";
 import {
   completeKept,
+  type KeptRecovery,
   type KeptTicket,
   keptKey,
   useKeptInput,
+  useKeptRecovery,
 } from "../kept-input";
 import {
   commandOf,
@@ -50,7 +53,9 @@ import {
 } from "../model/dependencies";
 import { layer } from "../model/evaluate";
 import { progressId } from "../model/ids";
+import { dependencyFormContext } from "../model/recovery";
 import type { RowModel } from "../view";
+import { useOpenOnRestore } from "./restore-once";
 import { type PreviewRead, usePreview } from "./usePreview";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
@@ -829,18 +834,38 @@ export function UnmetConflict({
 
 /** A `set_dependencies` that met a conflict: neutral copy (never naming a cycle's edge), "Keep editing" with the SUBMITTED list. */
 export function SetConflict({
+  occurrenceId,
   localId,
   onKeepEditing,
 }: {
+  /** The day whose `set_dependencies` this is (D-1: its "Keep editing" session is looked for after an app-update reload). */
+  occurrenceId: string;
   localId: string;
   onKeepEditing(draft: DraftWithCommand): void;
 }) {
   const data = useDataEnv();
+  const env = useTasksEnv();
   const stored = useDraftWithCommand(localId);
   const draft =
     stored.status === "ready" && stored.value?.local_id === localId
       ? stored.value
       : null;
+  // WEB-14a maintenance merge of WEB-10c (D-1): "Keep editing" is not open after an app-update reload, so this block, which holds the
+  // conflicted set, looks for the copy the page before it left and opens the editor on it (restored, never saved).
+  const keepKey = keptKey(
+    env.identity,
+    dependencyEditor(occurrenceId, localId),
+  );
+  const look = useKeptRecovery(
+    keepKey,
+    env.identity,
+    dependencyRecovery(occurrenceId, localId),
+    () => editorStart(draft === null ? null : commandOf(draft), null),
+    false,
+  );
+  useOpenOnRestore(look, keepKey, draft !== null, () => {
+    if (draft !== null) onKeepEditing(draft);
+  });
   return (
     <section
       data-set-conflict={localId}
@@ -865,6 +890,88 @@ export function SetConflict({
 interface EditorValue {
   list: string[];
   strict: boolean;
+}
+
+/** The editor's kept session for `occurrenceId`: a new list, or "Keep editing" of the conflicted set `replacing` (its local id). */
+export const dependencyEditor = (
+  occurrenceId: string,
+  replacing: string | null,
+) => `dependencies:${occurrenceId}:${replacing ?? "new"}`;
+
+/**
+ * What the editor starts from: the SUBMITTED list of the set it replaces, else nothing, and strict as submitted or as the preview says (the
+ * restore hosts' start; the editor spells the same rule out itself).
+ */
+const editorStart = (
+  submitted: Record<string, unknown> | null,
+  preview: DependencyPreview | null,
+): EditorValue => ({
+  list: Array.isArray(submitted?.prerequisites)
+    ? (submitted.prerequisites as string[])
+    : [],
+  strict:
+    typeof submitted?.strict === "boolean"
+      ? submitted.strict
+      : (preview?.strict ?? false),
+});
+
+/**
+ * APP-UPDATE RECOVERY of the editor (WEB-14a maintenance merge of accepted WEB-10c, D-1; Q4; the task editors' protocol, `kept-input.ts`
+ * revision 37). The chosen list and the strict rule as the person left them (the editor's kept input), as explicitly versioned JSON, under
+ * a context the next page finds again: the day's, and the conflicted set it replaces. A task or day picked in the selects but not added is
+ * not kept (it is not the session's input; a visit to the sync screens does not keep it either). Restoring never saves: the editor reads
+ * the preview again when it opens, so Save is admitted only on the answer of NOW. A text this build cannot read restores nothing.
+ */
+export const dependencyRecovery = (
+  occurrenceId: string,
+  replacing: string | null,
+): KeptRecovery<EditorValue> => ({
+  context: dependencyFormContext(occurrenceId, replacing),
+  encode: (value) =>
+    JSON.stringify({ v: 1, list: value.list, strict: value.strict }),
+  decode: (text) => {
+    try {
+      const raw = JSON.parse(text) as Record<string, unknown> | null;
+      if (raw === null || typeof raw !== "object" || raw.v !== 1) return null;
+      const { list, strict } = raw;
+      if (typeof strict !== "boolean" || !Array.isArray(list)) return null;
+      if (list.length > MAX_PREREQUISITES) return null;
+      if (!list.every((id): id is string => typeof id === "string"))
+        return null;
+      if (new Set(list).size !== list.length) return null;
+      return { list: [...list], strict };
+    } catch {
+      return null;
+    }
+  },
+});
+
+/**
+ * D-1: the restore host of a NEW list's editor (as `CorrectionRecoveryHost`). The editor is not open after an app-update reload, so the
+ * day's work looks for the copy the page before it left and opens the editor on it, once, restored and never saved (`useOpenOnRestore`). A
+ * screen that only looks is no editor: it shows nothing of the model (an open editor does).
+ */
+export function DependencyEditorRecoveryHost({
+  row,
+  idle,
+  onRestored,
+}: {
+  row: RowModel;
+  /** No editor of the day is open now (the host opens one only then). */
+  idle: boolean;
+  onRestored(): void;
+}) {
+  const env = useTasksEnv();
+  const key = keptKey(env.identity, dependencyEditor(row.id, null));
+  const look = useKeptRecovery(
+    key,
+    env.identity,
+    dependencyRecovery(row.id, null),
+    () => editorStart(null, null),
+    false,
+  );
+  useOpenOnRestore(look, key, idle, onRestored);
+  return null;
 }
 
 /** The days the editor can offer for one task: its saved days on this device, 100 at a time (the day picker's paging). */
@@ -983,12 +1090,14 @@ export function DependencyEditor({
   const submitted = replacing ? commandOf(replacing) : null;
   const read = state.read;
   const preview = read.kind === "ready" ? read.preview : null;
+  // D-1 (WEB-14a maintenance merge): recoverable around an app-update reload (Q4), for exactly this day and the set it replaces.
   const input = useKeptInput<EditorValue>(
     keptKey(
       env.identity,
-      `dependencies:${row.id}:${replacing?.local_id ?? "new"}`,
+      dependencyEditor(row.id, replacing?.local_id ?? null),
     ),
     env.identity,
+    // Spelt out as WEB-10c wrote it (its mutant MU-3018 anchors here); `editorStart` is the same rule for the restore hosts.
     () => ({
       list: Array.isArray(submitted?.prerequisites)
         ? (submitted.prerequisites as string[])
@@ -998,8 +1107,17 @@ export function DependencyEditor({
           ? submitted.strict
           : (preview?.strict ?? false),
     }),
-    { consumed: () => null },
+    {
+      consumed: () => null,
+      recover: dependencyRecovery(row.id, replacing?.local_id ?? null),
+    },
   );
+  // The restored editor's first field: the first chosen day's Remove, else the task picker (what "Discard instead" leaves).
+  const body = useRef<HTMLDivElement>(null);
+  const firstField = () =>
+    body.current?.querySelector<HTMLElement>(
+      "[data-editor-list] button, select",
+    );
   const [pickTask, setPickTask] = useState<string | null>(null);
   const [pickDay, setPickDay] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -1147,9 +1265,16 @@ export function DependencyEditor({
       }
     >
       <div
+        ref={body}
         className="flex flex-col gap-3"
         data-dependency-editor={block ?? "open"}
       >
+        {input.recovery ? (
+          <RecoveryNotice
+            recovery={input.recovery}
+            firstFieldRef={firstField}
+          />
+        ) : null}
         <p className="text-[13px] text-ink-1">{DEPENDENCY_COPY.editorNow}</p>
         {input.value.list.length === 0 ? (
           <p className="text-[13px] text-ink-2">

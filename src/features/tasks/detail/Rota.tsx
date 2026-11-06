@@ -9,15 +9,18 @@ import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { useSharingDefaults } from "../../../data";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { RotaConsentCommand, SetRotaCommand, TasksResult } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel } from "../format";
 import {
   completeKept,
+  type KeptRecovery,
   type KeptTicket,
   keptKey,
   useKeptInput,
+  useKeptRecovery,
 } from "../kept-input";
 import {
   dismissRota,
@@ -39,6 +42,7 @@ import type {
   TaskDefinition,
   TaskResult,
 } from "../model/contract";
+import { rotaFormContext } from "../model/recovery";
 import {
   addTo,
   labelOf,
@@ -51,6 +55,7 @@ import {
   setTurns,
 } from "../model/rota";
 import type { RowModel } from "../view";
+import { useOpenOnRestore } from "./restore-once";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const ROTA_COPY = {
@@ -101,6 +106,44 @@ export const ROTA_COPY = {
   nothingChanged: "Nothing has changed",
   you: "You",
 } as const;
+
+// ---- app-update recovery of the turn order (WEB-14a maintenance merge of accepted WEB-10c, D-1) ----------------------------------------
+interface OrderInput {
+  base: number;
+  order: string[];
+}
+
+/** The kept session of one task's turn order. */
+export const rotaEditor = (taskId: string) => `rota:${taskId}`;
+
+/**
+ * The turn order's recoverable input (Q4; the task editors' protocol, `kept-input.ts` revision 37): the order as the person left it and the
+ * roster version it was edited on (`base`, as the sharing editor keeps the version it was composed against), as explicitly versioned JSON
+ * under the task's context. Restoring never saves: Save sends `expected_version: base`, so an order edited on a version someone has since
+ * changed meets the server's conflict and its "Reload", exactly as it would have without the reload. A text this build cannot read
+ * restores nothing.
+ */
+export const rotaRecovery = (taskId: string): KeptRecovery<OrderInput> => ({
+  context: rotaFormContext(taskId),
+  encode: (value) =>
+    JSON.stringify({ v: 1, base: value.base, order: value.order }),
+  decode: (text) => {
+    try {
+      const raw = JSON.parse(text) as Record<string, unknown> | null;
+      if (raw === null || typeof raw !== "object" || raw.v !== 1) return null;
+      const { base, order } = raw;
+      if (typeof base !== "number" || !Number.isInteger(base) || base < 0)
+        return null;
+      if (!Array.isArray(order) || order.length > MAX_ROSTER) return null;
+      if (!order.every((id): id is string => typeof id === "string"))
+        return null;
+      if (new Set(order).size !== order.length) return null;
+      return { base, order: [...order] };
+    } catch {
+      return null;
+    }
+  },
+});
 
 // ---- page memory: one attempt per body (D-10c-9; WEB-10a `model/attempt.ts`), held and settled by `memory.ts` (review 8, R33) ----------
 /** The request on its way for each pending attempt: the same change asked again while it is pending joins it (never a second flight). */
@@ -301,6 +344,16 @@ export function RotaPanel({
   const flying = useRef(false);
   const [open, setOpen] = useState(false);
   const consentKey = `${row.taskId}:consent`;
+  // D-1 (WEB-14a maintenance merge): the dialog is not open after an app-update reload, so the panel looks for the order the page before
+  // it left and opens the dialog on it (restored, never saved), once the rota is read and only for whoever may still edit the order.
+  const orderEditor = keptKey(env.identity, rotaEditor(row.taskId));
+  const look = useKeptRecovery(
+    orderEditor,
+    env.identity,
+    rotaRecovery(row.taskId),
+    () => ({ base: 0, order: [] }),
+    false,
+  );
   // The consent and the order as the page holds them (review 8, R33): this panel shows and announces what was answered since it mounted,
   // whichever mount sent it; an earlier change's late answer settles nothing of a later one.
   const consentHold = useRotaHold(env.identity, consentKey);
@@ -340,6 +393,12 @@ export function RotaPanel({
   }, [consentHold.outcome, orderHold.outcome]);
   const turn = row.data.rota;
   const state = rota.kind === "ready" ? rota.value : null;
+  useOpenOnRestore(
+    look,
+    orderEditor,
+    !open && state !== null && canEditOrder,
+    () => setOpen(true),
+  );
   const consent = async (accepted: boolean, resend: boolean) => {
     if (state === null || flying.current) return;
     // Try again resends the change held uncertain NOW, or nothing (one answered meanwhile is not sent again as another change).
@@ -505,8 +564,9 @@ function RotaDialog({
   // The unsaved order is kept for the screen's logical visit (WEB-10a decisions 44 and 48), against the version it was edited on. A save
   // that consumed it closes the dialog only if it is the one the person is at now (`useKeptInput`: an earlier dialog's answer, the person
   // gone and back meanwhile, closes nothing; review 8, R33).
-  const input = useKeptInput<{ base: number; order: string[] }>(
-    keptKey(env.identity, `rota:${taskId}`),
+  // D-1 (WEB-14a maintenance merge): recoverable around an app-update reload (Q4), for exactly this task's order.
+  const input = useKeptInput<OrderInput>(
+    keptKey(env.identity, rotaEditor(taskId)),
     env.identity,
     () => ({ base: state.version, order: [...state.participants] }),
     {
@@ -514,8 +574,13 @@ function RotaDialog({
         onClose();
         return null;
       },
+      recover: rotaRecovery(taskId),
     },
   );
+  // The restored dialog's first field: its first control that can be used (a move or a remove, else an add).
+  const body = useRef<HTMLDivElement>(null);
+  const firstField = () =>
+    body.current?.querySelector<HTMLElement>("button:not([disabled])");
   // What the order's change was answered, as the page holds it, since this dialog opened (an edit or a reload puts it away).
   const hold = useRotaHold(env.identity, orderKey);
   const since = useRef(rotaSerial());
@@ -680,7 +745,13 @@ function RotaDialog({
         </div>
       }
     >
-      <div className="flex flex-col gap-4" data-rota-dialog="">
+      <div ref={body} className="flex flex-col gap-4" data-rota-dialog="">
+        {input.recovery ? (
+          <RecoveryNotice
+            recovery={input.recovery}
+            firstFieldRef={firstField}
+          />
+        ) : null}
         <div className="flex flex-col gap-2">
           {order.length === 0 ? (
             <p className="text-[13px] text-ink-2">{ROTA_COPY.noTurns}</p>

@@ -1,7 +1,7 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2987;
+export const EXPECTED_UNIT = 2997;
 export const EXPECTED_ENGINE = 328;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
@@ -87,3 +87,5 @@ export const EXPECTED_ENGINE = 328;
 // unit, 5 engine) plus WEB-10c (343 unit, 11 engine) plus WEB-19 (25 unit, 4 engine) = 2987 unit, 328 engine, counted from the merged catalogue.
 // WEB-14a's MU-3001..MU-3024 collided with WEB-10c's and become MU-4001..MU-4024 (`id-migrations.json`; patches and tests unchanged); no other
 // ID overlaps (MU-4001..MU-4024 against MU-4101..MU-4178 and MU-6101..MU-6154).
+// WEB-14a merge correction D-1 (6 November 2026; WEB-10c's dependency editor and turn order dialog recoverable around an app update): +10 unit
+// (MU-3801..MU-3810) = 2997 unit, 328 engine.

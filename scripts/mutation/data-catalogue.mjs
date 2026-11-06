@@ -32412,6 +32412,145 @@ export const UNIT = [
   },
   ...UNIT_WEB11B,
   ...UNIT_WEB19,
+  // WEB-14a maintenance merge of accepted main 74b0baca (WEB-10c, WEB-19), correction D-1 (Kieran: "Fix in WEB-14a merge"): WEB-10c's dependency
+  // editor and turn order dialog take part in app-update recovery (Q4), with their restore hosts and codecs.
+  {
+    id: "MU-3801",
+    title:
+      "WEB-14a D-1: the dependency editor declares no recovery codec (an open editor is no registered form: the update offers a plain Reload)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a new list: registered while open|Keep editing of a conflicted set: registered/,
+    patch: (t) =>
+      sub(
+        t,
+        "      recover: dependencyRecovery(row.id, replacing?.local_id ?? null),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3802",
+    title:
+      "WEB-14a D-1: the day's work never opens a new list's editor on the copy the page before an update left",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /a new list: registered while open/,
+    patch: (t) =>
+      sub(
+        t,
+        "  useOpenOnRestore(look, key, idle, onRestored);",
+        "  useOpenOnRestore(look, key, false, onRestored);",
+      ),
+  },
+  {
+    id: "MU-3803",
+    title:
+      "WEB-14a D-1: the conflict block never reopens Keep editing on the copy the page before an update left",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /Keep editing of a conflicted set/,
+    patch: (t) =>
+      sub(
+        t,
+        "  useOpenOnRestore(look, keepKey, draft !== null, () => {",
+        "  useOpenOnRestore(look, keepKey, false, () => {",
+      ),
+  },
+  {
+    id: "MU-3804",
+    title:
+      "WEB-14a D-1: the dependency editor's copy drops the strict rule (a restored list comes back advisory)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect:
+      /a new list: registered while open|dependency codec: the list and strict round-trip/,
+    patch: (t) =>
+      sub(
+        t,
+        "    JSON.stringify({ v: 1, list: value.list, strict: value.strict }),",
+        "    JSON.stringify({ v: 1, list: value.list, strict: false }),",
+      ),
+  },
+  {
+    id: "MU-3805",
+    title:
+      "WEB-14a D-1: the dependency editor restores a copy whose list names a day twice (a copy this build should not read)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /dependency codec: the list and strict round-trip/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (new Set(list).size !== list.length) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3806",
+    title:
+      "WEB-14a D-1: the turn order dialog declares no recovery codec (the order the panel restores comes back without its restored notice or Discard instead)",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect:
+      /registered while open \(Save and reload\), dirty once someone is added|the roster moved on while the page reloaded/,
+    patch: (t) => sub(t, "      recover: rotaRecovery(taskId),\n", ""),
+  },
+  {
+    id: "MU-3807",
+    title:
+      "WEB-14a D-1: the rota panel never opens the turn order dialog on the copy the page before an update left",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect:
+      /registered while open \(Save and reload\), dirty once someone is added|the roster moved on while the page reloaded/,
+    patch: (t) =>
+      sub(t, "    !open && state !== null && canEditOrder,\n", "    false,\n"),
+  },
+  {
+    id: "MU-3808",
+    title:
+      "WEB-14a D-1: a restored turn order loses the roster version it was edited on (Save would overwrite a newer order unseen)",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect:
+      /registered while open \(Save and reload\), dirty once someone is added|the roster moved on while the page reloaded|rota codec: the order and its roster version round-trip/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { base, order: [...order] };",
+        "      return { base: 0, order: [...order] };",
+      ),
+  },
+  {
+    id: "MU-3809",
+    title:
+      "WEB-14a D-1: the turn order restores a copy that names someone twice (a copy this build should not read)",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /rota codec: the order and its roster version round-trip/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (new Set(order).size !== order.length) return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3810",
+    title:
+      "WEB-14a D-1: a restore host opens its editor again on the same restored copy (Cancel after a restore reopens it, every time)",
+    file: "src/features/tasks/detail/restore-once.ts",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /Cancel after a restore closes/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!ready || restored === null || opened.has(restored)) return;",
+        "    if (!ready || restored === null) return;",
+      ),
+  },
 ];
 
 /**

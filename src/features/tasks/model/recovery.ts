@@ -11,6 +11,15 @@ export const newTaskFormContext = (formId: string) => `task-form:new:${formId}`;
 export const taskFormContext = (taskId: string) => `task-form:${taskId}`;
 export const correctionFormContext = (occurrenceId: string) =>
   `occurrence-correction:${occurrenceId}`;
+/**
+ * WEB-14a maintenance merge of WEB-10c (D-1): the dependency editor of one day, for a new list or for "Keep editing" of the conflicted
+ * `set_dependencies` it replaces (its local id), and the turn order of one task.
+ */
+export const dependencyFormContext = (
+  occurrenceId: string,
+  replacing: string | null,
+) => `dependency-editor:${occurrenceId}:${replacing ?? "new"}`;
+export const rotaFormContext = (taskId: string) => `rota-order:${taskId}`;
 
 export function taskFormRecoveryValues(
   state: TaskFormState,

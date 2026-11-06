@@ -393,14 +393,17 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
   opened (a look begun before it would take the session's start for input and only offer the copy); anything else is offered
   (`RecoveryNotice`). A copy the owner's codec cannot read is offered as it is, never restored in part, never removed.
 - **Owners adopted.** The task feature's kept-input owner (`kept-input.ts`: the new and edit task form `task-form:new` / `task-form:<id>`,
-  the preset picker's choice, the Record progress amount `record:<progress>`), the occurrence correction (`occurrence-correction:<id>`),
+  the preset picker's choice, the Record progress amount `record:<progress>`, and, since the maintenance merge of WEB-10c, the dependency
+  editor `dependency-editor:<occurrence>:<new|replaced set>` and the turn order `rota-order:<task>`), the occurrence correction
+  (`occurrence-correction:<id>`),
   the entry history's fix drafts (`entry-fix:<progress>`), the calendar Add, Link (label and timezone only) and Manage (settings edited)
   forms, the households' create and invite forms, the sharing policy editor (`sharing-policy:<id>`, with the version it was composed
   against) and each defaults layer form (`sharing-defaults:<layer>:<household|personal>:<kind>`). Component-state editors use
   `editor.ts` (`useRecoverableEditor`).
 - **Restore hosts.** A dialog or stage that is not open after a reload cannot look: the screen that opens it does (`useKeptRecovery` for
-  the new task's preset stage, `CorrectionRecoveryHost` and `PolicyEditorRecoveryHost` on the task detail, `useRecoveryHost` on the
-  calendar screen and its rows). A copy found is held for the editor (never submitted) and the editor is opened on it.
+  the new task's preset stage, `CorrectionRecoveryHost` and `PolicyEditorRecoveryHost` on the task detail, `DependencyEditorRecoveryHost`
+  in the day's work, the conflict block of a refused `set_dependencies` and the rota panel, `useRecoveryHost` on the calendar screen and
+  its rows). A copy found is held for the editor (never submitted) and the editor is opened on it.
 - **Departure, discard and submission.** A departure that drops an owner's input (the visit's end, Cancel, another day) discards its
   copies (`end`), so it never returns after a later reload; a session kept for a visit to the sync screens stays dirty and listed. A save
   takes the model's ticket in the same step as the feature's own ticket; only a durable success covers what it sent, an uncertain or
@@ -408,6 +411,28 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
 - **Not recovered.** Passwords and calendar connection secrets (Q4, Q22); the change-password form holds nothing else. Directory searches
   are presentation, not committed input. (Revision 37 left the sign-in and join username unwritten pending an owner decision; revision 38
   applied that decision; revision 39 takes its preservation branch instead, below.)
+
+**WEB-10c's editors (merge correction D-1, 6 November 2026; Kieran's decision "Fix in WEB-14a merge").** Accepted main `3f8fdf94` brought
+two kept-input editors that took no part in the protocol, so an accepted update would have reloaded over their input with a plain Reload
+(R40's class). Both now declare a codec on their `useKeptInput`, as the Record amount does, and so are registered while open (the update
+offers "Save and reload"), frozen while it is prepared, saved by it and restored into an untouched session:
+
+- **The dependency editor** ("Set what this waits for", `Dependencies.tsx`) keeps its chosen list and strict rule (`{ v: 1, list, strict }`),
+  per day and per conflicted set it replaces ("Keep editing"). A task or day picked in the selects but not yet added is not input (WEB-10c
+  keeps only the list; a visit to the sync screens does not keep the picks either). The day's work reopens a new list's editor on a copy
+  (`DependencyEditorRecoveryHost`); the conflict block, which holds the refused set, reopens "Keep editing" on it. The editor reads the
+  preview again when it opens, so a restored list is saved only on the answer of now, and only by the person.
+- **The turn order** (`Rota.tsx`) keeps the order and the roster version it was edited on (`{ v: 1, base, order }`, as the sharing editor
+  keeps the version it was composed against). The rota panel reopens the dialog on a copy once the rota is read and only for someone who may
+  still edit the order. Save sends `expected_version: base`, so an order edited on a roster someone has since changed meets the server's
+  conflict and its "Reload", never a silent overwrite.
+
+Cancel keeps WEB-10c's reviewed rule: what was typed stays with the screen's visit (it is not a discard), so a copy saved while the editor
+was open still reopens it after an update. Each host opens its editor ONCE per restored copy (`detail/restore-once.ts`): the restored
+session still holds input after a Cancel, and reopening on it would undo the person's Cancel; any later opening is the person's own. A
+text either codec cannot read is offered, never restored in part. Fixture evidence: `tests/features/tasks/web10c-editors-recovery.test.tsx`
+(the production coordinator's accepted update, its save and its one reload; the screens reopening each editor once; mutants
+MU-3801..MU-3810). Native-engine evidence of these two editors is still owed (`fixture.pwa-editors`).
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 
