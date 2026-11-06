@@ -1226,7 +1226,9 @@ fixture adaptation (`rootAloneAtDepthOne`, used by its `mount` and, since revisi
 itself, which also asserts that premise): the editor's depth-one read answers the root alone (the server state those cases assume) and the
 dialog's full read stays unavailable, so its cases keep exercising the ordered list as the fallback. Native (FIXTURE, Chromium, Firefox, WebKit):
 `fixture.tasks-18.spec.ts` E-G1..E-G5, E-G7, E-G9 (E-G6, an answer held across an account switch, is jsdom H-2: a switch remounts the detail).
-Released backend: `integration.tasks-18.spec.ts` I-18-G1..G9 in the `tasks` stack; two I-10C assertions of the ordered list now count the
+Released backend: `integration.tasks-18.spec.ts` I-18-G1..G9 in the `tasks` stack (revision 2, review 2's F-R6: the editor's Task picker reads
+the device's tasks once, when it opens, so I-18-G6 now always takes the order that once failed, the root on the device before A, B and C
+exist, then waits on G7b's applied-revision barrier and asserts the device holds every task it picks before opening the editor); two I-10C assertions of the ordered list now count the
 tree's items (labelled adaptations; same two days). Mutation: `scripts/mutation/catalogue-web18.mjs` (unit MU-7001..MU-7025, MU-7027..MU-7034
 and, revision 1, MU-7036..MU-7041; MU-7026 not created, identical to MU-3017; MU-7035 withdrawn; real engine MU-7101..MU-7103); WEB-10c's
 MU-3018 re-anchored.

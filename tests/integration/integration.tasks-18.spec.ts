@@ -409,6 +409,16 @@ const appliedRevision = (page: Page, account: string) =>
       []) as Array<{ applied_revision?: number | null }>;
     return rows[0]?.applied_revision ?? 0;
   }, account);
+/** Whether this page's store holds the task (the editor's Task picker reads these rows once, when it opens). */
+const cachedTask = (page: Page, account: string, taskId: string) =>
+  page.evaluate(
+    async ({ a, t }) => {
+      const rows = ((await window.__atlasData?.rows(a, "cache")) ??
+        []) as Array<{ id?: string }>;
+      return rows.some((x) => x.id === t);
+    },
+    { a: account, t: taskId },
+  );
 const offline = (page: Page) =>
   page.evaluate(() => {
     const w = window as unknown as { __offline?: boolean };
@@ -590,11 +600,31 @@ test.describe("I-18-G6: the editor from the authoritative list (A18-6)", () => {
   }) => {
     const { page, id } = await bootAs(context, main);
     const r = await makeTask(page, id, "I-18-G6 root");
+    // Review 2's F-R6 order, every run: the device holds R before A, B and C exist, so R's page alone says nothing about C.
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect
+      .poll(() => cachedTask(page, id.account_id, r.taskId), {
+        timeout: 30_000,
+        intervals: [250],
+      })
+      .toBe(true);
     const a = await makeTask(page, id, "I-18-G6 A");
     const b = await makeTask(page, id, "I-18-G6 B");
     const c = await makeTask(page, id, "I-18-G6 C");
-    await setDeps(page, id, r, [a, b]);
+    const revision = await setDeps(page, id, r, [a, b]);
     await page.evaluate(() => window.__atlasData?.retryOutbox());
+    // The barrier (as G7b): the applied revision has reached the helper's last change, so the device holds every task the picker offers.
+    await expect
+      .poll(
+        async () => {
+          await page.evaluate(() => window.__atlasData?.nudgeSync());
+          return appliedRevision(page, id.account_id);
+        },
+        { timeout: 60_000, intervals: [1_000] },
+      )
+      .toBeGreaterThanOrEqual(revision);
+    for (const t of [a, b, c])
+      expect(await cachedTask(page, id.account_id, t.taskId)).toBe(true);
     const { dialog } = await openEditor(page, r);
     await expect(
       page.locator(`[data-editor-item="${a.occurrenceId}"]`),
