@@ -135,11 +135,14 @@ function StatePill({ node }: { node: DependencyGraphNode }) {
 function DependencyMap({
   graph,
   index,
+  rootTitle,
   selected,
   onPick,
 }: {
   graph: DependencyGraph;
   index: GraphIndex;
+  /** This day's title as the rest of the dialog names it (the list's root item, the header's lines), so the two views agree. */
+  rootTitle: string;
   selected: string | null;
   onPick(id: string): void;
 }) {
@@ -208,7 +211,7 @@ function DependencyMap({
             }}
           >
             <span className="truncate text-[12.5px] font-medium text-ink-1">
-              {title}
+              {root ? rootTitle : title}
             </span>
             <span className="truncate text-[11px] text-ink-2">
               {root
@@ -837,6 +840,7 @@ export function DependencyGraphSection({
                   <DependencyMap
                     graph={graph}
                     index={index}
+                    rootTitle={rootTitle}
                     selected={shownSelected}
                     onPick={(id) => {
                       select(id);

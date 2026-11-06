@@ -437,6 +437,20 @@ export const UNIT_WEB18 = [
         '  const moved = value === undefined ? "" : String(value);',
       ),
   },
+  {
+    id: "MU-7034",
+    title:
+      "MU-7034: WEB-18 D-18-3/D-18-8a: the map names this day by the answer's title while the list uses the dialog's (two names for one day)",
+    file: VIEW,
+    tests: VIEW_TESTS,
+    expect: /S-G1b/,
+    patch: (t) =>
+      sub(
+        t,
+        "              {root ? rootTitle : title}\n",
+        "              {title}\n",
+      ),
+  },
 ];
 
 export const ENGINE_WEB18 = [

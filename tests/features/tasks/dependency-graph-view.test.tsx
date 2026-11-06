@@ -259,6 +259,24 @@ describe("S-G1..S-G3: the tree and the map agree with the answer's edges and sta
   });
 });
 
+describe("S-G1b: one name for this day in both views", () => {
+  test("the map's box for this day and the list's root item both use the day's title as the dialog shows it, whatever the answer's own title", async () => {
+    // The answer's task title for the root ("Serve dinner", from the spec) differs from the day's cached title.
+    const { graph } = await openDialog({
+      spec: sharedSpec(),
+      title: "Hang the washing",
+    });
+    const box = document.querySelector(
+      `[data-map-node="${graph.root_id}"]`,
+    ) as HTMLElement;
+    expect(box).toHaveTextContent("Hang the washing");
+    expect(box).not.toHaveTextContent("Serve dinner");
+    expect(nodeItem(graph.root_id)).toHaveTextContent(
+      `${GRAPH_COPY.thisTask}: Hang the washing`,
+    );
+  });
+});
+
 describe("S-G4 / S-G7: empty, and the graph and the preview disagreeing", () => {
   test("S-G4 the root alone: 'Nothing needs doing first', no map; the modes still follow the preview (S-G7)", async () => {
     await openDialog({ spec: emptySpec() });
