@@ -23,6 +23,26 @@
 // catch a Rename mutant): R1 frozen (Rename and Invite send nothing, typing and a directory choice change nothing), R2 I7 (Rename,
 // Invite), O1 (Rename's success clears), R3 (each call site's ticket and the shared `completeTicket`), R4 (the base forgotten by
 // Escape and by "Discard instead"), and the Try again path as decision D-1 / D-12b-18 leaves it. MU-6249 stays uncatalogued.
+//
+// WEB-12b revision 3 (Review 4 F-R4-1, the same family; second design assessment of 7 November 2026, Branch B′, test-only): +31 unit
+// (MU-6269..MU-6299). Decision D-1 is decided (Kieran, 7 November 2026, WEB12B-D1-ANSWER-20261107: D-12b-18 as written, no product
+// change), so MU-6266..MU-6268 pin the decided behaviour. Two groups:
+//  - CELLS (MU-6269..MU-6282): one mutant per cell of `tests/features/sharing/households-submission-cells.test.tsx` whose `expect`
+//    names that cell's id (a cell common to the inputs is named per input, and the run shows each input's cell failing): Review 4's five
+//    (a failed lookup, inviting yourself, a restored rename typed into, Invite's "Discard instead", the page's Try again after Cancel),
+//    the assessment's eight (a choice from an empty field, Rename bound for a non-manager, `closed` counted durable per input, a base
+//    forgotten on any refusal, another dialog's Try again closing Rename, a refused Try again completing the form), and MU-6282, the
+//    fix of N-1 applied without its decision (decision D-2 is open: the cell pins the product as it is, so a fix must change it).
+//  - SITES (MU-6283..MU-6299): every rule-bearing writer site of `tests/static/household-draft-writers.test.ts` that no catalogued
+//    mutant changed (Review 4 item 2), plus `dropped()`'s form-shown branch (an exit). That inventory checks each link statically: the
+//    mutant exists, its patch changes the registered line, its `tests` hold the pinned file and its `expect` names the pinned test.
+//  - CLASSES (MU-6307..MU-6318; MU-62xx is full, so the unit IDs go on after WEB-12b's six real-engine IDs MU-6301..MU-6306): the
+//    assessment's I-11, one mutant per answer class at each of the three ticket completions (`completeTicket(ticket, result?.ok ===
+//    true)` in New household and Rename, `invite()`'s `return result?.ok === true`), widening "durable" by exactly one class:
+//    uncertain, a definite refusal, offline, not_sent (`closed` is MU-6276..MU-6278).
+//  - SWEEP (MU-6319..MU-6332): the second design assessment's operator sweep (WP-5, qualification evidence in the author's report) left
+//    reachable survivors; each got a cell and one of its survivors is catalogued here (refusal kinds per input, the three dialogs' refused
+//    presses, a restored base kept on `closed`, a Try again answered uncertain, a detail action's Try again, the session's begin and end).
 import { sub } from "./data-catalogue.mjs";
 
 const D = "src/features/sharing/households";
@@ -36,6 +56,11 @@ const RECOVERY = "tests/features/sharing/households-recovery.test.tsx";
 const OWNER_DISCARD = "tests/features/recovery-owner-discard.test.tsx";
 // WEB-12b revision 2 (Review 3 F-R3-1): M-1's submission rules, one test per rule per household input.
 const RULES = "tests/features/sharing/households-submission-rules.test.tsx";
+// WEB-12b revision 3 (Review 4 F-R4-1): the cells of those rules (rule × input × class or path), each title beginning with its cell id.
+const CELLS = "tests/features/sharing/households-submission-cells.test.tsx";
+/** A ticket the model never gave (a submission the freeze should have refused): the same shape as MU-6252's. */
+const FORGED_TICKET =
+  '({ current: () => true, succeeded: async () => "discarded", failed: () => undefined })';
 
 export const UNIT_WEB12B = [
   {
@@ -954,6 +979,799 @@ export const UNIT_WEB12B = [
         t,
         "  else if (target !== null && earlier.surface === `invite:",
         "  else if (target !== null && earlier.surface === `invite-never:",
+      ),
+  },
+  // ---- WEB-12b revision 3 (Review 4 F-R4-1; second design assessment, Branch B′): CELLS, one mutant per cell ----
+  {
+    id: "MU-6269",
+    title:
+      "WEB-12b revision 3 (F-R4-1 #1, R3): Invite counts a lookup that FAILED as a durable success (the username is covered and lost by an update)",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R3\.invite\.lookup-failed:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    );\n    return false;\n  }\n  if (match.id === ctx.accountId) {",
+        "    );\n    return !found.ok;\n  }\n  if (match.id === ctx.accountId) {",
+      ),
+  },
+  {
+    id: "MU-6270",
+    title:
+      "WEB-12b revision 3 (F-R4-1 #2, R3): Invite counts inviting yourself as a durable success (the username is covered and lost by an update)",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R3\.invite\.self:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.note(surface, { message: copy.INVITE_SELF });\n    return false;\n",
+        "    memory.note(surface, { message: copy.INVITE_SELF });\n    return true;\n",
+      ),
+  },
+  {
+    id: "MU-6271",
+    title:
+      "WEB-12b revision 3 (F-R4-1 #3, R4): typing into a restored rename gives the model the household's version of now, not the version it was composed against",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R4\.rename\.typed-after-restore(-reopened)?:/,
+    patch: (t) =>
+      sub(
+        t,
+        "                    base: memory.bases.get(key) ?? household.version,\n",
+        "                    base: household.version,\n",
+      ),
+  },
+  {
+    id: "MU-6272",
+    title:
+      'WEB-12b revision 3 (F-R4-1 #4, W4): Invite\'s "Discard instead" does not reset the field (the restored username stays, still dirty)',
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [CELLS],
+    expect: /W4\.invite\.discard-instead:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (draftKey !== null) memory.recovered(draftKey, null);\n",
+        "      void 0;\n",
+      ),
+  },
+  {
+    id: "MU-6273",
+    title:
+      "WEB-12b revision 3 (F-R4-1 #5, W7): page memory dropping a draft no form shows does not end its recovery session (a Try again on the page after Cancel leaves the input dirty)",
+    file: `${D}/form-recovery.ts`,
+    tests: [CELLS],
+    expect:
+      /W7\.create\.page-after-cancel:|W7\.rename\.page-after-cancel:|W7\.invite\.page-after-close:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    linked.active = false;\n    void linked.model.end();\n",
+        "    linked.active = false;\n",
+      ),
+  },
+  {
+    id: "MU-6274",
+    title:
+      "WEB-12b revision 3 (assessment E-13, W2): a session that begins over a draft page memory already keeps is not given it (an account chosen from an empty field is not dirty)",
+    file: `${D}/form-recovery.ts`,
+    tests: [CELLS],
+    expect: /W2\.invite\.choice-from-empty-field:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (now !== start) linked.model.edit(now);\n",
+        "        void now;\n",
+      ),
+  },
+  {
+    id: "MU-6275",
+    title:
+      "WEB-12b revision 3 (assessment E-27, D): Rename's model is bound for a household you do not manage (a copy is restored into a form nobody sees)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /D\.rename\.non-manager-not-bound:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    shown: household !== null && manager,\n",
+        "    shown: household !== null,\n",
+      ),
+  },
+  {
+    id: "MU-6276",
+    title:
+      "WEB-12b revision 3 (assessment E-28, R3): New household counts an answer of kind closed (nothing sent) as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.create\.closed:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeTicket(ticket, result?.ok === true);\n      if (result?.ok) {\n        if (unchanged)",
+        '      completeTicket(ticket, result !== null && (result.ok || result.kind === "closed"));\n      if (result?.ok) {\n        if (unchanged)',
+      ),
+  },
+  {
+    id: "MU-6277",
+    title:
+      "WEB-12b revision 3 (assessment E-29, R3): Rename counts an answer of kind closed (nothing sent) as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.rename\.closed:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            completeTicket(ticket, result?.ok === true);\n",
+        '            completeTicket(ticket, result !== null && (result.ok || result.kind === "closed"));\n',
+      ),
+  },
+  {
+    id: "MU-6278",
+    title:
+      "WEB-12b revision 3 (assessment E-30, R3): an invitation counts an answer of kind closed (nothing sent) as a durable success",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R3\.invite\.closed:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return result?.ok === true;\n}",
+        '  return result !== null && (result.ok || result.kind === "closed");\n}',
+      ),
+  },
+  {
+    id: "MU-6279",
+    title:
+      "WEB-12b revision 3 (assessment E-04, R4): Rename forgets a restored base on ANY answer that is not a success, not only a conflict (the next Save is not guarded by it)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R4\.rename\.keep-on-refusal:/,
+    patch: (t) =>
+      sub(
+        t,
+        '            } else if (result !== null && result.kind === "conflict")\n',
+        "            } else if (result !== null)\n",
+      ),
+  },
+  {
+    id: "MU-6280",
+    title:
+      "WEB-12b revision 3 (assessment E-05, W7): the Rename dialog closes when its banner's Try again completes ANOTHER surface's lost change (an invitation)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /W7\.invite\.retried-in-rename-dialog:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            if (completed.surface === `rename:",
+        "            if (completed.surface !== `rename-never:",
+      ),
+  },
+  {
+    id: "MU-6281",
+    title:
+      "WEB-12b revision 3 (assessment E-06, W7): a Try again that was REFUSED still completes the form it came from (the input is dropped, a create shows the household)",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect:
+      /W7\.create\.refused-completes-nothing:|W7\.rename\.refused-completes-nothing:|W7\.invite\.refused-completes-nothing:|W7\.create\.try-again-not-sent:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!result?.ok) return null;\n  const { memory } = ctx;\n",
+        "  const { memory } = ctx;\n",
+      ),
+  },
+  {
+    id: "MU-6282",
+    title:
+      "WEB-12b revision 3 (assessment N-1, decision D-2 open): Try again refused as a conflict forgets a restored rename's base (the N-1 fix applied without its decision: the pinned cell must change with it)",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R4\.rename\.retry-conflict-keeps-stale-base:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!result?.ok) return null;\n  const { memory } = ctx;\n",
+        '  if (!result?.ok) {\n    if (result?.kind === "conflict" && earlier.target !== null)\n      ctx.memory.bases.delete(formContext.rename(earlier.target));\n    return null;\n  }\n  const { memory } = ctx;\n',
+      ),
+  },
+  // ---- WEB-12b revision 3 (Review 4 F-R4-1 item 2): SITES, every rule-bearing writer site no catalogued mutant changed ----
+  {
+    id: "MU-6283",
+    title:
+      "WEB-12b revision 3 (site W3): a restored invitation copy is never put into page memory (the field stays empty after the update's reload)",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [RECOVERY],
+    expect:
+      /M-1 Invite: the username typed in the household's Invitations is saved by the accepted update and restored/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (draftKey !== null) memory.recovered(draftKey, value);\n",
+        "      void value;\n",
+      ),
+  },
+  {
+    id: "MU-6284",
+    title:
+      "WEB-12b revision 3 (site W2): the account chosen in the directory lookup is given to the model but never put into page memory (the field keeps what it had)",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [CELLS],
+    expect: /W2\.invite\.choice-from-empty-field:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            memory.draft(draftKey, entry.username);\n",
+        "            void entry;\n",
+      ),
+  },
+  {
+    id: "MU-6285",
+    title:
+      "WEB-12b revision 3 (site W1): an invitation's typing is given to the model but never put into page memory (the field shows nothing typed)",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [RULES],
+    expect:
+      /R1 Invite: while an update reload is being prepared typing changes nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "                            memory.draft(draftKey, event.target.value);\n",
+        "                            void event;\n",
+      ),
+  },
+  {
+    id: "MU-6286",
+    title:
+      "WEB-12b revision 3 (site W3): a restored New household copy is never put into page memory (the dialog stays empty after the update's reload)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY],
+    expect:
+      /M-1 New household: registered while open, dirty once typed; the accepted update saves the name and reloads once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    restored: (value) => memory.recovered(key, value),\n",
+        "    restored: () => undefined,\n",
+      ),
+  },
+  {
+    id: "MU-6287",
+    title:
+      'WEB-12b revision 3 (site W4): New household\'s "Discard instead" does not reset the name (the restored name stays, still dirty)',
+    file: `${D}/NameDialogs.tsx`,
+    tests: [OWNER_DISCARD],
+    expect: /CONTROL create: with no newer input the discard clears the name/,
+    patch: (t) =>
+      sub(
+        t,
+        "    reset: () => memory.recovered(key, null),\n  });\n  const [asked",
+        "    reset: () => undefined,\n  });\n  const [asked",
+      ),
+  },
+  {
+    id: "MU-6288",
+    title:
+      "WEB-12b revision 3 (site W3): a restored rename loses the version it was composed against (it is saved under the household's version of now)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R4 Rename CONTROL/,
+    patch: (t) =>
+      sub(
+        t,
+        "    restored: (value) => memory.recovered(key, value.text, value.base),\n",
+        "    restored: (value) => memory.recovered(key, value.text),\n",
+      ),
+  },
+  {
+    id: "MU-6289",
+    title:
+      'WEB-12b revision 3 (site W4): Rename\'s "Discard instead" does not reset the name or its base',
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R4 Rename Discard instead/,
+    patch: (t) =>
+      sub(
+        t,
+        "    reset: () => memory.recovered(key, null),\n  });\n  const reason =",
+        "    reset: () => undefined,\n  });\n  const reason =",
+      ),
+  },
+  {
+    id: "MU-6290",
+    title:
+      "WEB-12b revision 3 (site W8): Rename's Escape keeps the draft (and its base): a fresh rename opens on the restored name",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R4 Rename Escape/,
+    patch: (t) =>
+      sub(t, "      onDiscard={() => memory.draft(key, null)}\n", ""),
+  },
+  {
+    id: "MU-6291",
+    title:
+      "WEB-12b revision 3 (site R): Save name ignores a restored rename's base (it is sent under the household's version of now: an overwrite)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R4 Rename CONTROL/,
+    patch: (t) =>
+      sub(
+        t,
+        "          const base = memory.bases.get(key);\n",
+        "          const base: number | undefined = undefined;\n",
+      ),
+  },
+  {
+    id: "MU-6292",
+    title:
+      "WEB-12b revision 3 (site T): the hook hands out a ticket even while an update reload is being prepared (every household submission sends while frozen)",
+    file: `${D}/form-recovery.ts`,
+    tests: [RULES],
+    expect:
+      /R1 Rename: while an update reload is being prepared Save name sends nothing|R1 Invite: while an update reload is being prepared Invite looks nothing up/,
+    patch: (t) =>
+      sub(
+        t,
+        "    submitting: () => model.submitting(),\n",
+        `    submitting: () => model.submitting() ?? ${FORGED_TICKET},\n`,
+      ),
+  },
+  {
+    id: "MU-6293",
+    title:
+      "WEB-12b revision 3 (site P): page memory's draft(key, null) keeps the text (only the base and the model's session go)",
+    file: `${D}/memory.ts`,
+    tests: [RULES],
+    expect: /O1 New household|O1 Rename|O1 Invite/,
+    patch: (t) =>
+      sub(
+        t,
+        "      this.drafts.delete(key);\n      this.bases.delete(key);\n",
+        "      this.bases.delete(key);\n",
+      ),
+  },
+  {
+    id: "MU-6294",
+    title:
+      "WEB-12b revision 3 (site P): page memory dropping a draft no longer tells its recovery model (the model stays dirty, its copy stays)",
+    file: `${D}/memory.ts`,
+    tests: [CELLS, RECOVERY],
+    expect:
+      /W7\.create\.page-after-cancel:|W7\.rename\.page-after-cancel:|W7\.invite\.page-after-close:|M-1 Rename: Escape \(the dialog's discard\) drops the draft/,
+    patch: (t) => sub(t, "      dropped(this.identity, key);\n", ""),
+  },
+  {
+    id: "MU-6295",
+    title:
+      "WEB-12b revision 3 (site P): page memory's draft(key, text) stores nothing (every typed input is lost from page memory)",
+    file: `${D}/memory.ts`,
+    tests: [RULES],
+    expect:
+      /R1 Rename: while an update reload is being prepared typing changes nothing|R1 Invite: while an update reload is being prepared typing changes nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    } else this.drafts.set(key, value);\n",
+        "    } else void value;\n",
+      ),
+  },
+  {
+    id: "MU-6296",
+    title:
+      'WEB-12b revision 3 (site P): page memory\'s recovered(key, null) keeps the text ("Discard instead" leaves the restored input)',
+    file: `${D}/memory.ts`,
+    tests: [CELLS],
+    expect: /W4\.invite\.discard-instead:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (value === null) this.drafts.delete(key);\n",
+        "    if (value === null) undefined;\n",
+      ),
+  },
+  {
+    id: "MU-6297",
+    title:
+      "WEB-12b revision 3 (site P): page memory's recovered(key, text) stores nothing (a restored copy never shows)",
+    file: `${D}/memory.ts`,
+    tests: [RULES],
+    expect: /R4 Rename CONTROL/,
+    patch: (t) =>
+      sub(
+        t,
+        "    else this.drafts.set(key, value);\n    if (base === null)",
+        "    else undefined;\n    if (base === null)",
+      ),
+  },
+  {
+    id: "MU-6298",
+    title:
+      "WEB-12b revision 3 (site P): page memory's recovered(key, text, base) keeps no base (a restored rename is saved under the household's version of now)",
+    file: `${D}/memory.ts`,
+    tests: [RULES],
+    expect: /R4 Rename CONTROL/,
+    patch: (t) =>
+      sub(t, "    else this.bases.set(key, base);\n", "    else void base;\n"),
+  },
+  {
+    id: "MU-6299",
+    title:
+      "WEB-12b revision 3 (exit of dropped(), form shown): page memory dropping the draft a form shows does not discard the model's copies (Rename's Escape leaves a copy for an update)",
+    file: `${D}/form-recovery.ts`,
+    tests: [RECOVERY],
+    expect: /M-1 Rename: Escape \(the dialog's discard\) drops the draft/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (linked.shown !== null) void linked.model.discard(linked.shown.start());\n",
+        "  if (linked.shown !== null) void linked.shown;\n",
+      ),
+  },
+  // ---- WEB-12b revision 3 (assessment I-11): CLASSES, one mutant per answer class at each ticket completion ----
+  {
+    id: "MU-6307",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class uncertain): New household counts an uncertain answer as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R3 New household, uncertain/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeTicket(ticket, result?.ok === true);\n      if (result?.ok) {\n        if (unchanged)",
+        '      completeTicket(ticket, (result?.ok === true || result?.kind === "uncertain"));\n      if (result?.ok) {\n        if (unchanged)',
+      ),
+  },
+  {
+    id: "MU-6308",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class refused): New household counts a definite refusal as a durable success (capacity)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R3 New household, a definite refusal/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeTicket(ticket, result?.ok === true);\n      if (result?.ok) {\n        if (unchanged)",
+        '      completeTicket(ticket, (result?.ok === true || result?.kind === "capacity"));\n      if (result?.ok) {\n        if (unchanged)',
+      ),
+  },
+  {
+    id: "MU-6309",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class offline): New household counts an answer of kind offline (nothing sent) as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.create\.offline:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeTicket(ticket, result?.ok === true);\n      if (result?.ok) {\n        if (unchanged)",
+        '      completeTicket(ticket, (result?.ok === true || result?.kind === "offline"));\n      if (result?.ok) {\n        if (unchanged)',
+      ),
+  },
+  {
+    id: "MU-6310",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class not-sent): New household counts not_sent after the quiet retries (held back) as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.create\.not-sent:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeTicket(ticket, result?.ok === true);\n      if (result?.ok) {\n        if (unchanged)",
+        '      completeTicket(ticket, (result?.ok === true || result?.kind === "not_sent"));\n      if (result?.ok) {\n        if (unchanged)',
+      ),
+  },
+  {
+    id: "MU-6311",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class uncertain): Rename counts an uncertain answer as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R3 Rename, uncertain/,
+    patch: (t) =>
+      sub(
+        t,
+        "            completeTicket(ticket, result?.ok === true);\n",
+        '            completeTicket(ticket, (result?.ok === true || result?.kind === "uncertain"));\n',
+      ),
+  },
+  {
+    id: "MU-6312",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class refused): Rename counts a definite refusal as a durable success (conflict)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RULES],
+    expect: /R3 Rename, a definite refusal/,
+    patch: (t) =>
+      sub(
+        t,
+        "            completeTicket(ticket, result?.ok === true);\n",
+        '            completeTicket(ticket, (result?.ok === true || result?.kind === "conflict"));\n',
+      ),
+  },
+  {
+    id: "MU-6313",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class offline): Rename counts an answer of kind offline (nothing sent) as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.rename\.offline:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            completeTicket(ticket, result?.ok === true);\n",
+        '            completeTicket(ticket, (result?.ok === true || result?.kind === "offline"));\n',
+      ),
+  },
+  {
+    id: "MU-6314",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class not-sent): Rename counts not_sent after the quiet retries (held back) as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.rename\.not-sent:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            completeTicket(ticket, result?.ok === true);\n",
+        '            completeTicket(ticket, (result?.ok === true || result?.kind === "not_sent"));\n',
+      ),
+  },
+  {
+    id: "MU-6315",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class uncertain): an invitation counts an uncertain answer as a durable success",
+    file: `${D}/operations.ts`,
+    tests: [RULES],
+    expect: /R3 Invite, uncertain/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return result?.ok === true;\n}",
+        '  return (result?.ok === true || result?.kind === "uncertain");\n}',
+      ),
+  },
+  {
+    id: "MU-6316",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class refused): an invitation counts a definite refusal as a durable success (capacity)",
+    file: `${D}/operations.ts`,
+    tests: [RULES],
+    expect: /R3 Invite, a definite refusal/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return result?.ok === true;\n}",
+        '  return (result?.ok === true || result?.kind === "capacity");\n}',
+      ),
+  },
+  {
+    id: "MU-6317",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class offline): an invitation counts an answer of kind offline (nothing sent) as a durable success",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R3\.invite\.offline:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return result?.ok === true;\n}",
+        '  return (result?.ok === true || result?.kind === "offline");\n}',
+      ),
+  },
+  {
+    id: "MU-6318",
+    title:
+      "WEB-12b revision 3 (assessment I-11, R3 class not-sent): an invitation counts not_sent after the quiet retries (held back) as a durable success",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R3\.invite\.not-sent:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return result?.ok === true;\n}",
+        '  return (result?.ok === true || result?.kind === "not_sent");\n}',
+      ),
+  },
+  // ---- WEB-12b revision 3 (the operator sweep's reachable survivors, WP-5): one mutant per cell written for them ----
+  {
+    id: "MU-6319",
+    title:
+      "WEB-12b revision 3 (sweep W, R3 refusal kinds): New household counts a forbidden refusal as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.create\.refused-other-kinds:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeTicket(ticket, result?.ok === true);\n      if (result?.ok) {\n        if (unchanged)",
+        '      completeTicket(ticket, result?.ok === true || result?.kind === "forbidden");\n      if (result?.ok) {\n        if (unchanged)',
+      ),
+  },
+  {
+    id: "MU-6320",
+    title:
+      "WEB-12b revision 3 (sweep W, R3 refusal kinds): Rename counts a forbidden refusal as a durable success",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R3\.rename\.refused-other-kinds:/,
+    patch: (t) =>
+      sub(
+        t,
+        "            completeTicket(ticket, result?.ok === true);\n",
+        '            completeTicket(ticket, result?.ok === true || result?.kind === "forbidden");\n',
+      ),
+  },
+  {
+    id: "MU-6321",
+    title:
+      "WEB-12b revision 3 (sweep W, R3 refusal kinds): an invitation counts a changed-elsewhere refusal as a durable success",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /R3\.invite\.refused-other-kinds:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return result?.ok === true;\n}",
+        '  return result?.ok === true || result?.kind === "conflict";\n}',
+      ),
+  },
+  {
+    id: "MU-6322",
+    title:
+      "WEB-12b revision 3 (sweep G): New household's form, submitted while Create is refused (no name), creates anyway",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /G\.create\.refused-press:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (reason !== null) return;\n    if (duplicate !== null && asked",
+        "    if (duplicate !== null && asked",
+      ),
+  },
+  {
+    id: "MU-6323",
+    title:
+      "WEB-12b revision 3 (sweep C, drop an operand): Rename's form, submitted while Save name is refused (the household's own name), sends anyway",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /G\.rename\.refused-press:/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (reason !== null || household === null || !manager) return;\n",
+        "          if (household === null || !manager) return;\n",
+      ),
+  },
+  {
+    id: "MU-6324",
+    title:
+      "WEB-12b revision 3 (sweep C, drop an operand): the invitation form, submitted with no username, looks up an empty username",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [CELLS],
+    expect: /G\.invite\.empty-press:/,
+    patch: (t) =>
+      sub(
+        t,
+        '                      if (blocked !== null || name === "") return;\n',
+        "                      if (blocked !== null) return;\n",
+      ),
+  },
+  {
+    id: "MU-6325",
+    title:
+      "WEB-12b revision 3 (sweep W, R4): Rename forgets a restored base when its Save is answered closed (nothing sent)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [CELLS],
+    expect: /R4\.rename\.keep-when-not-sent:/,
+    patch: (t) =>
+      sub(
+        t,
+        '            } else if (result !== null && result.kind === "conflict")\n',
+        '            } else if (result !== null && (result.kind === "conflict" || result.kind === "closed"))\n',
+      ),
+  },
+  {
+    id: "MU-6326",
+    title:
+      "WEB-12b revision 3 (sweep W, W7): a Try again answered uncertain completes the form it came from",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /W7\.create\.try-again-other-answers:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!result?.ok) return null;\n  const { memory } = ctx;\n",
+        '  if (!result?.ok && result?.kind !== "uncertain") return null;\n  const { memory } = ctx;\n',
+      ),
+  },
+  {
+    id: "MU-6327",
+    title:
+      "WEB-12b revision 3 (sweep C, W7): a successful Try again of a detail action (a member promoted) forgets the household's invitation draft",
+    file: `${D}/operations.ts`,
+    tests: [CELLS],
+    expect: /W7\.invite\.detail-action-keeps-draft:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  else if (target !== null && earlier.surface === `invite:",
+        "  else if (target !== null || earlier.surface === `invite:",
+      ),
+  },
+  {
+    id: "MU-6328",
+    title:
+      "WEB-12b revision 3 (sweep C, exit of dropped()): page memory dropping the draft a form still shows ENDS the session instead of discarding to its start (typing after a successful invitation is not saved)",
+    file: `${D}/form-recovery.ts`,
+    tests: [CELLS],
+    expect: /O1\.invite\.typed-after-success:/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (linked.shown !== null) void linked.model.discard(linked.shown.start());\n  else {",
+        "  if (linked.shown === undefined) void linked.model.discard(linked.shown.start());\n  else {",
+      ),
+  },
+  {
+    id: "MU-6329",
+    title:
+      "WEB-12b revision 3 (sweep S, W1): a session is never begun from what the form shows untouched (Rename's start stays empty: its own name typed back is kept as input)",
+    file: `${D}/form-recovery.ts`,
+    tests: [CELLS],
+    expect: /W1\.rename\.typed-back-to-start:/,
+    patch: (t) =>
+      sub(t, "      linked.model.begin(start);\n", "      void start;\n"),
+  },
+  {
+    id: "MU-6330",
+    title:
+      "WEB-12b revision 3 (sweep C, W1): a form closed with nothing kept never ends its session (opened again, Rename resumes the old start)",
+    file: `${D}/form-recovery.ts`,
+    tests: [CELLS],
+    expect: /W1\.rename\.reopened-after-rename-elsewhere:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.drafts.has(draftKey)) return;\n      linked.leaving = setTimeout(",
+        "      if (draftKey !== null) return;\n      linked.leaving = setTimeout(",
+      ),
+  },
+  {
+    id: "MU-6331",
+    title:
+      "WEB-12b revision 3 (sweep S, W7): page memory dropping a draft no form shows ends the model's session but keeps it marked active (the Rename dialog opened again resumes the ended session and its old start: the landed name typed back stays a copy)",
+    file: `${D}/form-recovery.ts`,
+    tests: [CELLS],
+    expect: /W7\.rename\.page-after-cancel:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    linked.active = false;\n    void linked.model.end();\n",
+        "    void linked.model.end();\n",
+      ),
+  },
+  {
+    id: "MU-6332",
+    title:
+      "WEB-12b revision 3 (sweep C, drop an operand, D): the invitation form's model is bound for a household you do not manage (a copy is restored into a form nobody sees)",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [CELLS],
+    expect: /D\.invite\.non-manager-not-bound:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    shown: draftKey !== null && household !== null && manager && !lookupOpen,\n",
+        "    shown: draftKey !== null && household !== null && !lookupOpen,\n",
       ),
   },
 ];

@@ -486,31 +486,65 @@ key, for the displayed identity only.
   D-12b-18 is written: it forgets the field's text even when the person typed a different name or username after the lost attempt (that
   text is not saved by a later update). Whether a successful Try again should keep such newer text (I7 on the retry path), and whether a
   Try again and Rename's Escape should be refused while an update reload is prepared (the latent DA-2 of the design assessment of
-  7 November 2026: no product path reaches it while the dialogs are modal), is decision **D-1**, reported to the coordinator and not yet
-  taken; the tests below pin the behaviour as written, so a change of that decision changes them visibly.
+  7 November 2026: no product path reaches it while the dialogs are modal), was decision **D-1**: Kieran decided on 7 November 2026
+  (`WEB12B-D1-ANSWER-20261107`, `approval/web12b-d1-answer-20261107.json` in the orchestrator) to keep the behaviour as written, with no
+  product change in WEB-12b; keeping the newer text, together with DA-2, is recorded for a follow-up card. The tests below pin the decided
+  behaviour, so a later change of it changes them visibly.
 - The household dialogs are modal, so while one is open the update banner behind it is inert: a person closes the dialog first (the draft
   stays), or another tab's update asks the page to save (the peer flush).
 
-**The rules and their tests, per input** (WEB-12b revision 2, Review 3 F-R3-1; the same map is machine-checked, with every writer of the
-drafts, bases and tickets, by `tests/static/household-draft-writers.test.ts`). "Rules" is
-`tests/features/sharing/households-submission-rules.test.tsx` (each title begins with the rule and the input), "M-1" is
-`households-recovery.test.tsx`:
+**The rules, cell by cell** (WEB-12b revisions 2 and 3, Reviews 3 and 4: F-R3-1, F-R4-1; the second design assessment of 7 November 2026,
+Branch B′). A cell is one rule for one input under one answer class, event or path. `tests/static/household-draft-writers.test.ts`
+machine-checks the whole table together with every WRITER of the drafts, bases and tickets (each tied to the catalogued mutants whose patch
+changes its line, or given a reason from a closed set) and every decision EXIT of `run`, `sendAttempt`, `retry`, `invite`, `dropped` and
+`completeTicket` (each tied to its cells, or given a reason): each cell names its test and the catalogued mutants whose `expect` names it,
+and a mutant of one input's cell names no other input's cell of that rule. A title there is the naming check only; that a test FAILS
+when its mutant is applied is the qualification run (`qmut`, every mutant below with its control). "Rules" is
+`households-submission-rules.test.tsx`, "Cells" `households-submission-cells.test.tsx` (each title begins with its cell id), "M-1"
+`households-recovery.test.tsx`, "Owner" `recovery-owner-discard.test.tsx`, "Page" and "Invitations" the household page and invitations
+suites:
 
 | Rule | New household | Rename | Invitation |
 | --- | --- | --- | --- |
-| R1 frozen: typing (or a directory choice) changes nothing, the press sends (and looks up) nothing | M-1 "while an update reload is being prepared…" (MU-6240, MU-6241) | Rules "R1 Rename…" ×2 (MU-6252, MU-6254) | Rules "R1 Invite…" ×3 (MU-6253, MU-6255, MU-6256) |
-| R2 I7: a durable success clears only what was sent | M-1 "I7: a create answered…" (MU-6242) | Rules "R2 Rename I7" (MU-6257) | Rules "R2 Invite I7" (MU-6258) |
-| O1 a durable success with nothing typed since clears the draft and its copy | Rules "O1 New household" | Rules "O1 Rename" (MU-6259) | Rules "O1 Invite" |
-| R3 only a durable success covers what was sent: uncertain, a definite refusal (and, for an invitation, a lookup that finds nobody) leave the input dirty; an accepted update saves it and nothing is resent after the reload | Rules "R3 New household…" ×3 (MU-6261) | Rules "R3 Rename…" ×3 (MU-6262) | Rules "R3 Invite…" ×4 (MU-6263) |
-| R4 a restored rename's base lives and dies with its draft | n/a | Rules "R4 Rename…" ×3 (MU-6264, MU-6265; MU-6243, MU-6244 in M-1) | n/a |
-| D-1 a successful Try again forgets text typed since (as D-12b-18 is written) | Rules "D-1 New household" (MU-6266) | Rules "D-1 Rename" (MU-6267) | Rules "D-1 Invite" (MU-6268) |
+| R1 frozen: typing (or a directory choice) changes nothing, the press sends (and looks up) nothing | M-1 "while an update reload is being prepared…" (MU-6240, MU-6241) | Rules "R1 Rename…" ×2 (MU-6252, MU-6254, MU-6292, MU-6295) | Rules "R1 Invite…" ×3 (MU-6253, MU-6255, MU-6256, MU-6285, MU-6292, MU-6295) |
+| R2 I7: a durable first-try success clears only what was sent | M-1 "I7: a create answered…" (MU-6242) | Rules "R2 Rename I7" (MU-6257) | Rules "R2 Invite I7" (MU-6258) |
+| O1 a durable success with nothing typed since clears the draft and its copy | Rules "O1 New household" (MU-6293) | Rules "O1 Rename" (MU-6259, MU-6293) | Rules "O1 Invite" (MU-6293) |
+| R3 uncertain, and uncertain then an accepted update (restored, never resent) | Rules ×2 (MU-6261, MU-6307) | Rules ×2 (MU-6262, MU-6311) | Rules ×2 (MU-6263, MU-6315) |
+| R3 a definite refusal | Rules (MU-6261, MU-6308) | Rules (MU-6262, MU-6312) | Rules (MU-6263, MU-6316) |
+| R3 refusals of other kinds, one after the other | Cells `R3.create.refused-other-kinds` (MU-6319) | Cells `R3.rename.refused-other-kinds` (MU-6320) | Cells `R3.invite.refused-other-kinds` (MU-6321) |
+| R3 `closed` (nothing sent, no attempt kept) | Cells `R3.create.closed` (MU-6276) | Cells `R3.rename.closed` (MU-6277) | Cells `R3.invite.closed` (MU-6278) |
+| R3 `offline` | Cells `R3.create.offline` (MU-6309) | Cells `R3.rename.offline` (MU-6313) | Cells `R3.invite.offline` (MU-6317) |
+| R3 `not_sent` after the quiet retries (held back for Try again) | Cells `R3.create.not-sent` (MU-6310) | Cells `R3.rename.not-sent` (MU-6314) | Cells `R3.invite.not-sent` (MU-6318) |
+| R3 Invite's own exits: the lookup finds nobody, the lookup FAILED, inviting yourself | n/a | n/a | Rules (MU-6263); Cells `R3.invite.lookup-failed` (MU-6269), `R3.invite.self` (MU-6270) |
+| R4 a restored rename's base: Save under it; Escape and "Discard instead" drop it; a first-try conflict forgets it | n/a | Rules "R4 Rename…" ×3 (MU-6264, MU-6265, MU-6288..MU-6291, MU-6297, MU-6298); M-1 (MU-6243, MU-6244) | n/a |
+| R4 typed into after a restore (and after Cancel and reopen) keeps it; a refusal that is not a conflict, or an answer `closed`, `offline` or `not_sent`, keeps it | n/a | Cells `R4.rename.typed-after-restore` (+`-reopened`) (MU-6271), `R4.rename.keep-on-refusal` (MU-6279), `R4.rename.keep-when-not-sent` (MU-6325); control `R4.rename.typed-control` | n/a |
+| G a press the dialog refuses (the form submitted by Enter) sends, and looks up, nothing | Cells `G.create.refused-press` (MU-6322) | Cells `G.rename.refused-press` (MU-6323) | Cells `G.invite.empty-press` (MU-6324) |
+| W1 the form's start: its own name typed back is resolved by the next save; a form closed untouched begins again from what it then shows | n/a | Cells `W1.rename.typed-back-to-start` (MU-6329), `W1.rename.reopened-after-rename-elsewhere` (MU-6330) | n/a |
+| O1 after a success the form takes new input (the session goes on from its start) | (the dialog closes) | (the dialog closes) | Cells `O1.invite.typed-after-success` (MU-6328) |
+| W1 to W4: typing, a choice from an EMPTY field, a restored copy, "Discard instead" | M-1 (MU-6240, MU-6286); Owner "CONTROL create…" (MU-6287) | (R1, R4 above) | Cells `W2.invite.choice-from-empty-field` (MU-6274, MU-6284), M-1 (MU-6283), Cells `W4.invite.discard-instead` (MU-6272, MU-6296) |
+| D binding: no model for a household you do not manage | n/a | Cells `D.rename.non-manager-not-bound` (MU-6275) | Cells `D.invite.non-manager-not-bound` (MU-6332) |
+| W7 Try again on the PAGE after Cancel or Close ends the session (opened again, the dialog begins a new one) | Cells `W7.create.page-after-cancel` | Cells `W7.rename.page-after-cancel` | Cells `W7.invite.page-after-close` (all three MU-6273, MU-6294; Rename's, where the retried name lands, also MU-6331) |
+| W7 a Try again REFUSED, not sent (`closed`), or answered uncertain, offline, `not_sent` or forbidden completes nothing | Cells `W7.create.refused-completes-nothing`, `W7.create.try-again-not-sent` (MU-6281), `W7.create.try-again-other-answers` (MU-6326) | Cells `W7.rename.refused-completes-nothing` | Cells `W7.invite.refused-completes-nothing` (MU-6281) |
+| W7 a detail action's Try again (a member promoted) is not the invitation's: its draft stays | n/a | n/a | Cells `W7.invite.detail-action-keeps-draft` (MU-6327) |
+| W7 where it is pressed: Rename's own dialog closes; another dialog's change leaves Rename open; the detail and Invitations forget | (D-1 below) | Page MU-6233, MU-6238 | Cells `W7.invite.retried-in-rename-dialog` (MU-6280); Invitations MU-6232 |
+| W8 Rename's Escape ends the session (copy discarded) | n/a | M-1 (MU-6247, MU-6294, MU-6299) | n/a |
+| D-1 (decided: keep as written) a successful Try again forgets text typed since | Rules "D-1 New household" (MU-6266) | Rules "D-1 Rename" (MU-6267) | Rules "D-1 Invite" (MU-6268) |
 
-The shared completion (`completeTicket`) is MU-6260 over every R3 test. Known asymmetries, listed in the writer inventory: a conflict forgets
-the base in page memory only (the model's last copy keeps it until the next keystroke; the server's version guard backstops it), and D-1
-above.
+The shared completion (`completeTicket`) is MU-6260 over every R3 test. Exits with no cell carry an argued reason in the inventory:
+`run()`'s and `invite()`'s refused admission and `retry()`'s guard (no UI path: the buttons are disabled while the same refusal holds),
+another identity displayed after a send, a lookup or a conflict's reads (no UI path: its models retire with page memory), and a connection
+lost while the lookup is on its way (a race). Off-diagonal Try again pairs other than the one above are not cells: a create's Try again
+shows the household it made from wherever it is pressed (D-1 New household), and the Invitations dialog closes nothing on a Try again.
+Rename's `value()` base reader is unreachable (a session never begins over a kept rename draft). **Known asymmetries**, listed in the
+inventory, not pinned as correct: a first-try conflict forgets the base in page memory only (O-R3-3: the model's last copy keeps it until
+the next keystroke; the server's version guard backstops it); DA-2 (latent, with D-1's follow-up card); and **N-1** (the second design
+assessment, class `new`, low): a restored rename whose Try again is refused as a conflict keeps its stale base, so the next Save is sent
+under it and refused again (never an overwrite), because `retry()` has no writer that forgets it. Whether to fix N-1 is decision **D-2**,
+open with the coordinator; cell `R4.rename.retry-conflict-keeps-stale-base` pins the product as it is, and MU-6282 (the fix applied
+without its decision) turns it red, so a fix must change that cell and this paragraph.
 
 Fixture evidence: `tests/features/sharing/households-recovery.test.tsx` (the production coordinator's accepted update, its save and its one
-reload, per dialog; mutants MU-6239..MU-6251), `households-submission-rules.test.tsx` (the rules per input above; MU-6252..MU-6268), the
+reload, per dialog; mutants MU-6239..MU-6251), `households-submission-rules.test.tsx` and `households-submission-cells.test.tsx` (the cells above; MU-6252..MU-6299, MU-6307..MU-6332), the
 household cases of `tests/features/recovery-owner-discard.test.tsx`,
 `recovery-owner-contract.test.tsx` and `recovery-check-again.test.tsx` (ported from `HouseholdsMinimal`), and the native household cases of
 `tests/e2e/fixture.pwa-editors.spec.ts` (revisions 52, 53 and 55 over the dialogs). The old screen's composition of several household

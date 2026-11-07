@@ -55,11 +55,13 @@ import { must, present } from "../../support/sharing/present";
  *    leaves the input dirty with its saved copy; an accepted update saves it, and after the reload it is restored and NOTHING is resent;
  *  - R4 A RENAME DRAFT'S BASE LIVES AND DIES WITH IT: a restored rename is saved under the version it was composed against (control), and
  *    once that draft is dropped (Escape, "Discard instead") a fresh rename is saved under the household's version of now;
- *  - D-1 (decision reported to the coordinator, not granted; the behaviour as `docs/sharing.md` D-12b-18 is written): a Try again that is
+ *  - D-1 (DECIDED by Kieran on 7 November 2026, WEB12B-D1-ANSWER-20261107, `approval/web12b-d1-answer-20261107.json` in the
+ *    orchestrator: keep the behaviour as `docs/sharing.md` D-12b-18 is written; keeping newer text is a follow-up card): a Try again that is
  *    now known to have made the change completes the form as a first-try success does and forgets the input, EVEN text typed since the
  *    lost attempt. Pinned per input, so a change of that decision changes these three tests and their docs, never silently.
  *
- * New household's R1 and R2 cases are in `households-recovery.test.tsx` (MU-6240..MU-6242); the rule-to-test map is in `docs/pwa.md`.
+ * New household's R1 and R2 cases are in `households-recovery.test.tsx` (MU-6240..MU-6242); the cells beyond these 26 cases (revision 3,
+ * Review 4 F-R4-1) are in `households-submission-cells.test.tsx`, and the cell table is in `docs/pwa.md`.
  * Every test title carries its rule and site, and each catalogued mutant (MU-6252..MU-6268) names only its own site's tests.
  *
  * Determinism: held answers (`held()`), the registry's own freeze (`freeze()`/`unfreeze()`), `flushDirty` for "an update saves it" and
@@ -606,8 +608,8 @@ describe("R4: a restored rename's base", () => {
   });
 });
 
-// ---- D-1: the Try again path, pinned as D-12b-18 is written ----------------------------------------------------------------------
-describe("D-1 (reported decision; D-12b-18 as written): a successful Try again completes the form", () => {
+// ---- D-1 (decided): the Try again path, as D-12b-18 is written -------------------------------------------------------------------
+describe("D-1 (decided: keep D-12b-18 as written, WEB12B-D1-ANSWER-20261107): a successful Try again completes the form", () => {
   test("D-1 New household: a successful Try again of a lost create forgets the name, even one typed since; it was resent byte for byte", async () => {
     const w = world(NEW_PATH);
     w.api.next.command.push({ ok: false, kind: "uncertain" });
