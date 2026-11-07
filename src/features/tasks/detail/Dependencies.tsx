@@ -989,7 +989,25 @@ const editorStart = (
     typeof submitted?.strict === "boolean"
       ? submitted.strict
       : (preview?.strict ?? false),
+  // WEB-18 merge correction: nothing is built from a graph read yet, and nothing is the person's.
+  base: null,
+  touched: false,
 });
+
+/** The text of an editor the person has not touched (WEB-18 merge correction, decision (a)): whatever the editor was filled with. */
+const UNTOUCHED = JSON.stringify({ v: 2, touched: false });
+
+/** A base kept in a copy (WEB-18's `EditorBase`: the root version and the sorted direct list the edit was built from), or null. */
+function baseIn(raw: unknown): EditorBase | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const { version, list } = raw as Record<string, unknown>;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 0)
+    return null;
+  if (!Array.isArray(list) || list.length > MAX_PREREQUISITES) return null;
+  if (!list.every((id): id is string => typeof id === "string")) return null;
+  if (new Set(list).size !== list.length) return null;
+  return { version, list: [...list] };
+}
 
 /**
  * APP-UPDATE RECOVERY of the editor (WEB-14a maintenance merge of accepted WEB-10c, D-1; Q4; the task editors' protocol, `kept-input.ts`
@@ -997,6 +1015,16 @@ const editorStart = (
  * a context the next page finds again: the day's, and the conflicted set it replaces. A task or day picked in the selects but not added is
  * not kept (it is not the session's input; a visit to the sync screens does not keep it either). Restoring never saves: the editor reads
  * the preview again when it opens, so Save is admitted only on the answer of NOW. A text this build cannot read restores nothing.
+ *
+ * VERSION 2 (WEB-18 maintenance merge of 2f42ac35, correction decided by Kieran on 7 November 2026, (a)(b)(c)). WEB-18 builds the edit
+ * from the editor's own depth-one graph read (its `base`: the root version and direct list) and fills an untouched edit from it.
+ *  - (a) An edit the person has not touched is not input: it is encoded as one constant text, whatever it was filled with, the same text
+ *    as the editor's start, so WEB-18's filling (an edit of the session) leaves the form clean and nothing is saved for it.
+ *  - A touched edit is kept with the base it was built from: `{ v: 2, list, strict, base }`, restored as a TOUCHED edit on that base.
+ *  - (b) So a restore onto a server list that has moved meets WEB-18's own rule: the "changed" block, Save withheld until "Start again
+ *    from the current list".
+ *  - (c) A version-1 copy (the build before this merge: no base) is not read; it is offered as it is, never restored in part. So is a
+ *    touched edit with no base yet (made before the editor's first graph answer, which WEB-18 replaces by that answer).
  */
 export const dependencyRecovery = (
   occurrenceId: string,
@@ -1004,18 +1032,28 @@ export const dependencyRecovery = (
 ): KeptRecovery<EditorValue> => ({
   context: dependencyFormContext(occurrenceId, replacing),
   encode: (value) =>
-    JSON.stringify({ v: 1, list: value.list, strict: value.strict }),
-  decode: (text) => {
+    value.touched
+      ? JSON.stringify({
+          v: 2,
+          list: value.list,
+          strict: value.strict,
+          base: value.base,
+        })
+      : UNTOUCHED,
+  decode: (text, start) => {
+    if (text === UNTOUCHED) return start;
     try {
       const raw = JSON.parse(text) as Record<string, unknown> | null;
-      if (raw === null || typeof raw !== "object" || raw.v !== 1) return null;
+      if (raw === null || typeof raw !== "object" || raw.v !== 2) return null;
       const { list, strict } = raw;
       if (typeof strict !== "boolean" || !Array.isArray(list)) return null;
       if (list.length > MAX_PREREQUISITES) return null;
       if (!list.every((id): id is string => typeof id === "string"))
         return null;
       if (new Set(list).size !== list.length) return null;
-      return { list: [...list], strict };
+      const base = baseIn(raw.base);
+      if (base === null) return null;
+      return { list: [...list], strict, base, touched: true };
     } catch {
       return null;
     }
@@ -1211,13 +1249,16 @@ export function DependencyEditor({
       touched: false,
     }));
   };
-  // biome-ignore lint/correctness/useExhaustiveDependencies: each new whole answer is considered once
+  // WEB-18 merge correction: an edit that has lost its base (D-1's "Discard instead" resets the editor to its start, as does a copy chosen
+  // that has none) is built again from the answer already shown, as on opening, so Save is not withheld until the next read.
+  const unbuilt = input.value.base === null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each new whole answer, and each loss of the base, is considered once
   useEffect(() => {
     if (current === null || input.busy) return;
     const v = input.value;
     if (v.base !== null && (v.touched || baseMatches(v.base, current))) return;
     build(current, replacing !== null);
-  }, [current]);
+  }, [current, unbuilt]);
   const changed =
     current !== null &&
     input.value.base !== null &&

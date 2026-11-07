@@ -12,6 +12,7 @@ import type {
   SetRotaCommand,
   TasksResult,
 } from "../../../src/features/tasks/api";
+import { GRAPH_DEFAULT_DEPTH } from "../../../src/features/tasks/api";
 import {
   DEPENDENCY_COPY,
   dependencyRecovery,
@@ -43,6 +44,7 @@ import {
   forgetRecoveryWorld,
   installRecoveryLocks,
 } from "../../support/recovery-editors";
+import { buildGraph } from "../../support/tasks/graphs";
 import { SLOW } from "../../support/tasks/journal";
 import {
   fakeApi,
@@ -172,10 +174,61 @@ const answer = (
   },
 });
 
-async function dependencies(drafts?: object[]) {
+/**
+ * WEB-18 merge correction (7 November 2026): the server's view of the root day as WEB-18's editor reads it (`readDependencyGraph`, depth
+ * one for the editor): the root's version and its direct prerequisites. A test moves it on as another editor would.
+ */
+interface ServerDay {
+  version: number;
+  direct: SeededTask[];
+}
+const graphOf = (
+  root: SeededTask,
+  server: ServerDay,
+  maxDepth: number | undefined,
+) =>
+  buildGraph({
+    root: root.occurrenceId,
+    nodes: [
+      {
+        id: root.occurrenceId,
+        task: root.taskId,
+        title: "Hang the washing",
+        canEdit: true,
+        version: server.version,
+      },
+      ...server.direct.map((d) => ({
+        id: d.occurrenceId,
+        task: d.taskId,
+        title: "Run the washing machine",
+      })),
+    ],
+    edges: server.direct.map(
+      (d) => [d.occurrenceId, root.occurrenceId] as [string, string],
+    ),
+    maxDepth: maxDepth ?? GRAPH_DEFAULT_DEPTH,
+  });
+const graphApi = (root: SeededTask, server: ServerDay) => ({
+  readDependencyGraph: async (_id: string, maxDepth?: number) => ({
+    ok: true as const,
+    value: graphOf(root, server, maxDepth),
+  }),
+});
+
+async function dependencies(
+  drafts?: object[],
+  direct: "none" | "prerequisite" = "none",
+) {
   const root = await seededTask({ title: "Hang the washing" });
   const prerequisite = await seededTask({ title: "Run the washing machine" });
-  const api = fakeApi({ readDependencies: async () => answer(root, []) });
+  const server: ServerDay = {
+    version: 1,
+    direct: direct === "prerequisite" ? [prerequisite] : [],
+  };
+  const api = fakeApi({
+    readDependencies: async () => answer(root, []),
+    ...graphApi(root, server),
+  });
   const t = await mountTasks({
     path: path(root),
     rows: [...root.rows, ...prerequisite.rows],
@@ -188,7 +241,7 @@ async function dependencies(drafts?: object[]) {
       (document.querySelector("[data-dependencies]") as HTMLElement | null)
         ?.dataset.dependencies === "ready",
   );
-  return { t, root, prerequisite };
+  return { t, root, prerequisite, server };
 }
 
 /** The editor is open on the preview read when it opened (Save admitted). */
@@ -235,8 +288,14 @@ describe("D-1: the dependency editor (WEB-10c D-10c-7) takes part in app-update 
       const { origin, tab } = await updatingTab();
       await acceptUpdate(t, origin, tab);
       expect(tab.reloads, "the update reloaded the tab once").toBe(1);
+      // Codec v2 (WEB-18 merge correction): the touched edit with the base it was built from (root version 1, no direct prerequisite).
       expect(await copies(t, CONTEXT)).toEqual([
-        { v: 1, list: [prerequisite.occurrenceId], strict: true },
+        {
+          v: 2,
+          list: [prerequisite.occurrenceId],
+          strict: true,
+          base: { version: 1, list: [] },
+        },
       ]);
       expect(t.drafts(), "nothing was sent").toEqual([]);
 
@@ -300,7 +359,10 @@ describe("D-1: the dependency editor (WEB-10c D-10c-7) takes part in app-update 
           },
         } as never,
       });
-      const api = fakeApi({ readDependencies: async () => answer(root, []) });
+      const api = fakeApi({
+        readDependencies: async () => answer(root, []),
+        ...graphApi(root, { version: 1, direct: [] }),
+      });
       const t = await mountTasks({
         path: path(root),
         rows: [...root.rows, ...pre.rows],
@@ -337,7 +399,7 @@ describe("D-1: the dependency editor (WEB-10c D-10c-7) takes part in app-update 
       await acceptUpdate(t, origin, tab);
       expect(tab.reloads).toBe(1);
       expect(await copies(t, CONTEXT)).toEqual([
-        { v: 1, list: [], strict: false },
+        { v: 2, list: [], strict: false, base: { version: 1, list: [] } },
       ]);
 
       await reload(t);
@@ -624,22 +686,67 @@ describe("D-1: the two codecs (explicitly versioned raw input; an unreadable tex
     expect(rotaRecovery(O).context).toBe(ROTA_CONTEXT(O));
   });
 
-  test("dependency codec: the list and strict round-trip; a malformed, oversized or duplicated list is not read", () => {
+  test("dependency codec v2 (WEB-18 merge correction): a touched edit round-trips with its base; an untouched one is the start's own text (a); a version-1 copy, a missing base and malformed texts are not read (c)", () => {
     const codec = dependencyRecovery(O, null);
-    const start = { list: [], strict: false };
-    const value = { list: [P], strict: true };
+    const start = { list: [], strict: false, base: null, touched: false };
+    const value = {
+      list: [P],
+      strict: true,
+      base: { version: 3, list: [] },
+      touched: true,
+    };
     expect(codec.decode(codec.encode(value), start)).toEqual(value);
+    // (a) Whatever WEB-18 filled an untouched edit with, it is the start's text: nothing of it is the person's input.
+    const filled = {
+      list: [P],
+      strict: true,
+      base: { version: 3, list: [P] },
+      touched: false,
+    };
+    expect(codec.encode(filled)).toBe(codec.encode(start));
+    expect(codec.decode(codec.encode(filled), start)).toBe(start);
     for (const text of [
       "not json",
       "null",
+      // (c) the build before this merge: no base, so never restored in part.
+      JSON.stringify({ v: 1, list: [P], strict: true }),
       JSON.stringify({ v: 2, list: [P], strict: true }),
-      JSON.stringify({ v: 1, list: [P], strict: "yes" }),
-      JSON.stringify({ v: 1, list: [1], strict: true }),
-      JSON.stringify({ v: 1, list: [P, P], strict: true }),
+      JSON.stringify({ v: 2, list: [P], strict: true, base: null }),
       JSON.stringify({
-        v: 1,
+        v: 2,
+        list: [P],
+        strict: true,
+        base: { version: -1, list: [] },
+      }),
+      JSON.stringify({
+        v: 2,
+        list: [P],
+        strict: true,
+        base: { version: 1, list: [P, P] },
+      }),
+      JSON.stringify({
+        v: 2,
+        list: [P],
+        strict: "yes",
+        base: { version: 1, list: [] },
+      }),
+      JSON.stringify({
+        v: 2,
+        list: [1],
+        strict: true,
+        base: { version: 1, list: [] },
+      }),
+      JSON.stringify({
+        v: 2,
+        list: [P, P],
+        strict: true,
+        base: { version: 1, list: [] },
+      }),
+      JSON.stringify({
+        v: 2,
         list: Array.from({ length: 33 }, (_, i) => `${P}-${i}`),
         strict: true,
+        base: { version: 1, list: [] },
       }),
     ])
       expect(codec.decode(text, start), text).toBeNull();
@@ -953,6 +1060,220 @@ describe("revision 57 (F-R57-1, Review 57 judgement): a restored dependency edit
       );
       expect(inSurface(focused())).toBe(false);
       expect(refusals).toEqual([]);
+    },
+  );
+});
+
+// ---- WEB-18 merge correction (Kieran, 7 November 2026: "Fix in WEB-18 merge, (a)(b)(c)") ---------------------------------------------
+/**
+ * WEB-18 builds the dependency editor from its own depth-one graph read (the edit's BASE: the root's version and direct list) and fills an
+ * untouched edit from it. D-1's recovery is fitted to that editor (codec v2): (a) an editor WEB-18 only filled is not unsaved input; (b) a
+ * restored edit whose server list has moved meets WEB-18's "changed" block, Save withheld until "Start again from the current list"; (c)
+ * a copy of the build before this merge (version 1, no base) is offered, never restored in part. And a restore never breaks the editor.
+ */
+describe("WEB-18 merge correction: D-1's dependency-editor recovery fitted to WEB-18's editor (a)(b)(c)", () => {
+  async function addThePrerequisite(t: Mounted, prerequisite: SeededTask) {
+    await t.until(() =>
+      [
+        ...(screen.getByLabelText(DEPENDENCY_COPY.addTask) as HTMLSelectElement)
+          .options,
+      ].some((o) => o.value === prerequisite.taskId),
+    );
+    fireEvent.change(screen.getByLabelText(DEPENDENCY_COPY.addTask), {
+      target: { value: prerequisite.taskId },
+    });
+    await t.until(
+      () =>
+        (screen.getByLabelText(DEPENDENCY_COPY.addDay) as HTMLSelectElement)
+          .options.length > 1,
+    );
+    fireEvent.change(screen.getByLabelText(DEPENDENCY_COPY.addDay), {
+      target: { value: prerequisite.occurrenceId },
+    });
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.add }));
+  }
+  const item = (id: string) =>
+    editorBody()?.querySelector(`[data-editor-item="${id}"]`) ?? null;
+  const broken = () =>
+    /Something went wrong/.test(document.body.textContent ?? "");
+
+  test(
+    "(a) an editor WEB-18 only filled (the day already waits for a prerequisite) is registered but never dirty; the accepted update saves nothing for it and reloads; nothing reopens after the reload",
+    SLOW,
+    async () => {
+      const { t, root, prerequisite } = await dependencies(
+        undefined,
+        "prerequisite",
+      );
+      const CONTEXT = DEPENDENCY_CONTEXT(root.occurrenceId, null);
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.set }),
+      );
+      await t.until(
+        () => editorReady() && item(prerequisite.occurrenceId) !== null,
+      );
+      expect(
+        item(prerequisite.occurrenceId),
+        "premise: WEB-18 filled the edit from the day's current list",
+      ).not.toBeNull();
+      expect(contextsOf(pageFormRegistry.all())).toContain(CONTEXT);
+      expect(
+        contextsOf(pageFormRegistry.dirty()),
+        "(a) nothing the person typed: not dirty",
+      ).not.toContain(CONTEXT);
+      const { origin, tab } = await updatingTab();
+      await acceptUpdate(t, origin, tab);
+      expect(tab.reloads).toBe(1);
+      expect(await copies(t, CONTEXT), "nothing saved for it").toEqual([]);
+      await reload(t);
+      await t.settle();
+      await t.settle();
+      expect(editorBody(), "nothing reopens").toBeNull();
+      expect(broken()).toBe(false);
+    },
+  );
+
+  test(
+    "(b) a restored edit whose server list moved during the reload shows WEB-18's 'changed' block with Save withheld; 'Start again from the current list' builds from the current list; nothing is sent; no crash",
+    SLOW,
+    async () => {
+      const { t, root, prerequisite, server } = await dependencies();
+      const CONTEXT = DEPENDENCY_CONTEXT(root.occurrenceId, null);
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.set }),
+      );
+      await t.until(editorReady);
+      await addThePrerequisite(t, prerequisite);
+      expect(contextsOf(pageFormRegistry.dirty())).toContain(CONTEXT);
+      const { origin, tab } = await updatingTab();
+      await acceptUpdate(t, origin, tab);
+      expect(tab.reloads).toBe(1);
+      // Another editor's change, made while this page reloaded: the root's version moves on.
+      server.version = 2;
+      await reload(t);
+      const changedShown = () =>
+        editorBody()?.querySelector("[data-editor-changed]") != null;
+      await t.until(changedShown);
+      expect(broken(), "a restore never breaks the editor").toBe(false);
+      expect(
+        item(prerequisite.occurrenceId),
+        "the restored edit",
+      ).not.toBeNull();
+      expect(
+        within(editorBody() as HTMLElement).queryByText(RESTORED_TEXT),
+        "the restored notice",
+      ).not.toBeNull();
+      expect(changedShown(), "(b) WEB-18's changed block").toBe(true);
+      expect(editorBody()?.dataset.dependencyEditor).toBe("changed");
+      expect(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save withheld",
+      ).toBeDisabled();
+      expect(t.drafts()).toEqual([]);
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.editorRestart }),
+      );
+      await t.until(editorReady);
+      expect(changedShown()).toBe(false);
+      expect(
+        item(prerequisite.occurrenceId),
+        "built from the current list",
+      ).toBeNull();
+      expect(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      ).not.toBeDisabled();
+      expect(t.drafts(), "nothing sent").toEqual([]);
+    },
+  );
+
+  test(
+    "(c) a version-1 copy left by the build before this merge is offered as it is, never restored: the editor does not reopen on it, opening it shows the other copies, and the copy stays in the store",
+    SLOW,
+    async () => {
+      const { t, root, prerequisite } = await dependencies();
+      const CONTEXT = DEPENDENCY_CONTEXT(root.occurrenceId, null);
+      expect(
+        await t.data.formRecovery.save({
+          formContext: CONTEXT,
+          tabInstanceId: "web18-v1-gone-tab",
+          values: {
+            model: JSON.stringify({
+              v: 1,
+              list: [prerequisite.occurrenceId],
+              strict: true,
+            }),
+          },
+          savedAt: new Date(Date.now() - 60_000).toISOString(),
+          capture: "web18-v1-gone-tab-capture",
+        }),
+      ).toBe("saved");
+      await reload(t);
+      await t.settle();
+      await t.settle();
+      expect(editorBody(), "not reopened on an unreadable copy").toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.set }),
+      );
+      await t.until(
+        () =>
+          editorReady() &&
+          screen.queryByText("Other saved copies of this form:") !== null,
+      );
+      expect(
+        screen.queryByText("Other saved copies of this form:"),
+        "(c) offered as it is",
+      ).not.toBeNull();
+      expect(
+        item(prerequisite.occurrenceId),
+        "never restored in part",
+      ).toBeNull();
+      expect(
+        within(editorBody() as HTMLElement).queryByText(RESTORED_TEXT),
+      ).toBeNull();
+      expect(await t.data.formRecovery.list(CONTEXT)).toHaveLength(1);
+      expect(broken()).toBe(false);
+    },
+  );
+
+  test(
+    "'Discard instead' after a restore builds the edit again from the answer shown: Save is admitted, not held until the next read",
+    SLOW,
+    async () => {
+      const { t, prerequisite } = await dependencies();
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.set }),
+      );
+      await t.until(editorReady);
+      await addThePrerequisite(t, prerequisite);
+      const { origin, tab } = await updatingTab();
+      await acceptUpdate(t, origin, tab);
+      expect(tab.reloads).toBe(1);
+      await reload(t);
+      await t.until(() => item(prerequisite.occurrenceId) !== null);
+      expect(
+        item(prerequisite.occurrenceId),
+        "premise: restored",
+      ).not.toBeNull();
+      fireEvent.click(
+        within(editorBody() as HTMLElement).getByRole("button", {
+          name: "Discard instead",
+        }),
+      );
+      await t.until(
+        () => item(prerequisite.occurrenceId) === null && editorReady(),
+      );
+      expect(
+        item(prerequisite.occurrenceId),
+        "the restored day is gone",
+      ).toBeNull();
+      expect(
+        editorBody()?.dataset.dependencyEditor,
+        "built again from the answer shown",
+      ).toBe("open");
+      expect(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      ).not.toBeDisabled();
+      expect(t.drafts()).toEqual([]);
     },
   );
 });

@@ -422,6 +422,16 @@ offers "Save and reload"), frozen while it is prepared, saved by it and restored
   keeps only the list; a visit to the sync screens does not keep the picks either). The day's work reopens a new list's editor on a copy
   (`DependencyEditorRecoveryHost`); the conflict block, which holds the refused set, reopens "Keep editing" on it. The editor reads the
   preview again when it opens, so a restored list is saved only on the answer of now, and only by the person.
+  **Codec version 2 (WEB-18 maintenance merge of 2f42ac35, 7 November 2026; Kieran's decision (a)(b)(c),
+  `approval/web18-d1-correction-decision-20261107.json` in the orchestrator).** WEB-18 builds the edit from the editor's own depth-one
+  graph read (its base: the root's version and direct list) and fills an untouched edit from it. A touched edit is kept with that base,
+  `{ v: 2, list, strict, base }`, and restored as a touched edit on it. (a) An edit the person has not touched, whatever WEB-18 filled it
+  with, is one constant text, the editor's start: it is never dirty and nothing is saved for it. (b) A restore onto a server list that has
+  moved meets WEB-18's own "changed" block: Save is withheld until "Start again from the current list", never a silent overwrite and never
+  a silent replacement. (c) A version-1 copy (the build before this merge, no base) and a touched edit with no base yet are offered as they
+  are, never restored in part. "Discard instead" resets the editor to its start, and it is built again from the graph answer shown.
+  Fixture evidence: `tests/features/tasks/web10c-editors-recovery.test.tsx` (mutants MU-3817..MU-3821; MU-3804 and MU-3805 re-anchored);
+  real engines: `fixture.pwa-task-editors.spec.ts`, whose seeded world answers the editor's graph read (`tests/e2e/pwa-reads.ts`).
 - **The turn order** (`Rota.tsx`) keeps the order and the roster version it was edited on (`{ v: 1, base, order }`, as the sharing editor
   keeps the version it was composed against). The rota panel reopens the dialog on a copy once the rota is read and only for someone who may
   still edit the order. Save sends `expected_version: base`, so an order edited on a roster someone has since changed meets the server's

@@ -11,6 +11,7 @@
  */
 import { occurrenceId, progressId } from "../../src/features/tasks/model/ids";
 import { slotOn, todayIn, windows } from "../../src/features/tasks/model/time";
+import { buildGraph } from "../support/tasks/graphs";
 
 export const API = "/api/experimental/v1";
 /** The stub identity's account (`scripts/serve-generations.mjs`). */
@@ -282,6 +283,10 @@ export const PREVIEW_TOKEN = "d".repeat(64);
  * The task detail's reads of `day`: what the day waits for (nothing yet, so the preview lists the day itself), its timers (none) and, for
  * a task with a turn order (`rota`), the roster at `rota.version` with `rota.participants` (the reader and OTHER may be added) and the
  * enrolment (active, consented). A roster that moves on is the same call with a newer version.
+ *
+ * WEB-18 maintenance merge of 2f42ac35 (7 November 2026): the dependency editor saves only on its own depth-one graph read
+ * (`GET /occurrences/{id}/dependency-graph?max_depth=1`, the edit's base): the day alone, at the cached day's version (1), editable, with
+ * nothing it waits for. The canned reads match the path without its query, so this answers that read.
  */
 export function taskDayReads(
   day: SeededTaskDay,
@@ -306,6 +311,20 @@ export function taskDayReads(
       items: [],
       next_after: null,
     },
+    [`${API}/occurrences/${day.occurrenceId}/dependency-graph`]: buildGraph({
+      root: day.occurrenceId,
+      nodes: [
+        {
+          id: day.occurrenceId,
+          task: day.taskId,
+          title: "This day",
+          canEdit: true,
+          version: 1,
+        },
+      ],
+      edges: [],
+      maxDepth: 1,
+    }),
   };
   if (rota) {
     reads[`${API}/tasks/${day.taskId}/rota`] = {

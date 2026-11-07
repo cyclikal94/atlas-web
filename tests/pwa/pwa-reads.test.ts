@@ -16,11 +16,14 @@ import {
   parseInvitations,
   parseTemplateScope,
 } from "../../src/features/sharing/api";
+import { parseDependencyGraph } from "../../src/features/tasks/model/contract";
 import {
   API,
   managedHousehold,
   seededPerson,
+  seededTaskDay,
   sharingReads,
+  taskDayReads,
 } from "../e2e/pwa-reads";
 
 /**
@@ -100,5 +103,24 @@ describe("revision 57 (C-H4, Q-H3): the seeded worlds' canned reads are what the
       );
       expect(parseInvitations(reads[`${API}/invitations`])).toEqual([]);
     }
+  });
+
+  test("WEB-18 merge (7 November 2026): a seeded task day's editing graph read parses as the editor reads it (depth one), the day alone at its cached version, editable", async () => {
+    const day = await seededTaskDay({
+      taskId: "aaaaaaaa-0000-4000-8000-0000000000a1",
+      executionId: "aaaaaaaa-0000-4000-8000-0000000000a2",
+      title: "Hang the washing",
+    });
+    const graph = parseDependencyGraph(
+      taskDayReads(day)[
+        `${API}/occurrences/${day.occurrenceId}/dependency-graph`
+      ],
+      { rootId: day.occurrenceId, maxDepth: 1 },
+    );
+    expect(graph, "the product's own parser accepts it").not.toBeNull();
+    expect(graph?.nodes[0]?.occurrence_id).toBe(day.occurrenceId);
+    expect(graph?.nodes[0]?.version).toBe(1);
+    expect(graph?.nodes[0]?.can_edit).toBe(true);
+    expect(graph?.direct_prerequisites).toEqual([]);
   });
 });

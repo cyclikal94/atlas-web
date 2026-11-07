@@ -32467,13 +32467,13 @@ export const UNIT = [
       "WEB-14a D-1: the dependency editor's copy drops the strict rule (a restored list comes back advisory)",
     file: "src/features/tasks/detail/Dependencies.tsx",
     tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
-    expect:
-      /a new list: registered while open|dependency codec: the list and strict round-trip/,
+    expect: /a new list: registered while open|dependency codec v2/,
+    // Re-anchored at the WEB-18 merge correction (7 November 2026): the same fault over codec v2's touched branch.
     patch: (t) =>
       sub(
         t,
-        "    JSON.stringify({ v: 1, list: value.list, strict: value.strict }),",
-        "    JSON.stringify({ v: 1, list: value.list, strict: false }),",
+        "          strict: value.strict,\n          base: value.base,\n",
+        "          strict: false,\n          base: value.base,\n",
       ),
   },
   {
@@ -32482,7 +32482,8 @@ export const UNIT = [
       "WEB-14a D-1: the dependency editor restores a copy whose list names a day twice (a copy this build should not read)",
     file: "src/features/tasks/detail/Dependencies.tsx",
     tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
-    expect: /dependency codec: the list and strict round-trip/,
+    expect: /dependency codec v2/,
+    // Re-anchored at the WEB-18 merge correction (7 November 2026): the same line of codec v2's decode, the new test title.
     patch: (t) =>
       sub(
         t,
@@ -32638,6 +32639,78 @@ export const UNIT = [
         t,
         '              else recoveryTarget("returned", firstFieldRef)?.focus();\n',
         '              else (typeof firstFieldRef === "function" ? firstFieldRef() : firstFieldRef?.current)?.focus();\n',
+      ),
+  },
+  // WEB-18 maintenance merge of accepted main 2f42ac35, correction (Kieran, 7 November 2026; approval/web18-d1-correction-decision-20261107.json):
+  // D-1's dependency-editor recovery fitted to WEB-18's editor (codec v2), decisions (a)(b)(c).
+  {
+    id: "MU-3817",
+    title:
+      "WEB-18 merge correction (a): an edit WEB-18 only filled is encoded as the person's input (every editor of a day that waits for something is dirty)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /\(a\) an editor WEB-18 only filled|dependency codec v2/,
+    patch: (t) =>
+      sub(
+        t,
+        "    value.touched\n      ? JSON.stringify({\n",
+        "    value.touched || value.base !== null\n      ? JSON.stringify({\n",
+      ),
+  },
+  {
+    id: "MU-3818",
+    title:
+      "WEB-18 merge correction (c): a copy without a base (version 1, the build before the merge) is restored as an edit with no base",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /\(c\) a version-1 copy|dependency codec v2/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      if (raw === null || typeof raw !== "object" || raw.v !== 2) return null;\n',
+          '      if (raw === null || typeof raw !== "object" || (raw.v !== 2 && raw.v !== 1)) return null;\n',
+        ),
+        "      if (base === null) return null;\n      return { list: [...list], strict, base, touched: true };",
+        "      return { list: [...list], strict, base, touched: true };",
+      ),
+  },
+  {
+    id: "MU-3819",
+    title:
+      "WEB-18 merge correction (b): a restored edit comes back untouched (a moved server list silently replaces it instead of WEB-18's changed block)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /\(b\) a restored edit whose server list moved|dependency codec v2/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { list: [...list], strict, base, touched: true };",
+        "      return { list: [...list], strict, base, touched: false };",
+      ),
+  },
+  {
+    id: "MU-3820",
+    title:
+      "WEB-18 merge correction: an edit reset to its start by Discard instead is not built again from the answer shown (Save held until the next read)",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /'Discard instead' after a restore builds the edit again/,
+    patch: (t) => sub(t, "  }, [current, unbuilt]);", "  }, [current]);"),
+  },
+  {
+    id: "MU-3821",
+    title:
+      "WEB-18 merge correction (a): the untouched text is not read back as the editor's start",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/web10c-editors-recovery.test.tsx"],
+    expect: /dependency codec v2/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (text === UNTOUCHED) return start;",
+        "    if (text === UNTOUCHED) return null;",
       ),
   },
 ];
