@@ -43,6 +43,7 @@ import { ENGINE_13B_R24, UNIT_13B_R24 } from "./catalogue-web13b-r24.mjs";
 import { UNIT_13B_R25 } from "./catalogue-web13b-r25.mjs";
 import { UNIT_13B_R33 } from "./catalogue-web13b-r33.mjs";
 import { ENGINE_13B_R35 } from "./catalogue-web13b-r35.mjs";
+import { ENGINE_13B_R36, UNIT_13B_R36 } from "./catalogue-web13b-r36.mjs";
 import { ENGINE_WEB19, UNIT_WEB19 } from "./catalogue-web19.mjs";
 
 export class PatchError extends Error {}
@@ -21918,6 +21919,7 @@ export const UNIT = [
   ...UNIT_13B_R24,
   ...UNIT_13B_R25,
   ...UNIT_13B_R33,
+  ...UNIT_13B_R36,
   // WEB-11a (plan §7.4): unit mutants MU-2101..MU-2132, each caught by the named assertion of its own test.
   {
     id: "MU-2437",
@@ -31151,6 +31153,7 @@ export const ENGINE = [
   ...ENGINE_13B_R23,
   ...ENGINE_13B_R24,
   ...ENGINE_13B_R35,
+  ...ENGINE_13B_R36,
   // WEB-11a (plan §7.4, N-P1..N-P3): real-engine mutants, each caught by its native case.
   {
     id: "MU-2719",

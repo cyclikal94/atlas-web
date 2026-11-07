@@ -2,15 +2,18 @@ import {
   type ReactNode,
   useEffect,
   useId,
-  useLayoutEffect,
   useReducer,
   useRef,
   useState,
 } from "react";
 import { Button } from "../../../components/ui/button";
+import { HeldHeight } from "../../../components/ui/held-height";
 import { type CacheRow, type Policy, useSharingDefaults } from "../../../data";
 // The sharing feature's public chooser, from its own module (see `sharing/index.ts`).
-import { AudienceChooser } from "../../sharing/AudienceChooser";
+import {
+  AudienceChooser,
+  type AudienceChooserProps,
+} from "../../sharing/AudienceChooser";
 import type { TaskActions } from "../actions";
 import type { EnrolCommand } from "../api";
 import * as copy from "../copy";
@@ -639,6 +642,22 @@ function Act({
   );
 }
 
+/**
+ * The audience chooser as every form here shows it: while it is blocked it keeps the height it had when the block began (WEB-13b
+ * revision 36, Review 43 F43-1 and the design assessment's DA-1, family `task-detail-pending-layout-shift`). The chooser drops its editing
+ * controls while blocked, and the control pressed (Join, Save sharing, Try again) sits below it, so without the reserve that control moved
+ * up and the second press of a double press reached whatever came under the pointer ("Who sees my progress" on a long task page). The
+ * reserve wraps the chooser itself, never the audience block around it: in `Enrolled` the Cancel and Save row is inside that block. Every
+ * use in this file goes through here; `tests/static/held-audience.test.ts` fails on an `AudienceChooser` used directly.
+ */
+function HeldAudience(props: AudienceChooserProps) {
+  return (
+    <HeldHeight held={props.blocked !== null}>
+      <AudienceChooser {...props} />
+    </HeldHeight>
+  );
+}
+
 /** Enrolled: Leave, the consent and the audience, each resending everything it does not change. */
 function Enrolled({
   enrolment,
@@ -705,7 +724,7 @@ function Enrolled({
           </span>
         ) : (
           <>
-            <AudienceChooser
+            <HeldAudience
               policy={draft.policy}
               onChange={edit}
               blocked={blocked}
@@ -750,7 +769,7 @@ function KeptDraft({
           {draft.consent ? CONTROLS_COPY.consentYes : CONTROLS_COPY.consentNo}
         </p>
       )}
-      <AudienceChooser
+      <HeldAudience
         policy={draft.policy}
         onChange={() => undefined}
         blocked={CONTROLS_COPY.keptDraft}
@@ -873,18 +892,6 @@ function JoinForm({
 }) {
   const legend = useId();
   const consent = draft?.consent ?? null;
-  // WEB-13b revision 35 (Review 42 F42-4): while a Join is pending the audience chooser is frozen and drops its editing controls, so
-  // everything above Join used to collapse (about 230 px) and the second press of a double press landed on whatever moved under the
-  // pointer (on a long task page, "Who sees my progress", which opened its dialog). While the form is blocked the audience keeps the
-  // height it had when it was last editable, set in the same commit as the collapse so no layout in between moves the page; nothing is
-  // hidden or added, and the space is released when the block ends. A form that first appears blocked has no such height and holds none.
-  const audience = useRef<HTMLDivElement>(null);
-  const [editableHeight, setEditableHeight] = useState<number | null>(null);
-  useLayoutEffect(() => {
-    if (blocked !== null || audience.current === null) return;
-    const height = audience.current.offsetHeight;
-    if (height !== editableHeight) setEditableHeight(height);
-  });
   const choice = (value: boolean, label: string) => (
     <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
       <input
@@ -907,23 +914,14 @@ function JoinForm({
         {choice(true, CONTROLS_COPY.consentYes)}
         {choice(false, CONTROLS_COPY.consentNo)}
       </fieldset>
-      <div
-        ref={audience}
-        className="flex flex-col gap-2"
-        data-enrol-audience=""
-        style={
-          blocked !== null && editableHeight !== null
-            ? { minHeight: editableHeight }
-            : undefined
-        }
-      >
+      <div className="flex flex-col gap-2" data-enrol-audience="">
         <p className="text-[13px] text-ink-1">
           {CONTROLS_COPY.audienceHeading}
         </p>
         <p className="text-[12.5px] text-ink-2">
           {note} {CONTROLS_COPY.audienceNote}
         </p>
-        <AudienceChooser
+        <HeldAudience
           policy={draft?.policy ?? seed}
           onChange={(policy) => edit({ policy })}
           blocked={blocked}
