@@ -1,4 +1,10 @@
-import type { Carry, Outcome, Participation } from "./model/contract";
+import type {
+  Cadence,
+  Carry,
+  Goal,
+  Outcome,
+  Participation,
+} from "./model/contract";
 import type { Filter, Pill } from "./model/row-state";
 import type { PendingMark } from "./view";
 
@@ -138,6 +144,8 @@ export function refusalMessage(reason: string): string | null {
       return "This isn't available on this device yet.";
     case "denied":
       return "You can't change this. Nothing was saved.";
+    case "timer_ended":
+      return "This timer may already have ended. Nothing was saved.";
     case "closed":
     case "identity_changed":
       return null;
@@ -160,6 +168,47 @@ export const CARRY: Readonly<Record<Carry, { label: string; line: string }>> = {
     label: "Let them add up",
     line: "If it isn't done, it stays open alongside the next days.",
   },
+};
+
+/** The facts strip of a task's page (the Final design): short labels over short values. */
+export const FACTS = {
+  day: "Day",
+  who: "Who",
+  repeat: "Repeats",
+  carry: "If missed",
+  goal: "Goal",
+  streak: "Streak",
+} as const;
+/** The goal as one short phrase for the facts strip. */
+export const GOAL_FACT = (goal: Goal): string =>
+  goal.kind === "checkbox"
+    ? "Tick it off"
+    : goal.kind === "checklist"
+      ? goal.items.length === 1
+        ? "1 item"
+        : `${goal.items.length} items`
+      : goal.minimum !== null && goal.maximum !== null
+        ? `${goal.minimum} to ${goal.maximum} ${goal.unit}`
+        : goal.minimum !== null
+          ? `At least ${goal.minimum} ${goal.unit}`
+          : goal.maximum !== null
+            ? `At most ${goal.maximum} ${goal.unit}`
+            : `Any amount of ${goal.unit}`;
+export const CADENCE = (repeat: Cadence | null): string => {
+  if (repeat === null) return "Once";
+  const n = repeat.interval;
+  switch (repeat.frequency) {
+    case "daily":
+      return n === 1 ? "Every day" : `Every ${n} days`;
+    case "weekly":
+      return n === 1 ? "Every week" : `Every ${n} weeks`;
+    case "monthly":
+      return n === 1 ? "Every month" : `Every ${n} months`;
+    case "yearly":
+      return n === 1 ? "Every year" : `Every ${n} years`;
+    case "after_completion":
+      return n === 1 ? "The day after it's done" : `${n} days after it's done`;
+  }
 };
 
 export const PARTICIPATION: Readonly<Record<Participation, string>> = {

@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from "@playwright/test";
-import { test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { expect, runAxe } from "./helpers";
+import { test } from "./intercepted-auth";
 
 /**
  * WEB-08c, Layer 3: composed lifecycle traces on the PRODUCTION build in a real engine (real IndexedDB, Web Locks, BroadcastChannel, the
@@ -12,6 +12,10 @@ import { expect, runAxe } from "./helpers";
  * VERIFIED label (persisted in the account's own database, shown offline) and the account card. Every trace gives each account a UNIQUE
  * username, used as its marker, and asserts the marker's absence or presence across the DOM text, the accessibility snapshot and
  * `document.title`. Visibility is overridden where a case needs it (a stated limitation, as in the other real-engine suites).
+ *
+ * Intercepted authentication (R37, WEB-14a revision 34): the stubbed API is a `context.route`, which a worker-controlled WebKit page's
+ * requests bypass, so `test` from ./intercepted-auth blocks service worker registration for this file's contexts. Its peer pages,
+ * navigations and reloads are therefore never worker-controlled; the shipped worker is covered by the PWA and offline suites.
  */
 const API = "/browser-sessions";
 const ACTIVATE = "/browser-sessions/activate";

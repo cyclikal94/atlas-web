@@ -30,7 +30,12 @@ export function startBrowserLeader(
 ): BrowserLeader {
   const host = getPageDataHost();
   const browser = createBrowserRuntime(session);
-  host.setRuntime({ runtime: browser.runtime, channel: browser.channel });
+  host.setRuntime({
+    runtime: browser.runtime,
+    channel: browser.channel,
+    recoveryStore: (account, incarnationId) =>
+      browser.recoveryStore(account, incarnationId),
+  });
   const markers = host.markers;
   void markers.prepare();
   const navigatorWithMemory = navigator as Navigator & {

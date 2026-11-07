@@ -8,6 +8,7 @@ import {
   scopeOf,
 } from "../support/data/marker-storage";
 import { type OutboxWorld, outboxWorld } from "../support/data/outbox-world";
+import { type ReadTripwire, readTripwire } from "../support/data/read-tripwire";
 import { cacheRow } from "../support/data/rows";
 
 /**
@@ -400,6 +401,7 @@ describe("R46: should the queue read and the claim ever disagree about a stop, t
   for (const mechanism of ["marker", "memory"] as const)
     test(`${mechanism}: a queue read that cannot see the stop and a claim that can: the draft is refused, nothing is written or sent, and the attempts are paced`, async () => {
       const w = await world();
+      let tripwire: ReadTripwire | null = null;
       try {
         await queued(w);
         await facadeStop(w, mechanism);
@@ -407,12 +409,24 @@ describe("R46: should the queue read and the claim ever disagree about a stop, t
         if (mechanism === "marker")
           w.markers.inspect = () => ({ operations: [], known: true });
         else w.markers.stops.operations = () => [];
+        // Each queue read is counted as it commits, by whichever pump (R29, revision 24). A hot loop never lets the world go idle, and
+        // its 31st read already disproves the bound: the run is stopped there, and the assertion below is reached at once. A run that
+        // never passes it is observed for the whole ten seconds, as before.
+        tripwire = readTripwire(w.env.world, {
+          label: "data.readDispatchWindow",
+          limit: 30,
+          seed: reads(w, "data.readDispatchWindow"),
+          onViolation: () => w.dispatcher.stop(),
+        });
         w.online = true;
         w.start();
-        // A hot loop never lets the world go idle: what is asserted is how often the queue was read and what was written.
-        await w.settle().catch(() => undefined);
-        await w.advance(10_000).catch(() => undefined);
-        expect(reads(w, "data.readDispatchWindow")).toBeLessThanOrEqual(30);
+        await w.settle();
+        if (tripwire.violation === null) await w.advance(10_000);
+        tripwire.check();
+        if (tripwire.count !== reads(w, "data.readDispatchWindow"))
+          throw new Error(
+            `the tripwire counted ${tripwire.count} queue reads and the log holds ${reads(w, "data.readDispatchWindow")}`,
+          );
         expect(w.sent).toHaveLength(0);
         expect(written(w, "data.markInFlight")).toBe(0);
         // The stop is still there (the blind question is the window's, so `where` is read through the page's own answer).
@@ -421,7 +435,9 @@ describe("R46: should the queue read and the claim ever disagree about a stop, t
             ? markerStands(w.markerStorage, account(w), "draft:a")
             : w.markers.stops.has(w.service, "draft:a"),
         ).toBe(true);
+        expect(reads(w, "data.readDispatchWindow")).toBeLessThanOrEqual(30);
       } finally {
+        tripwire?.dispose();
         finish(w);
       }
     });
@@ -728,6 +744,96 @@ describe("R46: markInFlight refuses a stopped draft in its own transaction and l
         value: { kind: "gone" },
       });
       expect(await claim(w, "a")).toMatchObject({ value: { kind: "claimed" } });
+    } finally {
+      finish(w);
+    }
+  });
+});
+
+// ---- R21 (WEB-14a revision 14): a compatibility answer is not a recovery -------------------------------------------------------------
+describe("R21: no compatibility answer, in any order, lifts a stop or sends the stopped draft; only the explicit retry does", () => {
+  const STOPPED = (mechanism: Mechanism) => ({
+    kind: "stopped",
+    cause: "local_storage",
+    ...(mechanism === "memory" ? { memoryOnly: true as const } : {}),
+  });
+  const HELD = { kind: "held", reason: "compat_unconfirmed" };
+  /** A reconnect's sequence of answers (WEB-14a: `online` withdraws `supported` to `unknown` before the fresh answer). */
+  const ANSWERS = [
+    { compat: { status: "unknown" } as const, state: () => HELD },
+    {
+      compat: {
+        status: "unsupported",
+        version: "0.29.0",
+        supported: ">=0.28.0 <0.29.0",
+      } as const,
+      state: () => ({ kind: "paused", reason: "compat_unsupported" }),
+    },
+    { compat: { status: "unknown" } as const, state: () => HELD },
+    {
+      compat: { status: "missing" } as const,
+      state: () => ({ kind: "paused", reason: "compat_missing" }),
+    },
+    { compat: { status: "unreachable" } as const, state: () => HELD },
+    {
+      compat: { status: "supported", version: "0.28.0" } as const,
+      state: (m: Mechanism) => STOPPED(m),
+    },
+    { compat: { status: "unknown" } as const, state: () => HELD },
+    {
+      compat: { status: "supported", version: "0.28.0" } as const,
+      state: (m: Mechanism) => STOPPED(m),
+    },
+  ];
+
+  for (const mechanism of MECHANISMS)
+    test(`${mechanism}: unknown, unsupported, missing, unreachable and supported again leave the stop exactly as recorded and nothing sent`, async () => {
+      const w = await world();
+      try {
+        await queued(w);
+        await stopWhileHeld(w, "data.readDispatchWindow", () =>
+          facadeStop(w, mechanism),
+        );
+        expect(w.dispatcher.state.get()).toEqual(STOPPED(mechanism));
+        for (const [step, answer] of ANSWERS.entries()) {
+          w.compat.set(answer.compat);
+          await w.settle();
+          await w.advance(10_000);
+          const at = `answer ${step + 1}: ${answer.compat.status}`;
+          expect(w.dispatcher.state.get(), at).toEqual(answer.state(mechanism));
+          expect(w.sent, at).toHaveLength(0);
+          expect(where(w, "draft:a"), at).toEqual(STANDING(mechanism));
+          expect(w.outbox.storageNotResponding.get(), at).toBe(true);
+          expect(w.outbox.storageMemoryOnly.get(), at).toBe(
+            mechanism === "memory",
+          );
+          expect(w.drafts()[0]?.status, at).toBe("queued");
+        }
+        w.outbox.retry("a");
+        await w.settle();
+        await w.advance(10_000);
+        expect(w.sent.map((s) => s.key)).toEqual(["a"]);
+        expect(where(w, "draft:a")).toEqual(NOTHING);
+      } finally {
+        finish(w);
+      }
+    });
+
+  test("control: with NO stop, an unconfirmed answer holds the draft and the fresh supported answer sends it exactly once", async () => {
+    const w = await world();
+    try {
+      w.compat.set({ status: "unknown" });
+      await queued(w);
+      w.online = true;
+      w.start();
+      await w.settle();
+      await w.advance(10_000);
+      expect(w.dispatcher.state.get()).toEqual(HELD);
+      expect(w.sent).toHaveLength(0);
+      w.compat.set({ status: "supported", version: "0.28.0" });
+      await w.settle();
+      await w.advance(10_000);
+      expect(w.sent.map((s) => s.key)).toEqual(["a"]);
     } finally {
       finish(w);
     }

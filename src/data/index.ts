@@ -8,6 +8,7 @@
  * `src/data` modules side-effect free, so a boot that uses only the ports does not pull the rest of this file's graph along.
  */
 
+export type { AccountService } from "./engine/account-service";
 export type {
   Acquisition,
   DefaultsSource,
@@ -36,6 +37,8 @@ export type {
   ExpectedPredecessor,
   TargetNeeds,
   TargetSpec,
+  TimerExpectation,
+  TimerSeen,
 } from "./model/outbox";
 export { OutboxRequestError } from "./model/outbox";
 // ---- status, queue and profile for the UI (plan 5.7, 5.8) -----------------------------------------------------------------------
@@ -89,6 +92,7 @@ export type {
 export type {
   AccountId,
   CacheRow,
+  Captured,
   DraftRow,
   DraftStatus,
   DraftWithCommand,
@@ -96,6 +100,9 @@ export type {
   FormRecoveryRow,
   JsonObject,
   LocalId,
+  MaterialiseDiscovery,
+  MaterialiseRetry,
+  MaterialiseSequenceRow,
   ProjectionPatch,
   ResourceId,
   ResourceKind,
@@ -212,6 +219,7 @@ export {
   useDataActions,
   useDataEnv,
   useDraftQueue,
+  useFormRecoveryPort,
   useNotices,
   useOptionalDataEnv,
   useOutstanding,
@@ -237,3 +245,37 @@ export {
   type Stage,
   scanResources,
 } from "./ui/scan";
+// ---- WEB-10c: the catch-up sequences (W28) and the running-timer copy (W29); only the lazy task screens import them ----------------
+export {
+  clearSatisfiedSequences,
+  commitMaterialiseDiscovery,
+  commitMaterialiseLift,
+  commitMaterialiseSequence,
+  commitTimerCopy,
+  commitTimerCorrection,
+  commitTimerEnded,
+  DISCOVERY_REQUEST_ID,
+  type DiscoveryWrite,
+  issueTimerOrderNow,
+  type RecordCommit,
+  readMaterialiseDiscoveryNow,
+  readMaterialiseSequenceNow,
+  readSequencePageNow,
+  readTaskSequencesNow,
+  readTimerAuthorityNow,
+  type SequenceExpectation,
+  type SequenceKey,
+  type SequenceWrite,
+  TASK_SEQUENCE_ROWS,
+  type TaskSequences,
+  type TaskSequencesAsk,
+  TIMER_COPY_ROWS,
+  type TimerAuthorityRecord,
+  type TimerCopyRecord,
+  type TimerScopeObservation,
+  type TimerScopeRecord,
+  timerAuthorityOf,
+  useMaterialiseDiscovery,
+  useTaskSequences,
+  useTimerAuthority,
+} from "./ui/task-records";

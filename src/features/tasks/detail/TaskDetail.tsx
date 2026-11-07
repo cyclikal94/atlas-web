@@ -3,6 +3,7 @@ import { useId, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
+import { GroupedSection } from "../../../components/ui/grouped";
 import { Label } from "../../../components/ui/label";
 import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -11,11 +12,12 @@ import {
   useDataEnv,
   useDraftWithCommand,
 } from "../../../data";
-import { ResourcePolicyEditor } from "../../sharing";
+import { PolicyEditorRecoveryHost, ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
+import { CatchUpNotice } from "../catchup/CatchUpNotice";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { dayLabel, longDayLabel } from "../format";
+import { dayLabel, longDayLabel, whoLabel } from "../format";
 import { commandOf, reviseOccurrence } from "../model/commands";
 import {
   type SubmittedCorrection,
@@ -23,12 +25,18 @@ import {
 } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import { editable } from "../reasons";
+import { STREAK_COPY } from "../streak/StreakPage";
 import { pillTone } from "../today/TodayRow";
 import type { RowModel } from "../view";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
-import { CORRECTION_COPY, CorrectionDialog } from "./CorrectionDialog";
+import {
+  CORRECTION_COPY,
+  CorrectionDialog,
+  CorrectionRecoveryHost,
+} from "./CorrectionDialog";
+import { DayWork } from "./DayWork";
 import { EntryHistory } from "./EntryHistory";
-import { RecordCard } from "./RecordCard";
+import { ROTA_COPY, RotaPanel } from "./Rota";
 import { useTaskDetail } from "./useTaskDetail";
 
 export const DETAIL_COPY = {
@@ -88,7 +96,7 @@ function ReadError({
   );
 }
 
-/** WF-TASK-01: the task detail for one occurrence (not the timer, prerequisite or streak blocks: WEB-10c). */
+/** WF-TASK-01: the task detail for one occurrence, with WEB-10c's "What needs doing first", timer, streak link and rota blocks. */
 export function TaskDetail({
   taskId,
   occurrence,
@@ -108,6 +116,7 @@ export function TaskDetail({
   // "Show this task's days" chose the default day in place (DA19-I1): its control is gone, so the day's record card takes focus.
   const [choseAgain, setChoseAgain] = useState(false);
   const dayId = useId();
+  const rotaId = useId();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   // A correction that met another one (version conflict): what the person submitted is read from the queued operation itself (revision 2,
   // C5), so the choice survives a reload, another tab and a second conflict of its own replacement.
@@ -267,6 +276,12 @@ export function TaskDetail({
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
       ) : null}
+      <CatchUpNotice
+        key={task.id}
+        taskId={task.id}
+        title={task.label}
+        day={row?.data.slot.date ?? undefined}
+      />
       {view.occurrences.length > 1 ||
       view.days.more ||
       view.days.previous ||
@@ -380,14 +395,34 @@ export function TaskDetail({
               writable={env.writable}
             />
           ) : null}
-          <RecordCard
-            key={`record:${row.id}`}
+          <Facts row={row} taskId={task.id} me={env.accountId} />
+          <DayWork
+            key={`day:${row.id}`}
             row={row}
             actions={actions}
             now={view.now}
             zone={zone}
             writable={env.writable}
             focus={focusRecord === true || choseAgain}
+            extra={
+              row.data.definition.participation === "anyone" ? (
+                <GroupedSection
+                  aria-labelledby={rotaId}
+                  data-rota-section=""
+                  heading={<h2 id={rotaId}>{ROTA_COPY.heading}</h2>}
+                >
+                  <RotaPanel
+                    key={`rota:${task.id}`}
+                    row={row}
+                    canEditOrder={view.execution?.can_edit === true}
+                    days={view.occurrences.flatMap((o) =>
+                      o.data === null ? [] : [{ id: o.id, data: o.data }],
+                    )}
+                    definition={row.data.definition}
+                  />
+                </GroupedSection>
+              ) : null
+            }
           />
           <EntryHistory
             key={`history:${row.id}`}
@@ -402,6 +437,14 @@ export function TaskDetail({
             joint={view.joint}
             progressRows={view.progressRows}
           />
+          {row.streamPresent && view.synced && sharing === null ? (
+            // Revision 37 (WEB-14a R40): a sharing draft left by the page before an update reopens its editor.
+            <PolicyEditorRecoveryHost
+              identity={env.identity}
+              resourceId={row.progressId}
+              onOpen={setSharing}
+            />
+          ) : null}
           {row.streamPresent && view.synced ? (
             <span>
               <Button
@@ -417,6 +460,15 @@ export function TaskDetail({
             actions={actions}
             writable={env.writable}
           />
+          {correcting === null ? (
+            // Revision 37 (WEB-14a R40): a correction left by the page before an update is restored and its dialog opened again.
+            <CorrectionRecoveryHost
+              key={`correction-recovery:${row.id}`}
+              row={row}
+              identity={env.identity}
+              onRestored={setCorrecting}
+            />
+          ) : null}
           {correcting === row.id ? (
             <CorrectionDialog
               key={`correction:${row.id}`}
@@ -441,6 +493,87 @@ export function TaskDetail({
         />
       ) : null}
     </article>
+  );
+}
+
+/**
+ * The facts strip (the Final design): the day, who takes part, how the task repeats, what happens when it is missed, and the way to its
+ * streak, as short labelled cells over the day's work. A fact that is a decision or a reference lives in the grouped box below instead.
+ */
+function Facts({
+  row,
+  taskId,
+  me,
+}: {
+  row: RowModel;
+  taskId: string;
+  me: string;
+}) {
+  const definition = row.data.definition;
+  const cells: { key: string; label: string; value: string }[] = [
+    {
+      key: "day",
+      label: copy.FACTS.day,
+      value:
+        row.data.slot.date === null
+          ? DETAIL_COPY.undated
+          : dayLabel(row.data.slot.date),
+    },
+    {
+      key: "who",
+      label: copy.FACTS.who,
+      value:
+        definition.participation === "personal"
+          ? copy.PARTICIPATION.personal
+          : `${copy.PARTICIPATION[definition.participation]} · ${whoLabel(row, me)}`,
+    },
+    {
+      key: "repeat",
+      label: copy.FACTS.repeat,
+      value: copy.CADENCE(definition.schedule.repeat),
+    },
+    {
+      key: "carry",
+      label: copy.FACTS.carry,
+      value: copy.CARRY[definition.carry].label,
+    },
+    {
+      key: "goal",
+      label: copy.FACTS.goal,
+      value: copy.GOAL_FACT(definition.goal),
+    },
+  ];
+  const cell =
+    "flex min-h-[72px] flex-col justify-center gap-1 bg-card px-4 py-3";
+  const label =
+    "text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground";
+  return (
+    <dl
+      className="m-0 grid grid-cols-2 gap-px overflow-hidden rounded-[14px] border border-border bg-border tablet:grid-cols-3"
+      data-task-facts=""
+    >
+      {cells.map((fact) => (
+        <div key={fact.key} className={cell} data-fact={fact.key}>
+          <dt className={label}>{fact.label}</dt>
+          <dd className="m-0 text-sm font-medium text-foreground">
+            {fact.value}
+          </dd>
+        </div>
+      ))}
+      <div className={cell} data-fact="streak">
+        <dt className={label}>{copy.FACTS.streak}</dt>
+        <dd className="m-0">
+          <Link
+            to="/tasks/$taskId/streak"
+            params={{ taskId }}
+            data-streak-link=""
+            className="atlas-transition inline-flex min-h-11 items-center text-sm font-medium text-primary hover:underline"
+          >
+            {STREAK_COPY.link}
+          </Link>
+        </dd>
+      </div>
+    </dl>
   );
 }
 

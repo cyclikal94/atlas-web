@@ -1,10 +1,18 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { completeKept, keptKey, useKeptInput } from "../kept-input";
+import {
+  completeKept,
+  type KeptRecovery,
+  type KeptTicket,
+  keptKey,
+  useKeptInput,
+} from "../kept-input";
+import type { Evidence } from "../model/contract";
 import { parseDecimalInput } from "../model/decimal";
 import { MESSAGES } from "../model/form";
 import { recordBlock } from "../reasons";
@@ -30,6 +38,28 @@ export const RECORD_COPY = {
  * it" (`observe`), or one checkbox per checklist item. Every act appends evidence; nothing is ever deleted. Disabled with its reason when
  * I cannot record now. A unit of seconds still records a quantity (the timer is WEB-10c's).
  */
+type RecordInput = { mode: "amount" | "observe"; amount: string };
+
+const recordRecovery = (progressId: string): KeptRecovery<RecordInput> => ({
+  context: `record:${progressId}`,
+  encode: (input) =>
+    JSON.stringify({ v: 1, mode: input.mode, amount: input.amount }),
+  decode: (text) => {
+    try {
+      const raw = JSON.parse(text) as Record<string, unknown> | null;
+      return raw !== null &&
+        typeof raw === "object" &&
+        raw.v === 1 &&
+        (raw.mode === "amount" || raw.mode === "observe") &&
+        typeof raw.amount === "string"
+        ? { mode: raw.mode, amount: raw.amount }
+        : null;
+    } catch {
+      return null;
+    }
+  },
+});
+
 export function RecordCard({
   row,
   actions,
@@ -37,6 +67,7 @@ export function RecordCard({
   zone,
   writable,
   focus,
+  gate,
 }: {
   row: RowModel;
   actions: Pick<TaskActions, "record">;
@@ -45,6 +76,11 @@ export function RecordCard({
   writable: boolean;
   /** Arrived from Today's "Record": the card takes focus. */
   focus?: boolean;
+  /**
+   * WEB-10c: evidence that would complete a day still waiting for something opens the preview instead of a plain record (`true`: it
+   * did, and owns the ticket from then on). Absent: every record is queued as before.
+   */
+  gate?: (evidence: Evidence, ticket: KeptTicket | null) => boolean;
 }) {
   const env = useTasksEnv();
   const heading = useId();
@@ -53,13 +89,25 @@ export function RecordCard({
   // this day (revision 18, R33; `kept-input.ts`): a visit to the sync screens keeps them, raw, and coming back shows them again. Every edit
   // moves the session's revision: a save clears the amount only if nothing was typed after the amount it submitted (R3, revision 1;
   // PRODUCT-DECISIONS-20261011), whichever mount made it: a successful older save never consumes newer input.
-  const input = useKeptInput<{ mode: "amount" | "observe"; amount: string }>(
+  // Revision 37 (WEB-14a R40): recoverable around an app-update reload (Q4), for exactly this progress stream (the day's occurrence and me):
+  // a copy is restored only into this card, never into another day's.
+  const input = useKeptInput<RecordInput>(
     keptKey(env.identity, `record:${row.progressId}`),
     env.identity,
     () => ({ mode: "amount", amount: "" }),
-    { consumed: (submitted) => ({ ...submitted, amount: "" }) },
+    {
+      consumed: (submitted) => ({ ...submitted, amount: "" }),
+      recover: recordRecovery(row.progressId),
+    },
   );
   const { mode, amount } = input.value;
+  const amountRef = useRef<HTMLInputElement>(null);
+  // WEB-14a revision 51 (DA-N1, F-R51-1): the restored card's first field is the amount when "Log an amount" is chosen, else the chosen
+  // mode itself ("Just checked on it" has no amount field), read from the committed DOM at each attempt, so "Discard instead" from the
+  // observe mode focuses the amount field its reset brings back. A goal with neither (nothing of it is kept) falls back to the card.
+  const modeRef = useRef<HTMLInputElement>(null);
+  const restoredFocus = () =>
+    amountRef.current ?? modeRef.current ?? section.current;
   const [error, setError] = useState<string | null>(null);
   const [running, setBusy] = useState(false);
   const busy = running || input.busy;
@@ -98,6 +146,12 @@ export function RecordCard({
       >
         {RECORD_COPY.heading}
       </h2>
+      {input.recovery ? (
+        <RecoveryNotice
+          recovery={input.recovery}
+          firstFieldRef={restoredFocus}
+        />
+      ) : null}
       {goal.kind === "checkbox" ? (
         <span>
           {reason !== null || busy ? (
@@ -105,16 +159,21 @@ export function RecordCard({
           ) : (
             <Button
               variant={done ? "outline" : "default"}
-              onClick={() =>
+              onClick={() => {
+                const evidence: Evidence = {
+                  kind: "checkbox",
+                  complete: !done,
+                };
+                if (gate?.(evidence, null)) return;
                 void run(() =>
                   actions.record(
                     row,
-                    { kind: "checkbox", complete: !done },
+                    evidence,
                     null,
                     done ? copy.ANNOUNCE_NOT_DONE : copy.ANNOUNCE_DONE,
                   ),
-                )
-              }
+                );
+              }}
             >
               {done ? copy.MARK_NOT_DONE : copy.MARK_DONE}
             </Button>
@@ -137,6 +196,7 @@ export function RecordCard({
                 className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
               >
                 <input
+                  ref={mode === m ? modeRef : undefined}
                   type="radio"
                   name={`${heading}-mode`}
                   checked={mode === m}
@@ -151,6 +211,7 @@ export function RecordCard({
             <div className="flex flex-wrap items-end gap-2">
               <div className="w-32">
                 <Input
+                  ref={amountRef}
                   label={`${RECORD_COPY.amount} (${goal.unit})`}
                   inputMode="decimal"
                   value={amount}
@@ -176,6 +237,8 @@ export function RecordCard({
                     }
                     const ticket = input.submit();
                     if (ticket === null) return;
+                    if (gate?.({ kind: "quantity", amount: value }, ticket))
+                      return;
                     void (async () => {
                       let ok = false;
                       try {
@@ -241,21 +304,23 @@ export function RecordCard({
                     aria-describedby={
                       reason !== null ? `${heading}-reason` : undefined
                     }
-                    onChange={() =>
+                    onChange={() => {
+                      const evidence: Evidence = {
+                        kind: "checklist",
+                        item_id: item.id,
+                        complete: !checked,
+                      };
+                      if (gate?.(evidence, null)) return;
                       void run(() =>
                         actions.record(
                           row,
-                          {
-                            kind: "checklist",
-                            item_id: item.id,
-                            complete: !checked,
-                          },
+                          evidence,
                           null,
                           RECORD_COPY.recorded,
                         ),
-                      )
-                    }
-                    className="size-4"
+                      );
+                    }}
+                    className="size-[15px]"
                   />
                   {item.label}
                 </label>

@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { useEffect, useId, useReducer, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -17,6 +17,12 @@ import {
   useMergedUnder,
   useSharingDefaults,
 } from "../../../data";
+import {
+  type Activity,
+  admitActivity,
+} from "../../../lib/form-recovery/activity";
+import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { canonicalBody, ResourcePolicyEditor, untilSent } from "../../sharing";
 import {
   applyPolicyChange,
@@ -25,6 +31,11 @@ import {
 import { archiveRequestFor, archiveSaved, archiveTarget } from "../archive";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
+import {
+  completeTicket,
+  endPeopleRecovery,
+  usePeopleRecovery,
+} from "../form-recovery";
 import {
   type Admission,
   admit,
@@ -64,6 +75,7 @@ import {
 import {
   applicable,
   type ExistingAudience,
+  type FieldFormAction,
   type FieldFormState,
   type FieldInputProblem,
   fromField,
@@ -78,6 +90,7 @@ import {
   projectedRows,
   type ShownRow,
 } from "../model/project";
+import { type FieldInput, fieldCodec } from "../model/recovery";
 import {
   draftFieldContent,
   type EditSnapshot,
@@ -520,13 +533,8 @@ function Editor({
   const draftKey = `field:${person.row.id}:${field?.row.id ?? "new"}`;
   const existing = field?.row ?? null;
   const parsed = existing === null ? null : parseFieldValue(existing.value);
-  const [initial] = useState<{ retained: Retained; restored: boolean }>(() => {
-    const kept = env.memory.drafts.get(draftKey) as Retained | undefined;
-    if (kept !== undefined)
-      return {
-        retained: { ...kept, session: sessionOf(kept) ?? env.newId() },
-        restored: true,
-      };
+  /** What an editor opened now starts from, for `session` (its new field's id given). */
+  const freshStart = (session: string, newFieldId: string): Retained => {
     const form =
       existing !== null && parsed !== null
         ? fromField({ label: existing.label, value: parsed }, env.newId)
@@ -546,25 +554,33 @@ function Editor({
             }
           : { kind: "field" };
     return {
-      retained: {
-        session: env.newId(),
-        form,
-        newFieldId: env.newId(),
-        touched: false,
-        snapshot:
-          existing === null || origin.kind !== "field"
-            ? null
-            : snapshotOf(existing, drafts, field?.latest?.localId ?? null),
-        origin,
-      },
-      restored: false,
+      session,
+      form,
+      newFieldId,
+      touched: false,
+      snapshot:
+        existing === null || origin.kind !== "field"
+          ? null
+          : snapshotOf(existing, drafts, field?.latest?.localId ?? null),
+      origin,
     };
+  };
+  const [initial] = useState<{ retained: Retained; restored: boolean }>(() => {
+    const kept = env.memory.drafts.get(draftKey) as Retained | undefined;
+    if (kept !== undefined)
+      return {
+        retained: { ...kept, session: sessionOf(kept) ?? env.newId() },
+        restored: true,
+      };
+    return { retained: freshStart(env.newId(), env.newId()), restored: false };
   });
-  const origin = initial.retained.origin;
+  // WEB-14a (F-INT-PEOPLE-Q4): where the edit began and its new field's id are the session's, and a copy restored brings its own.
+  const [origin, setOrigin] = useState<EditOrigin>(initial.retained.origin);
+  const [newFieldId, setNewFieldId] = useState(initial.retained.newFieldId);
   // The outstanding saves as they are read NOW (a save decides on the latest read, not the one of the render that started it).
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
-  const [state, dispatch] = useReducer(reduceFieldForm, initial.retained.form);
+  const [state, setForm] = useState<FieldFormState>(initial.retained.form);
   const [touched, setTouched] = useState(initial.retained.touched);
   const [snapshot, setSnapshot] = useState(initial.retained.snapshot);
   const [problems, setProblems] = useState<
@@ -586,26 +602,87 @@ function Editor({
   // The draft is kept for this identity while the editor is open (a remount reopens it); dismissing the editor forgets it, and nothing
   // of this form keeps it again after that (review 8, finding 1).
   const retired = useRef(false);
+  // The editor's first field: focused when B restores it and after "Discard instead" (WEB-14a revision 51, F-R51-1).
+  const nameRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (retired.current) return;
     env.memory.drafts.set(draftKey, {
       session,
       form: state,
-      newFieldId: initial.retained.newFieldId,
+      newFieldId,
       touched,
       snapshot,
       origin,
     } satisfies Retained);
-  }, [
-    env,
-    draftKey,
+  }, [env, draftKey, session, state, touched, snapshot, newFieldId, origin]);
+  // WEB-14a (F-INT-PEOPLE-Q4): the input as last given (the recoverable model has it in the same step), and the model of this target.
+  const input = useRef<FieldInput>({
+    form: initial.retained.form,
+    touched: initial.retained.touched,
+    snapshot: initial.retained.snapshot,
+    origin: initial.retained.origin,
+    newFieldId: initial.retained.newFieldId,
+  });
+  const take = (next: FieldInput) => {
+    input.current = next;
+    setForm(next.form);
+    setTouched(next.touched);
+    setSnapshot(next.snapshot);
+    setOrigin(next.origin);
+    setNewFieldId(next.newFieldId);
+  };
+  const recovery = usePeopleRecovery<FieldInput>({
+    memory: env.memory,
+    key: draftKey,
     session,
-    state,
-    touched,
-    snapshot,
-    initial.retained.newFieldId,
-    origin,
-  ]);
+    codec: fieldCodec(person.row.id, field?.row.id ?? null),
+    // A new session starts where it opened; "Discard instead" shows the field as it is now, under the session's own new field id.
+    start: () => {
+      const start = initial.restored
+        ? freshStart(session, input.current.newFieldId)
+        : initial.retained;
+      return {
+        form: start.form,
+        touched: start.touched,
+        snapshot: start.snapshot,
+        origin: input.current.origin,
+        newFieldId: input.current.newFieldId,
+      };
+    },
+    value: () => input.current,
+    holds: () => {
+      const kept = env.memory.drafts.get(draftKey) as Retained | undefined;
+      return (
+        kept !== undefined &&
+        (kept.form.revision > 0 || isPending(env.memory, kept.session))
+      );
+    },
+    untouched: () =>
+      input.current.form.revision === 0 && !isPending(env.memory, session),
+    busy: () => isPending(env.memory, session),
+    // A copy restored, or "Discard instead": the session's input from now on (a new revision, never 0 again).
+    restored: (value) =>
+      take({
+        ...value,
+        form: { ...value.form, revision: input.current.form.revision + 1 },
+      }),
+    reset: (value) =>
+      take({
+        ...value,
+        form: { ...value.form, revision: input.current.form.revision + 1 },
+      }),
+  });
+  /** The person's change: given to the recoverable model first, and not taken while an update reload is being prepared. */
+  const change = (action: FieldFormAction, also: { touched?: true } = {}) => {
+    const next = {
+      ...input.current,
+      ...also,
+      form: reduceFieldForm(input.current.form, action),
+    };
+    if (!recovery.edit(next)) return false;
+    take(next);
+    return true;
+  };
   // Only this session ends (never a later session's under the same key), and only by the view shown now: a handler of an editor that was
   // replaced (another field's route, the reads read again) ends nothing and navigates nowhere (review 9, finding 1).
   const shown = useShown();
@@ -625,6 +702,18 @@ function Editor({
     close,
     keep: () => setOutcome({ kind: "message", text: copy.LATER_EDITS_KEPT }),
     report: (update) => {
+      // A re-binding the save confirmed is what the save left in the input, never the person's edit (WEB-14a, F-INT-PEOPLE-Q4).
+      if (update.snapshot !== undefined || update.touched !== undefined) {
+        const next = {
+          ...input.current,
+          ...(update.snapshot !== undefined
+            ? { snapshot: update.snapshot }
+            : {}),
+          ...(update.touched !== undefined ? { touched: update.touched } : {}),
+        };
+        input.current = next;
+        recovery.settle(next);
+      }
       if (update.snapshot !== undefined) setSnapshot(update.snapshot);
       if (update.touched !== undefined) setTouched(update.touched);
       if (update.outcome !== undefined) setOutcome(update.outcome);
@@ -889,7 +978,7 @@ function Editor({
         },
       });
   };
-  const succeeded = (message: string, ticket: number) => {
+  const saved = (message: string, ticket: number) => {
     announcer.announce(message, "polite");
     // A change made while saving stays, unsaved (the ticket): only a success for the current revision ends the session, and only the
     // session this save was made in (a later "Add a field" after Cancel is another session's, never closed or forgotten by this one).
@@ -962,18 +1051,28 @@ function Editor({
   };
 
   /** One save of this session, admitted by `submit` (never on its own). */
-  const run = async (choice?: "save_now" | "hold") => {
-    const ready = applicable(state);
+  const run = async (
+    choice: "save_now" | "hold" | undefined,
+    done: () => void,
+  ) => {
+    // The input as the recoverable model has it (what the submission's ticket records), read in the same step.
+    const now = input.current.form;
+    const ready = applicable(now);
     if (!ready.ok) {
       setProblems(ready.problems);
       return;
     }
+    // Only a durable success (queued, a receipt, a durable hold) covers what was sent (WEB-14a, F-INT-PEOPLE-Q4).
+    const succeeded = (message: string, ticket: number) => {
+      done();
+      saved(message, ticket);
+    };
     setProblems({});
     tell({ outcome: null });
-    const ticket = state.revision;
+    const ticket = now.revision;
     // ---- create ----
     if (isNew) {
-      const fieldId = initial.retained.newFieldId;
+      const fieldId = input.current.newFieldId;
       const choiceNew = state.audience as NewAudience;
       if (choiceNew === "home") {
         const policy = selected;
@@ -1264,10 +1363,21 @@ function Editor({
     if (!owns()) return;
     const admission = admit(env.memory, [session], env.newId);
     if (admission === null) return;
+    // WEB-14a (F-INT-PEOPLE-Q4): the recoverable model's ticket, in the same step (none while an update reload is prepared: nothing is
+    // sent then). A refusal, an uncertain attempt, a stale binding or a partial save keeps the input for an update to save first.
+    const kept = recovery.submitting();
+    if (kept === null) {
+      settle(admission);
+      return;
+    }
+    let durable = false;
     try {
-      await run(choice);
+      await run(choice, () => {
+        durable = true;
+      });
     } finally {
       settle(admission);
+      completeTicket(kept, durable);
     }
   };
 
@@ -1293,6 +1403,10 @@ function Editor({
       drafts,
       field?.latest?.localId ?? null,
     );
+    // The person's act: given to the recoverable model first (not taken while an update reload is being prepared).
+    const next = { ...input.current, snapshot: binding };
+    if (!recovery.edit(next)) return;
+    input.current = next;
     setSnapshot(binding);
     setOutcome(null);
     setResubmit({ binding, revision: state.revision });
@@ -1328,13 +1442,23 @@ function Editor({
 
   /** "Save mine on the current version" of a CONFLICTED save (finding 3): ITS content, on the version and audience the person sees now. */
   const saveConflicted = async (draft: DraftWithCommand) => {
-    if (!owns()) return;
+    // No new work while an update reload is being prepared (WEB-14a, F-INT-PEOPLE-Q4).
+    if (!owns() || recovery.frozen()) return;
     const admission = admit(env.memory, [session], env.newId);
     if (admission === null) return;
+    // WEB-14a revision 50 (review of revision 49, F-R49-1): outstanding for an update from this same step until it ends, whatever shows
+    // the editor meanwhile (the sync control, a remount). It sends the CONFLICTED save, not the editor's input, so it is page work, never
+    // the model's ticket: its success must not mark the input saved (typed input stays unfinished, and an update saves it).
+    const outstanding = admitActivity(`people-field-conflict:${session}`);
+    if (outstanding === null) {
+      settle(admission);
+      return;
+    }
     try {
       await saveConflictedAdmitted(draft);
     } finally {
       settle(admission);
+      outstanding.end();
     }
   };
   const saveConflictedAdmitted = async (draft: DraftWithCommand) => {
@@ -1402,15 +1526,19 @@ function Editor({
   const offline = outcome?.kind === "offline_choice";
   const saveReason = !env.writable
     ? copy.READ_ONLY_COMPAT
-    : saving
-      ? copy.SAVING
-      : isNew && state.audience === "defaults" && defaults.status === "loading"
-        ? copy.DEFAULTS_LOADING_REASON
-        : needsReview
-          ? copy.PUBLISHED_REVIEW_FIRST
-          : !isNew && !projected && snapshot?.policyVersion == null
-            ? copy.WAIT_FOR_SYNC_FIELD
-            : null;
+    : recovery.locked
+      ? UNAVAILABLE_WHILE_RELOADING
+      : saving
+        ? copy.SAVING
+        : isNew &&
+            state.audience === "defaults" &&
+            defaults.status === "loading"
+          ? copy.DEFAULTS_LOADING_REASON
+          : needsReview
+            ? copy.PUBLISHED_REVIEW_FIRST
+            : !isNew && !projected && snapshot?.policyVersion == null
+              ? copy.WAIT_FOR_SYNC_FIELD
+              : null;
 
   return (
     <Dialog
@@ -1455,15 +1583,25 @@ function Editor({
                 pending={
                   saving || isPending(env.memory, archiveTarget(existing.id))
                 }
-                admission={() =>
-                  owns()
-                    ? admit(
-                        env.memory,
-                        [session, archiveTarget(existing.id)],
-                        env.newId,
-                      )
-                    : null
-                }
+                admission={() => {
+                  if (!owns() || recovery.frozen()) return null;
+                  const admitted = admit(
+                    env.memory,
+                    [session, archiveTarget(existing.id)],
+                    env.newId,
+                  );
+                  if (admitted === null) return null;
+                  // WEB-14a revision 50 (F-R49-1): outstanding for an update from this same step until it ends (its outcome told and, on
+                  // success, the session's input ended), whatever shows the editor meanwhile. Not the model's ticket: it saves no input.
+                  const outstanding = admitActivity(
+                    `people-field-archive:${session}`,
+                  );
+                  if (outstanding === null) {
+                    settle(admitted);
+                    return null;
+                  }
+                  return { admitted, outstanding };
+                }}
                 request={() =>
                   archiveRequestFor(
                     env.memory,
@@ -1475,7 +1613,11 @@ function Editor({
                 }
                 onSaved={() => archiveSaved(env.memory, existing.id)}
                 onRefused={(text) => fail(text)}
-                onDone={() => ended(null)}
+                onDone={() => {
+                  // The archive ends the session's input without a save of it: its copies go (WEB-14a, F-INT-PEOPLE-Q4).
+                  endPeopleRecovery(env.memory.identity, draftKey, session);
+                  ended(null);
+                }}
               />
             ) : null}
             <span className="ml-auto">
@@ -1505,7 +1647,8 @@ function Editor({
         }}
       >
         <fieldset disabled={saving} className="flex flex-col gap-4">
-          {initial.restored ? (
+          <RecoveryNotice recovery={recovery} firstFieldRef={nameRef} />
+          {initial.restored && recovery.view.restored === null ? (
             <p className="text-xs text-muted-foreground">
               {copy.RESTORED_DRAFT}
             </p>
@@ -1593,13 +1736,14 @@ function Editor({
           ) : null}
           <div className="flex flex-col gap-1.5">
             <Input
+              ref={nameRef}
               label={copy.FIELD_NAME}
               value={state.name}
               readOnly={readOnly}
               aria-invalid={problems.name ? true : undefined}
               aria-describedby={problems.name ? nameError : undefined}
               onChange={(event) =>
-                dispatch({ type: "name", value: event.target.value })
+                change({ type: "name", value: event.target.value })
               }
             />
             <FieldError
@@ -1620,7 +1764,7 @@ function Editor({
                 value={state.kind}
                 disabled={readOnly}
                 onChange={(event) =>
-                  dispatch({
+                  change({
                     type: "kind",
                     value: event.target.value as FieldKind,
                   })
@@ -1644,7 +1788,9 @@ function Editor({
           <ValueInput
             kind={state.kind}
             slots={state.slots}
-            dispatch={dispatch}
+            dispatch={(action) => {
+              change(action);
+            }}
             problems={problems}
             newId={env.newId}
             readOnly={readOnly}
@@ -1680,8 +1826,8 @@ function Editor({
                 homeName,
               })}
               onChange={(value) => {
-                setTouched(true);
-                dispatch({ type: "audience", value });
+                if (!change({ type: "audience", value }, { touched: true }))
+                  return;
                 if (outcome?.kind === "offline_choice") setOutcome(null);
               }}
               onChoosePeople={() => setPolicyEditor(true)}
@@ -1968,7 +2114,9 @@ function ReviewPanel({
 /**
  * Archive from the editor: admitted with the editing session AND the field's archive (review 7, finding 1), so it never runs beside
  * the session's save or another archive of the field (from the detail or the ledger, `archive.ts`); its request is the field's prepared
- * archive (a retry is the same save); a refusal is told to the session's form now.
+ * archive (a retry is the same save); a refusal is told to the session's form now. WEB-14a revision 50 (F-R49-1): the admission's
+ * `outstanding` page work is ended only after everything the outcome does (the session's input ended on success), so an update never
+ * finds the editor's input in between.
  */
 function ArchiveInEditor({
   pending,
@@ -1979,7 +2127,7 @@ function ArchiveInEditor({
   onDone,
 }: {
   pending: boolean;
-  admission(): Admission | null;
+  admission(): { admitted: Admission; outstanding: Activity } | null;
   request(): EnqueueRequest;
   onSaved(): void;
   onRefused(text: string): void;
@@ -1998,20 +2146,25 @@ function ArchiveInEditor({
       variant="ghost"
       data-people-action="archive-field-editor"
       onClick={async () => {
-        const admitted = admission();
-        if (admitted === null) return;
-        const prepared = request();
-        let outcome: Awaited<ReturnType<typeof save>>;
+        const taken = admission();
+        if (taken === null) return;
+        const { admitted, outstanding } = taken;
         try {
-          outcome = await save((outbox) => outbox.enqueue(prepared));
+          const prepared = request();
+          let outcome: Awaited<ReturnType<typeof save>>;
+          try {
+            outcome = await save((outbox) => outbox.enqueue(prepared));
+          } finally {
+            settle(admitted);
+          }
+          if (outcome.ok) {
+            onSaved();
+            announcer.announce(copy.SAVED_NOT_SENT, "polite");
+            onDone();
+          } else if (outcome.message !== null) onRefused(outcome.message);
         } finally {
-          settle(admitted);
+          outstanding.end();
         }
-        if (outcome.ok) {
-          onSaved();
-          announcer.announce(copy.SAVED_NOT_SENT, "polite");
-          onDone();
-        } else if (outcome.message !== null) onRefused(outcome.message);
       }}
     >
       {copy.ARCHIVE}

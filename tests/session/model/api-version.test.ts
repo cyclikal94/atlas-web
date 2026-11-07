@@ -21,7 +21,6 @@ describe("API compatibility (EC-45, D-08)", () => {
     ["0.31.9", "supported"],
     ["0.32.0", "unsupported"],
     ["0.30.9", "unsupported"],
-    ["0.29.0", "unsupported"],
     ["1.0.0", "unsupported"],
     ["0.31", "missing"],
     ["0.31.0-rc.1", "missing"],

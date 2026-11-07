@@ -93,6 +93,7 @@ export async function defaultsWorld(options: DefaultsWorldOptions = {}) {
   const answers: ReadResult<unknown>[] = [...(options.answers ?? [])];
   const held: Array<(result: ReadResult<unknown>) => void> = [];
   const cancelled = new Set<number>();
+  const scheduled = new Map<number, number>();
   let seq = 0;
   const now = () => EPOCH_BASE + world.world.time;
   const env = createDataEnv({
@@ -136,19 +137,26 @@ export async function defaultsWorld(options: DefaultsWorldOptions = {}) {
       setTimeout: (fn, ms) => {
         seq += 1;
         const id = seq;
-        world.world.schedule(
-          "timer",
-          "A",
-          { timer: id },
-          () => {
-            if (!cancelled.has(id)) fn();
-          },
-          ms,
+        scheduled.set(
+          id,
+          world.world.schedule(
+            "timer",
+            "A",
+            { timer: id },
+            () => {
+              scheduled.delete(id);
+              if (!cancelled.has(id)) fn();
+            },
+            ms,
+          ),
         );
         return id;
       },
       clearTimeout: (handle) => {
         cancelled.add(handle as number);
+        // Withdrawn from the world, as `clearTimeout` removes a timer (R30/DA-H1, revision 25): not delivered later as a no-op.
+        world.world.cancel(scheduled.get(handle as number) ?? 0);
+        scheduled.delete(handle as number);
       },
     },
   });

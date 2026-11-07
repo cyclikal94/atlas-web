@@ -1,22 +1,13 @@
 {
-  "verified_by": "release-download-and-checksums",
+  "verified_by": "github-api-and-release-download",
   "pin_sha256": "28cf0bf46d0de04b59b3a32baf6b47e42372a837576fabfd53d9e6b4e428df3e",
   "repository": "cyclikal94/atlas",
-  "release_id": null,
-  "asset_id": null,
-  "verified_at": "2026-11-05T02:00:00+00:00",
-  "verification_transport": "curl through the session's agent proxy: the public release download path (github.com/.../releases/download/v0.31.0-rc.1/...) and a shallow git clone of the tag; the GitHub REST API was refused from this session, so the release and asset ids are not recorded",
-  "published_checksums_verified": [
-    "SHA256SUMS",
-    "atlas-api-types-0.31.0-rc.1.tgz.sha256"
-  ],
-  "source_verified": true,
-  "source_verification": "the tag v0.31.0-rc.1 resolves to backend commit 7dc51e39fdf296b14ba7c438ad9730fa3485d964 (git ls-remote and a shallow clone of the tag); the package's provenance.json names the same commit, api_version 0.31.0 and the contract sha256 below, which is the sha256 of the installed openapi.json",
+  "release_id": 434659030,
+  "asset_id": 711605049,
   "release_url": "https://github.com/cyclikal94/atlas/releases/download/v0.31.0-rc.1/atlas-api-types-0.31.0-rc.1.tgz",
   "backend_tag": "v0.31.0-rc.1",
   "backend_commit": "7dc51e39fdf296b14ba7c438ad9730fa3485d964",
   "tarball_sha256": "f7a50c868ae2b9cd332bd49161b559aec95c129916e723d2f2616888a7427f90",
   "contract_sha256": "c43796e63d2c5adc54d2c9f9769dcc9e6b85e635f984b15a08520b2db6fee848",
-  "version": "0.31.0-rc.1",
-  "todo": "record release_id and asset_id (and set verified_by to github-api-and-release-download, pin_sha256 to the sha256 of contract-pin.json) from the GitHub REST API before `pnpm check:contract --require-release` can pass"
+  "version": "0.31.0-rc.1"
 }

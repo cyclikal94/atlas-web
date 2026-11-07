@@ -16,6 +16,7 @@ import {
 } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import { CacheGate } from "../../sync/CacheGate";
+import { ActivitySection } from "../activity/ActivitySection";
 import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
@@ -71,7 +72,8 @@ import { useSteadyWhilePressed } from "./steady";
 
 /**
  * WF-PEOPLE-02, the person detail (§4.3): the identity header, the fields table ("Field | Value | Who can see it"), "Add a field", the
- * "Shared with" rail, the "New fields start as" panel, the archived fields and the held audience changes. Everything shown comes from the
+ * "Shared with" rail, WEB-19's "Recent changes" (`activity/ActivitySection.tsx`), the "New fields start as" panel, the archived fields and
+ * the held audience changes. Everything shown comes from the
  * cache with this device's outstanding saves folded over it. A person the cache does not hold (and no save of this device creates) is "not
  * on this device", and NOTHING of theirs stays on screen (PPL-5: a field is shown only under its visible person). Who can see the person
  * and each field comes from the viewer-safe summaries while online (finding 8, `summaries.tsx`), never from owner-only policy reads.
@@ -245,6 +247,7 @@ function PersonRead({
               {shown.projected ? null : (
                 <SharedWithSection personId={personId} />
               )}
+              {shown.projected ? null : <ActivitySection personId={personId} />}
               <DefaultsPanel />
             </GroupedBox>
             {children}

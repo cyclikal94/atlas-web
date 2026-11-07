@@ -72,7 +72,7 @@ export const test = base.extend<{
     { auto: true },
   ],
   consoleGuard: [
-    async ({ page }, use) => {
+    async ({ page }, use, testInfo) => {
       const problems: string[] = [];
       page.on("console", (message) => {
         if (message.type() === "error" || message.type() === "warning")
@@ -82,7 +82,23 @@ export const test = base.extend<{
         problems.push(`pageerror: ${error.message}`),
       );
       await use(undefined);
-      expect(problems, "console errors and warnings").toEqual([]);
+      // WEB-14a revision 40 (P-P8): an HTTP status a case DECLARES it provokes on purpose (a `provokes` annotation, as
+      // `auth-helpers.ts`' `provokes` declares one for the stubbed-API suites) is the browser's own log of a handled answer, not a problem;
+      // everything else still fails the case.
+      const declared = testInfo.annotations
+        .filter((note) => note.type === "provokes")
+        .map((note) => note.description);
+      expect(
+        problems.filter(
+          (problem) =>
+            !declared.some(
+              (status) =>
+                problem.startsWith("error: ") &&
+                problem.includes(`status of ${status} `),
+            ),
+        ),
+        "console errors and warnings",
+      ).toEqual([]);
     },
     { auto: true },
   ],
@@ -106,10 +122,13 @@ interface AxeViolation {
   nodes: Array<{ target: unknown[]; html: string }>;
 }
 
-/** Runs axe-core in the real page, with real layout, so colour-contrast is evaluated (jsdom cannot). */
+/**
+ * Runs axe-core in the real page, with real layout, so colour-contrast is evaluated (jsdom cannot). `context`: a selector to scan, or
+ * (WEB-14a revision 56, C-S2) the parts of the document to leave out; by default the whole document.
+ */
 export async function runAxe(
   page: Page,
-  context?: string,
+  context?: string | { exclude: string[] },
 ): Promise<AxeViolation[]> {
   await page.evaluate(axeSource);
   return page.evaluate(async (selector) => {

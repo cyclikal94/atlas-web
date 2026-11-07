@@ -44,6 +44,11 @@ export interface DialogProps {
    * tablet orientations (the sharing editors: WEB-05.5 `tablet/sharing-portrait.html` and `sharing-landscape.html`, Q14; WEB-12a R6).
    */
   sheetBelow?: "tablet" | "desktop";
+  /**
+   * WEB-18 (D-18-12): `wide` for a dialog that sets a map beside a list (the dependency graph, TASK-04): 640 px from 768 px and 960 px from
+   * 1280 px, never wider than the viewport less 32 px. The default is the generic 440 px panel, unchanged.
+   */
+  size?: "default" | "wide";
 }
 
 /**
@@ -56,6 +61,14 @@ const PANEL: Readonly<Record<"tablet" | "desktop", string>> = {
     "atlas-dialog fixed inset-0 z-50 flex flex-col overflow-hidden bg-card text-card-foreground tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[460px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-xl tablet:border tablet:shadow-lg",
   desktop:
     "atlas-dialog fixed inset-0 z-50 flex flex-col overflow-hidden bg-card text-card-foreground desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[460px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-xl desktop:border desktop:shadow-lg",
+};
+
+/** The wide panel's classes (D-18-12), written out whole for Tailwind. */
+const PANEL_WIDE: Readonly<Record<"tablet" | "desktop", string>> = {
+  tablet:
+    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-card tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[640px] desktop:w-[960px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-xl tablet:border tablet:border-border tablet:shadow-lg",
+  desktop:
+    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-card desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[960px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-xl desktop:border desktop:border-border desktop:shadow-lg",
 };
 
 /**
@@ -97,6 +110,7 @@ export function Dialog({
   returnFocusRef,
   syncControl = true,
   sheetBelow = "tablet",
+  size = "default",
 }: DialogProps) {
   const container = useRequiredPortalContainer();
   const opener = useRef<HTMLElement | null>(null);
@@ -153,6 +167,15 @@ export function Dialog({
             if (event.defaultPrevented) return;
             // Radix would focus a Trigger, which this dialog does not use; return focus explicitly instead.
             event.preventDefault();
+            // Only where nothing has taken focus since the dialog went: a focus request it was holding back (an update's recovery action,
+            // WEB-14a revision 20) keeps it.
+            const active = document.activeElement;
+            if (
+              active &&
+              active !== document.body &&
+              !content?.contains(active)
+            )
+              return;
             const target = returnFocusRef?.current ?? opener.current;
             if (target?.isConnected && target !== document.body) target.focus();
           }}
@@ -170,7 +193,8 @@ export function Dialog({
           }}
           {...(description ? {} : { "aria-describedby": undefined })}
           data-dialog-sheet-below={sheetBelow}
-          className={PANEL[sheetBelow]}
+          {...(size === "wide" ? { "data-dialog-size": "wide" } : {})}
+          className={(size === "wide" ? PANEL_WIDE : PANEL)[sheetBelow]}
         >
           <header className="flex items-center gap-3 border-b px-5 py-4">
             {/*

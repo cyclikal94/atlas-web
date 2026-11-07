@@ -1,4 +1,5 @@
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import type { ReactNode } from "react";
 import { AtlasLockup } from "../../components/ui/brand";
 import { List } from "../../components/ui/list";
 import { SyncStatusChip } from "../../components/ui/sync-status";
@@ -52,7 +53,14 @@ export function useRailCollapsed(mode: Exclude<LayoutMode, "mobile">): boolean {
  * window is too short for every destination, the navigation scrolls inside the rail and the footer stays put. The navigation
  * carries a little padding (and an equal negative margin) so the scroll container does not clip the 2px focus ring at a 2px offset.
  */
-export function Rail({ mode }: { mode: Exclude<LayoutMode, "mobile"> }) {
+export function Rail({
+  mode,
+  footerSlot,
+}: {
+  mode: Exclude<LayoutMode, "mobile">;
+  /** Drawn above the sync status while the sidebar is open: the app update card. */
+  footerSlot?: ReactNode;
+}) {
   const env = useShellEnv();
   const collapsed = useRailCollapsed(mode);
   const pinned = usePinnedLists();
@@ -158,6 +166,7 @@ export function Rail({ mode }: { mode: Exclude<LayoutMode, "mobile"> }) {
           collapsed ? "items-center" : "",
         )}
       >
+        {collapsed ? null : footerSlot}
         <SyncStatusChip variant={collapsed ? "rail-collapsed" : "rail"} />
         {renderSlot(env.accountSlot, collapsed)}
         <div

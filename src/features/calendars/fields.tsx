@@ -1,4 +1,4 @@
-import { type InputHTMLAttributes, useId } from "react";
+import { type InputHTMLAttributes, type Ref, useId } from "react";
 
 /**
  * The calendar forms' fields: a label, the shared field look (`components/ui/input.tsx`), and the field's own message under it. A
@@ -14,6 +14,8 @@ export function Field({
   secret = false,
   ...rest
 }: Omit<InputHTMLAttributes<HTMLInputElement>, "className"> & {
+  /** React 19 passes `ref` as a prop (revision 37, R40: the restored form's first field takes focus). */
+  ref?: Ref<HTMLInputElement>;
   label: string;
   error?: string | null;
   hint?: string;

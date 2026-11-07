@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
-import { type DeviceRow, useSession } from "../../../session";
+import { useRecoveryHost } from "../../../lib/form-recovery/editor";
+import { type DeviceRow, useIdentity, useSession } from "../../../session";
 import { formatAgo } from "../relative-time";
 import { CapacityLine } from "./CapacityLine";
 import { LoadFailed } from "./LoadFailed";
@@ -14,9 +15,10 @@ import {
   THIS_DEVICE_TAG,
 } from "./label-copy";
 import { deviceDisplay, devicePhrase, hasDuplicateTitles } from "./labels";
-import { NameDeviceDialog } from "./NameDeviceDialog";
+import { deviceNameContext, NameDeviceDialog } from "./NameDeviceDialog";
 import {
   type Interaction,
+  scopeOf,
   useInteractions,
   useListChanges,
   useReturnRefresh,
@@ -46,6 +48,29 @@ export const deviceMeta = (row: DeviceRow, now: Date): string =>
 interface Open {
   readonly row: DeviceRow;
   readonly interaction: Interaction;
+}
+
+/**
+ * WEB-14a revision 39 (design assessment DA-DEVICE-NAME, C4): the opener of a listed device's name dialog for its recovery. A name left
+ * unsaved by the page before an app update, or kept by the dialog's sync control, opens the dialog again on it, never sending it. Mounted
+ * only for a device in a current list that offers naming, so a name is offered only to its own device; one for a device no longer listed
+ * stays in the account's recovery store, neither sent nor removed.
+ */
+function NameRecovery({
+  identity,
+  row,
+  open,
+}: {
+  identity: string;
+  row: DeviceRow;
+  open(row: DeviceRow): void;
+}) {
+  useRecoveryHost({
+    identity,
+    context: deviceNameContext(row.id),
+    open: () => open(row),
+  });
+  return null;
 }
 
 export function DevicesSection() {
@@ -80,6 +105,13 @@ export function DevicesSection() {
     interaction.end();
     setNaming((open) => (open?.interaction === interaction ? null : open));
   };
+  // A recovered name never replaces a name dialog the person has open (its own input would be dismissed).
+  const namingNow = useRef(naming);
+  namingNow.current = naming;
+  const reopenNaming = (row: DeviceRow) => {
+    if (namingNow.current === null) openNaming(row);
+  };
+  const recoveryIdentity = scopeOf(useIdentity());
   const now = new Date();
   // BE-Q25 servers carry `sync_capacity` in every answer; an older server has no naming endpoint, so no control is offered.
   const canName =
@@ -133,6 +165,13 @@ export function DevicesSection() {
                   data-device-row={row.current ? "current" : "other"}
                   className="list-none rounded-xl border bg-card p-4 shadow-sm"
                 >
+                  {canName && recoveryIdentity !== null ? (
+                    <NameRecovery
+                      identity={recoveryIdentity}
+                      row={row}
+                      open={reopenNaming}
+                    />
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-3">
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="text-sm text-foreground [overflow-wrap:anywhere]">

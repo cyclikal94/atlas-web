@@ -533,7 +533,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
         setState({
           kind: "stopped",
           cause: "local_storage",
-          ...(stops.operations(service).length > 0
+          ...(stops.operations(service).some(outboxOperation)
             ? { memoryOnly: true as const }
             : {}),
         });
@@ -626,6 +626,12 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
       (operation) => announced?.has(operation) === true,
     );
 
+  /**
+   * WEB-10c revision 13 (F-10C-13a): an operation of the OUTBOX (a draft's save or receipt, or the queue read). The page's memory of stops
+   * is shared by every writer of the page (the task catch-up's fences are held there too); the outbox's acts end and show only its own.
+   */
+  const outboxOperation = (operation: string): boolean =>
+    operationDraft(operation) !== null || operation === QUEUE_OPERATION;
   /** A stop of the dispatcher's own queue read (not of one draft) that a marker or the tab's memory holds. */
   const queueStopped = (service: AccountService): boolean =>
     markerOperations(service).includes(QUEUE_OPERATION);
@@ -1369,7 +1375,11 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
         ...(localId === undefined && queueStopped(service)
           ? [QUEUE_OPERATION]
           : []),
-        ...stops.operations(service).filter(covers),
+        ...stops
+          .operations(service)
+          .filter(
+            (operation) => outboxOperation(operation) && covers(operation),
+          ),
       ]);
       acted = issue(service, named);
       lifting = [...named];

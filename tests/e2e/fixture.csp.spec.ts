@@ -34,7 +34,7 @@ test.describe("content security policy (B10, fixture)", () => {
     await page.getByRole("radio", { name: "Match system" }).click();
     await page.keyboard.press("Escape");
     await page.setViewportSize({ width: 834, height: 1000 });
-    await page.getByRole("link", { name: "Tasks" }).hover();
+    await page.getByRole("link", { name: "All tasks" }).hover();
     await expect(page.getByRole("tooltip")).toBeVisible();
     await page.getByRole("link", { name: "People" }).focus();
     await page.setViewportSize({ width: 390, height: 844 });

@@ -6,7 +6,7 @@ import type { World } from "./world";
  * A small stateful STAND-IN for the session-lifecycle projection of plan section 3, written from the OpenAPI facts.
  * /health follows the current pin. By default list responses retain the pre-BE-Q25 projection; WEB-08d's opt-in `beq25` mode adds
  * client labels, names, the rename operations and capacity REPORTING (not enforcement) for the Settings tests that need them. Neither
- * mode is validation of the full API 0.29 response schema. It is a stub of the contract, NOT a port of the backend, and a passing test against it is
+ * mode is validation of the full API 0.31 response schema. It is a stub of the contract, NOT a port of the backend, and a passing test against it is
  * fixture evidence, never integration evidence. Every answer can be delayed, dropped, rewritten or held (`Rule`).
  */
 export const API = "/api/experimental/v1";

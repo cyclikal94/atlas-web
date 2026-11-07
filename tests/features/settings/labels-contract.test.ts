@@ -20,7 +20,7 @@ import { serverAcceptsName } from "../../support/session/server";
 /**
  * WEB-08d: the decoders against the BE-Q25 contract. `tests/fixtures/be-q25/labels-and-capacity-30fec6a.json` is a verbatim extract
  * of backend commit 30fec6a (the schemas, the `behaviour.labels_and_capacity` probe payloads, and the name vectors of the backend's
- * own Rust tests). The accepted API 0.29 release retains these schemas: keep the original extract and compare it with the current
+ * own Rust tests). The released API 0.31 contract retains these schemas: keep the original extract and compare it with the current
  * released contract, while checking that contract's bytes against the independently verified release pin.
  */
 interface Extract {
@@ -56,7 +56,7 @@ const enumOf = (schema: string, member: string): unknown[] => {
 };
 
 describe("drift: the released contract preserves the BE-Q25 decoder contract", () => {
-  test("the installed contract matches accepted API 0.29 and retains the original extract's provenance", () => {
+  test("the installed contract matches released API 0.31 and retains the original extract's provenance", () => {
     expect(extract.source.commit).toBe(
       "30fec6a3f31aaeea9c69d10216c78b8c02645661",
     );

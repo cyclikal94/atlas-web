@@ -8,6 +8,11 @@ import type { BrowserContext, Page, Route } from "@playwright/test";
  * do. The browser's session cookie is modelled by `cookie`, which changes only when an `activate` answer is delivered (the
  * stub does not rely on the engine honouring a fulfilled `Set-Cookie`). It is NOT the backend and a pass against it is never
  * integration evidence.
+ *
+ * Two ledgers, because arrival and delivery are different events (WEB-14a revision 22, review R28): `requests` records what the
+ * server PROCESSED, in arrival order, and is what the tests that inspect processing read; `deliveries` records, for the same request,
+ * whether its answer was held, delivered (and with which status), aborted or failed to reach the page, and which page sent it. An
+ * answer that was processed is not an answer the page received. The delivery ledger holds no body, credential, grant or token.
  */
 const API = "/api/experimental/v1";
 const b64url = (buffer: Buffer) =>
@@ -71,6 +76,36 @@ export interface HoldMatch {
   n: number;
   page: Page | null;
 }
+/** Where one request's ANSWER is: processed and not yet sent, held by a `Hold`, or terminal (delivered, aborted, failed to deliver). */
+export type DeliveryState =
+  | "processing"
+  | "held"
+  | "fulfilled"
+  | "aborted"
+  | "failed";
+export interface Delivery {
+  /** The same `n` as the request's `Recorded` entry. */
+  n: number;
+  method: string;
+  path: string;
+  /** The page that sent it (attribution only; null when the engine names none). */
+  page: Page | null;
+  /** The hold that parked its answer, if one did. */
+  hold: Hold | null;
+  state: DeliveryState;
+  /** The status the page was actually answered with: set only when the answer was fulfilled. */
+  status: number | null;
+  /** The cookie this answer assigned (an activation's session id), and its index in `cookieHistory`. */
+  cookie?: string | null;
+  cookieChange: number | null;
+  /** Why a fulfil or an abort failed (a closed page, a torn-down context). */
+  error?: string;
+}
+const TERMINAL: ReadonlySet<DeliveryState> = new Set([
+  "fulfilled",
+  "aborted",
+  "failed",
+]);
 
 const err = (code: string) => ({
   code,
@@ -100,6 +135,8 @@ export class AuthStub {
   /** WEB-08c: the network is down: every API request fails before it reaches the server (nothing is processed or recorded). */
   offline = false;
   readonly requests: Recorded[] = [];
+  /** One entry per request, in arrival order, for where its answer went (see the class comment). */
+  readonly deliveries: Delivery[] = [];
   /** The browser's cookie jar for the origin: the session id the browser holds. */
   cookie: string | null = null;
   /** Every cookie value the browser has held, in order. */
@@ -112,6 +149,7 @@ export class AuthStub {
     open: () => void;
     active: boolean;
     remaining: number;
+    handle: Hold;
     caught: number;
   }> = [];
   private nextOverride: Array<{
@@ -145,7 +183,7 @@ export class AuthStub {
   }
   /**
    * Hold the ANSWERS to matching requests until `release()`: the next `times` of them (default all). The request is still
-   * processed on arrival.
+   * processed on arrival. `page` lets a hold pick one tab's requests.
    */
   hold(
     match: (r: HoldMatch) => boolean,
@@ -155,16 +193,7 @@ export class AuthStub {
     const gate = new Promise<void>((resolve) => {
       open = resolve;
     });
-    const entry = {
-      match,
-      gate,
-      open,
-      active: true,
-      remaining: times,
-      caught: 0,
-    };
-    this.holds.push(entry);
-    return {
+    const handle: Hold = {
       release: () => entry.open(),
       stop: () => {
         entry.active = false;
@@ -172,6 +201,17 @@ export class AuthStub {
       },
       caught: () => entry.caught,
     };
+    const entry = {
+      match,
+      gate,
+      open,
+      active: true,
+      remaining: times,
+      handle,
+      caught: 0,
+    };
+    this.holds.push(entry);
+    return handle;
   }
   /** What the provider's callback redirect carries once the person approved: a grant bound to the flow's challenge. */
   completeOidc(flow: OidcFlow, subject: string): string {
@@ -212,6 +252,43 @@ export class AuthStub {
       (r) => r.path === path && (!method || r.method === method),
     );
   }
+  /** Sessions the SERVER created (processing, not delivery: an activation answer can still be held after its session exists). */
+  serverSessions(): number {
+    return this.sessions.size;
+  }
+  /**
+   * Answers that are not terminal yet: still being processed, or held. A held answer whose hold is in `parked` is a test's deliberate
+   * choice and is left out.
+   */
+  undelivered(parked: readonly Hold[] = []): Delivery[] {
+    return this.deliveries.filter(
+      (d) =>
+        !TERMINAL.has(d.state) &&
+        !(d.state === "held" && d.hold !== null && parked.includes(d.hold)),
+    );
+  }
+  /** Activations whose 200 answer was DELIVERED and changed the cookie, in the order the cookie changed. */
+  deliveredActivations(): Array<Delivery & { account: string }> {
+    return this.deliveries
+      .filter(
+        (d) =>
+          d.method === "POST" &&
+          d.path === "/browser-sessions/activate" &&
+          d.state === "fulfilled" &&
+          d.status === 200 &&
+          d.cookieChange !== null &&
+          typeof d.cookie === "string",
+      )
+      .sort((x, y) => (x.cookieChange ?? 0) - (y.cookieChange ?? 0))
+      .map((d) => ({
+        ...d,
+        account: this.sessions.get(d.cookie as string)?.account ?? "",
+      }));
+  }
+  /** The username of an account id, for messages and assertions. */
+  usernameOf(account: string): string | undefined {
+    return this.accounts.get(account)?.username;
+  }
 
   async install(context: BrowserContext) {
     await context.route(`**${API}/**`, (route) => this.handle(route));
@@ -230,6 +307,23 @@ export class AuthStub {
       body = undefined;
     }
     const n = this.requests.length + 1;
+    let page: Page | null = null;
+    try {
+      page = request.frame().page();
+    } catch {
+      page = null;
+    }
+    const delivery: Delivery = {
+      n,
+      method,
+      path,
+      page,
+      hold: null,
+      state: "processing",
+      status: null,
+      cookieChange: null,
+    };
+    this.deliveries.push(delivery);
     let answer = this.route(
       method,
       path,
@@ -259,31 +353,49 @@ export class AuthStub {
         recorded.status = answer.status;
       }
     }
-    const page = request.frame().page();
     const hold = this.holds.find(
       (h) => h.active && h.remaining > 0 && h.match({ method, path, n, page }),
     );
     if (hold) {
       hold.remaining -= 1;
+      delivery.state = "held";
+      delivery.hold = hold.handle;
       hold.caught += 1;
       await hold.gate;
+      delivery.state = "processing";
     }
-    if (abort) return route.abort("connectionreset");
-    if (answer.cookie !== undefined) {
-      this.cookie = answer.cookie;
-      this.cookieHistory.push(answer.cookie);
+    try {
+      if (abort) {
+        await route.abort("connectionreset");
+        delivery.state = "aborted";
+        return;
+      }
+      // The cookie is assigned BEFORE the answer is sent, as before revision 22: the page may send its next request as soon as it has
+      // the answer, and that request must already carry the new session. If the fulfil then fails, the ledger says so.
+      if (answer.cookie !== undefined) {
+        this.cookie = answer.cookie;
+        this.cookieHistory.push(answer.cookie);
+        delivery.cookie = answer.cookie;
+        delivery.cookieChange = this.cookieHistory.length - 1;
+      }
+      const text =
+        answer.body === undefined
+          ? undefined
+          : typeof answer.body === "string"
+            ? answer.body
+            : JSON.stringify(answer.body);
+      await route.fulfill({
+        status: answer.status,
+        contentType: answer.contentType ?? "application/json",
+        body: text,
+      });
+      delivery.state = "fulfilled";
+      delivery.status = answer.status;
+    } catch (error) {
+      delivery.state = "failed";
+      delivery.error = String((error as Error)?.message ?? error);
+      throw error;
     }
-    const text =
-      answer.body === undefined
-        ? undefined
-        : typeof answer.body === "string"
-          ? answer.body
-          : JSON.stringify(answer.body);
-    return route.fulfill({
-      status: answer.status,
-      contentType: answer.contentType ?? "application/json",
-      body: text,
-    });
   }
 
   private route(

@@ -246,8 +246,11 @@ export async function register(
       return { kind: "settled" };
     case "refused": {
       if (outcome.stage === "activation") return lost();
-      if (outcome.error.code === "unauthenticated")
+      if (outcome.error.code === "unauthenticated") {
+        // WEB-14a revision 40 (R40-GATE): what the page tells the person after this submission is page memory, not the surface's.
+        redemption.unusable(input.username);
         return { kind: "unavailable" };
+      }
       if (KEEPS_TOKEN.has(outcome.error.code)) {
         restore();
         return failed(messageForError("register", outcome.error));

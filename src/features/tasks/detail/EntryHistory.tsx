@@ -1,13 +1,30 @@
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
+import { useFormRecoveryPort } from "../../../data";
+import { headingFocus } from "../../../lib/form-recovery/focus";
+import {
+  createRecoverableModel,
+  type ModelTicket,
+  type RecoverableModel,
+} from "../../../lib/form-recovery/model";
+import type { DiscardResult } from "../../../lib/form-recovery/port";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
+import { pageFormRegistry } from "../../../lib/form-recovery/registry";
 import type { TaskActions } from "../actions";
 import type { TasksResult } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
 import { forgetRefusal, noteIfRefused } from "../memory";
-import { pendingEvidenceOf } from "../model/commands";
+import { pendingEvidenceListOf } from "../model/commands";
 import type {
   Evidence,
   Goal,
@@ -208,10 +225,85 @@ let fixSessions = 0;
 let fixDrafts = 0;
 
 /**
+ * APP-UPDATE RECOVERY (WEB-14a revision 37; R40; design assessment C1-C3, "EntryHistory open/parked fixes"). The fix input of one stream
+ * (the owner's open fix, or its parked draft, while it holds input not acknowledged) has a RECOVERABLE MODEL (`lib/form-recovery/model.ts`)
+ * under `entry-fix:<progress id>`: the entry it fixes and the amount as typed (version 1), nothing else (no authority, no journal read). The
+ * person's typing reaches it first (refused while an update reload is prepared), a save takes its ticket (none while frozen) and its
+ * answer completes it; dropping the input (Cancel, the visit's end, another day) discards its copies. After the reload the history parks
+ * the restored draft for its entry and opens it when that entry may be fixed NOW (a recent entry): the save decision is taken afresh, and
+ * nothing is sent automatically.
+ */
+interface FixRecovery {
+  readonly identity: string;
+  readonly model: RecoverableModel;
+  /** The mounted history's take of a restored copy (none mounted: nothing restored); `chosen`: the person chose it (revision 38). */
+  restore: ((text: string, chosen: boolean) => boolean) | null;
+  untouched: () => boolean;
+  /** Revision 38 (S12): the histories of the stream mounted now (one unmounted and mounted again in the same turn goes on). */
+  mounts: number;
+}
+const fixModels = new Map<string, FixRecovery>();
+/** A pending save's ticket, by its draft and the revision it submitted. */
+const fixTickets = new Map<string, ModelTicket>();
+const ticketKey = (draftId: number, rev: number) => `${draftId}:${rev}`;
+
+function fixRecovery(
+  owner: string,
+  identity: string,
+  progressId: string,
+): FixRecovery {
+  for (const [key, other] of [...fixModels])
+    if (other.identity !== identity) {
+      other.model.retire();
+      fixModels.delete(key);
+    }
+  const known = fixModels.get(owner);
+  if (known !== undefined) return known;
+  const linked: FixRecovery = {
+    identity,
+    restore: null,
+    untouched: () => true,
+    mounts: 0,
+    model: createRecoverableModel({
+      formContext: `entry-fix:${progressId}`,
+      start: "",
+      restore: (text, chosen) => linked.restore?.(text, chosen) ?? false,
+      untouched: () => linked.untouched(),
+    }),
+  };
+  fixModels.set(owner, linked);
+  return linked;
+}
+
+/** The input of a fix draft as its recoverable text, and back (null: not one this build reads). */
+const encodeFix = (draft: Pick<Draft, "entryId" | "amount">): string =>
+  JSON.stringify({ v: 1, entry: draft.entryId, amount: draft.amount });
+function decodeFix(text: string): { entry: string; amount: string } | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    return raw !== null &&
+      typeof raw === "object" &&
+      raw.v === 1 &&
+      typeof raw.entry === "string" &&
+      typeof raw.amount === "string"
+      ? { entry: raw.entry, amount: raw.amount }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * A save's answer reaches its draft wherever it is now (D6-2, R33): in a mounted history of the owner, or kept while the person is in the
  * sync screens (the same rule as `settle` below: consumed only at the revision submitted, else only the pending mark goes).
  */
 function settleFix(owner: string, answer: Settlement): void {
+  // Revision 37 (R40): the model acknowledges exactly what this save sent (a failure covers nothing).
+  const key = ticketKey(answer.draftId, answer.rev);
+  const ticket = fixTickets.get(key);
+  fixTickets.delete(key);
+  if (answer.ok) void ticket?.succeeded();
+  else ticket?.failed();
   const kept = keptFixes.get(owner);
   if (kept !== undefined) {
     const { draftId, session, rev, ok } = answer;
@@ -245,17 +337,23 @@ export const hasKeptFix = (owner: string): boolean => keptFixes.has(owner);
 // A visit that ends drops every fix input kept for it.
 onTaskVisitEnded((visit) => {
   for (const [owner, kept] of [...keptFixes])
-    if (kept.visit === visit) keptFixes.delete(owner);
+    if (kept.visit === visit) {
+      keptFixes.delete(owner);
+      void fixModels.get(owner)?.model.end();
+    }
 });
 
 /** The visit lets go of an owner's kept fix input without ending (revision 22): the task detail showing another day in place. */
 export function forgetKeptFix(owner: string): void {
-  keptFixes.delete(owner);
+  if (keptFixes.delete(owner)) void fixModels.get(owner)?.model.end();
 }
 
 /** For tests: forget every kept fix (numbers are still never reused). */
 export function forgetKeptFixes(): void {
   keptFixes.clear();
+  for (const linked of fixModels.values()) linked.model.retire();
+  fixModels.clear();
+  fixTickets.clear();
 }
 
 /**
@@ -404,6 +502,57 @@ export function EntryHistory({
   // A full-history fix closed by a refusal or Back to recent leaves its draft here (memory only), for the same owner and entry (D6-1).
   const parked = useRef<Draft | null>(null);
   const recentRef = useRef<ReadonlySet<string>>(new Set());
+  // Revision 37 (R40): this stream's fix recovery, shown while the history is, bound to the account's store.
+  const port = useFormRecoveryPort();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one model per owner (which names the identity and the stream)
+  const recovery = useMemo(
+    () => fixRecovery(owner, env.identity, row.progressId),
+    [owner],
+  );
+  const recoveryView = useSyncExternalStore(
+    recovery.model.subscribe,
+    recovery.model.view,
+    recovery.model.view,
+  );
+  const locked = useSyncExternalStore(
+    pageFormRegistry.subscribe,
+    pageFormRegistry.frozen,
+    pageFormRegistry.frozen,
+  );
+  /** The model's text now: what was last given to it (null: it holds no input). */
+  const modelText = useRef<string | null>(null);
+  // WEB-14a revision 51 (F-R51-1; decision D1, Kieran, 3 November 2026): where the restored fix puts focus, read from the committed DOM at
+  // each attempt. An open fix: its new value (a quantity), else its first action (a tick or an item has no field). A parked fix (nothing
+  // opened by the restore, as before): its entry's "Fix this entry" when shown, else this history's heading. A focused "Discard instead"
+  // removes the fix, open or parked, so it returns focus to the entry it belonged to the same way: its "Fix this entry", else the heading.
+  const historyRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const discardedEntry = useRef<string | null>(null);
+  const entryFocus = (entryId: string | null) => {
+    const root = historyRef.current;
+    if (!root) return null;
+    for (const item of root.querySelectorAll<HTMLElement>("[data-entry]"))
+      if (item.getAttribute("data-entry") === entryId) {
+        const control = item.querySelector<HTMLElement>(
+          "button:not([disabled])",
+        );
+        if (control && !control.closest("[data-fix-form]")) return control;
+      }
+    return headingFocus(headingRef.current);
+  };
+  const restoredFocus = () => {
+    const form =
+      historyRef.current?.querySelector<HTMLElement>("[data-fix-form]");
+    if (form)
+      return (
+        form.querySelector<HTMLElement>("input") ??
+        form.querySelector<HTMLElement>("button:not([disabled])")
+      );
+    return entryFocus(parked.current?.entryId ?? null);
+  };
+  const discardFocus = () => entryFocus(discardedEntry.current);
+  const shownRef = useRef<Shown[]>([]);
+  const canFixRef = useRef<(entry: Shown) => boolean>(() => false);
   const pendingReplacedRef = useRef<ReadonlySet<string>>(new Set());
   const factsNow = (): SaveFacts => ({
     journal: journalNow(),
@@ -784,9 +933,11 @@ export function EntryHistory({
     }
   };
 
+  // Every pending entry, landed or not: a landed correction still says which entry it replaced. One that is shown already (synced) is
+  // not added again below, by its id, which for a completion is the server's own (review R6).
   const pending = row.drafts
-    .map((d) => pendingEvidenceOf(d, env.accountId))
-    .filter((p) => p !== null && p.occurrenceId === row.id);
+    .flatMap((d) => pendingEvidenceListOf(d, env.accountId))
+    .filter((p) => p.occurrenceId === row.id);
   const recent = row.progress?.recent_entries ?? [];
   const pages =
     journal !== null && journal.error !== "refused" ? journal.pages : [];
@@ -884,6 +1035,8 @@ export function EntryHistory({
     entry.evidence.kind !== "observe" &&
     entry.recordedBy === env.accountId &&
     (recentIds.has(entry.id) || fullCurrent);
+  shownRef.current = shown;
+  canFixRef.current = canFix;
   const askFix = (entry: Shown) => {
     // Every Fix intent takes the selection FIRST, synchronously: a lookup asked before it can no longer open anything.
     const mine = ++sel.current;
@@ -905,6 +1058,44 @@ export function EntryHistory({
     const start = j.pages[j.pages.length - 1]?.next;
     if (start === undefined || start === null) return openFixOf(entry, mine);
     void checkThenOpen(entry, mine, start, { owner, life: j.life });
+  };
+  // Revision 37 (R40): what the stream holds of the person's (the open fix with input not acknowledged, else a parked draft with some).
+  const holding = (): Draft | null => {
+    const open = fixRef.current;
+    if (open !== null && (open.draft.unsaved || open.draft.saving !== null))
+      return open.draft;
+    const held = parked.current;
+    return held !== null && held.owner === owner && held.unsaved ? held : null;
+  };
+  recovery.untouched = () => holding() === null;
+  // A copy left by the page before an update: parked for its entry (a draft of the person's, never sent), and opened when that entry
+  // may be fixed now. The look's automatic restore is refused while the stream holds input of its own. Revision 38 (R40-B): a copy the
+  // person CHOSE replaces the fix the stream holds (open or parked: the selection that opened it is ended, as Cancel ends it) unless a save
+  // of it is pending; it is opened on its own entry only if that entry may be fixed now, as any restored fix is.
+  recovery.restore = (text, chosen) => {
+    const found = decodeFix(text);
+    if (found === null || !mounted.current) return false;
+    const mine = holding();
+    if (mine !== null && (!chosen || mine.saving !== null)) return false;
+    if (mine !== null) {
+      sel.current += 1;
+      fixRef.current = null;
+      setFix(null);
+    }
+    fixDrafts += 1;
+    parked.current = {
+      owner,
+      entryId: found.entry,
+      id: fixDrafts,
+      amount: found.amount,
+      rev: 1,
+      unsaved: true,
+      saving: null,
+    };
+    modelText.current = text;
+    const entry = shownRef.current.find((e) => e.id === found.entry);
+    if (entry !== undefined && canFixRef.current(entry)) askFix(entry);
+    return true;
   };
   /**
    * Check again (D6-3): the open fix's entry is checked from its own place in the journal (a correction of it comes after it), whichever
@@ -968,6 +1159,10 @@ export function EntryHistory({
     if (saveBlock(factsNow(), open.entry.id) !== null) return;
     const { session } = open;
     const { id, rev } = open.draft;
+    // Its ticket first (R40): none while an update reload is prepared (nothing is sent after the last recovery copy).
+    const ticket = recovery.model.submitting();
+    if (ticket === null) return;
+    fixTickets.set(ticketKey(id, rev), ticket);
     const saving = { ...open, draft: { ...open.draft, saving: rev } };
     fixRef.current = saving;
     setFix((f) =>
@@ -1058,6 +1253,36 @@ export function EntryHistory({
         keptFixes.set(owner, { open, parked: parkedNow, visit });
     };
   }, [owner]);
+  // Revision 37 (R40): the model follows what the stream holds after every change that is not the person's typing (a fix opened on a
+  // parked draft, Cancel, a save's answer, a draft parked by Back to recent); typing reached it already, first.
+  useEffect(() => {
+    const held = holding();
+    const text = held === null ? null : encodeFix(held);
+    if (text === modelText.current) return;
+    if (text === null) {
+      modelText.current = null;
+      void recovery.model.end();
+      return;
+    }
+    if (recovery.model.edit(text)) modelText.current = text;
+  });
+  useEffect(() => recovery.model.show(), [recovery]);
+  useEffect(() => {
+    recovery.model.bind(port);
+  }, [recovery, port]);
+  // The history goes: input it kept for a visit to the sync screens stays the model's; otherwise it was dropped, and its copies go too.
+  // Revision 38 (S12): decided after the current turn, as the task editors' sessions are (`kept-input.ts`): a history of the stream mounted
+  // again in that turn (React's development remount) goes on with it, and a copy its look restores is not discarded under it.
+  useEffect(() => {
+    recovery.mounts += 1;
+    return () => {
+      recovery.mounts -= 1;
+      setTimeout(() => {
+        if (recovery.mounts === 0 && !keptFixes.has(ownerRef.current))
+          void recovery.model.end();
+      }, 0);
+    };
+  }, [recovery]);
   const fixForm =
     fix === null ? null : (
       <FixForm
@@ -1070,7 +1295,11 @@ export function EntryHistory({
             ? () => recheck(fix.entry)
             : null
         }
-        onAmount={(amount) =>
+        onAmount={(amount) => {
+          // The model first (R40): refused while an update reload is prepared, and the fix then shows what was saved.
+          const text = encodeFix({ entryId: fix.entry.id, amount });
+          if (!recovery.model.edit(text)) return;
+          modelText.current = text;
           setFix((f) =>
             f !== null && f.session === fix.session
               ? {
@@ -1084,8 +1313,8 @@ export function EntryHistory({
                   error: null,
                 }
               : f,
-          )
-        }
+          );
+        }}
         onError={(error) =>
           setFix((f) =>
             f !== null && f.session === fix.session ? { ...f, error } : f,
@@ -1102,6 +1331,7 @@ export function EntryHistory({
   const fixShown = fix !== null && shown.some((s) => s.id === fix.entry.id);
   return (
     <section
+      ref={historyRef}
       aria-labelledby={heading}
       className="flex flex-col gap-2"
       data-entry-history=""
@@ -1110,9 +1340,42 @@ export function EntryHistory({
       data-stream-version={row.progressVersion ?? ""}
       data-journal-version={journal?.version ?? ""}
     >
-      <h2 id={heading} className="text-base font-medium text-foreground">
+      <h2
+        ref={headingRef}
+        id={heading}
+        className="text-[15px] font-medium text-foreground"
+      >
         {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
       </h2>
+      <RecoveryNotice
+        firstFieldRef={restoredFocus}
+        discardFocus={discardFocus}
+        recovery={{
+          view: recoveryView,
+          locked,
+          discard: () => {
+            // "Discard instead": the restored fix goes, open or parked, at the gesture (revision 38, R40-A), or nothing changes; the copies'
+            // removal completing later changes nothing on screen. The selection that opened it ends too, as Cancel ends it.
+            if (!recovery.model.accepting())
+              return Promise.resolve<DiscardResult>("failed");
+            const result = recovery.model.discard("");
+            discardedEntry.current =
+              fixRef.current?.entry.id ?? parked.current?.entryId ?? null;
+            sel.current += 1;
+            modelText.current = null;
+            parked.current = null;
+            fixRef.current = null;
+            setFix(null);
+            return result;
+          },
+          retry: () => recovery.model.retry(),
+          checkAgain: recovery.model.checkAgain,
+          restoreAlternative: (copy) =>
+            recovery.model.restoreAlternative(copy.tabInstanceId),
+          discardAlternative: (copy) =>
+            recovery.model.discardAlternative(copy.tabInstanceId),
+        }}
+      />
       {fix !== null && !fixShown ? (
         // The entry being fixed is on a page not shown now: its fix stays open, with what was typed.
         <div

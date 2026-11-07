@@ -1,5 +1,10 @@
 import { Outlet, useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { getPageDataHost } from "../../data";
+import {
+  registerCatchUpConflicts,
+  useCatchUpService,
+} from "./catchup/useCatchUp";
 import { TaskDetail } from "./detail/TaskDetail";
 import { TaskList } from "./detail/TaskList";
 import { TasksBoundary } from "./env";
@@ -7,12 +12,18 @@ import { TaskFormPage } from "./form/TaskFormPage";
 import { ListsLayout } from "./lists/ListsLayout";
 import { isKnownZone } from "./model/primitives";
 import { dayEnd, todayIn } from "./model/time";
+import { StreakPage } from "./streak/StreakPage";
+import { TimersPage } from "./timers/TimersPage";
 import { TodayPage } from "./today/TodayPage";
 
 /**
  * The task screens, loaded LAZILY by their routes (one chunk, never part of an initial bundle: the fixture's entry includes the protected
  * tree statically, and its initial-chunk budget has no room for them).
  */
+
+// WEB-10c's command path (CM-432): the page's dispatcher retries a task command refused with `materialisation_required` and asks the
+// catch-up runner; registered once per registry, when the task screens first load.
+registerCatchUpConflicts(getPageDataHost().conflicts);
 
 /** The device's zone: the default display zone, SHOWN on the chip and changeable (ARCH 6155: never silently inferred). */
 export const deviceZone = (): string => {
@@ -105,6 +116,9 @@ export function TasksLayoutScreen() {
 }
 
 function TasksLayoutInner() {
+  // The page's catch-up service, live on every task screen (review R8): a task command refused with `materialisation_required` on a
+  // directly opened detail, the list or the account's timers finds a runner for the displayed identity.
+  useCatchUpService();
   const matchRoute = useMatchRoute();
   const selected = matchRoute({ to: "/tasks/$taskId", fuzzy: true });
   const child =
@@ -153,6 +167,14 @@ export function TaskNewScreen() {
 
 export function TaskEditScreen({ taskId }: { taskId: string }) {
   return <TaskFormPage key={taskId} mode={{ kind: "edit", taskId }} />;
+}
+
+export function TaskStreakScreen({ taskId }: { taskId: string }) {
+  return <StreakPage key={taskId} taskId={taskId} />;
+}
+
+export function TimersScreen() {
+  return <TimersPage />;
 }
 
 /** WEB-10b: the Lists pane beside the list detail from 1280 px (D-10b-2). */

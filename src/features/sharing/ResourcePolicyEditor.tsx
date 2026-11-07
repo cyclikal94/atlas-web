@@ -8,6 +8,12 @@ import {
   useDraftQueue,
   useMergedUnder,
 } from "../../data";
+import {
+  useRecoverableEditor,
+  useRecoveryHost,
+} from "../../lib/form-recovery/editor";
+import { firstControl } from "../../lib/form-recovery/focus";
+import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import { AudienceSummary } from "./AudienceSummary";
 import {
   type DirectoryEntry,
@@ -23,12 +29,18 @@ import { SharingBoundary, useSharingEnv } from "./env";
 import { knownMembership, useMembership } from "./membership";
 import { effectiveAudience, labelsFrom } from "./model/audience";
 import {
+  emptyPolicy,
   type PolicyAction,
   type PolicyDraftState,
   reducePolicy,
   samePolicy,
   toWirePolicy,
 } from "./model/policy-draft";
+import {
+  decodePolicyDraft,
+  encodePolicyDraft,
+  policyFormContext,
+} from "./model/recovery-fields";
 import { type Attempt, nextAttempt } from "./model/submission";
 import { PolicyGrantsEditor } from "./PolicyGrantsEditor";
 import { Banner, formatWhen, useSharingLoad } from "./parts";
@@ -73,6 +85,27 @@ export function ResourcePolicyEditor(props: ResourcePolicyEditorProps) {
       <PolicyEditorFor {...props} />
     </SharingBoundary>
   );
+}
+
+/**
+ * Revision 37 (WEB-14a R40): a screen that opens the policy editor in place (the task detail) restores a draft the page before an update
+ * left for `resourceId`, by opening the editor on it (`onOpen`); the editor's route opens itself. Renders nothing.
+ */
+export function PolicyEditorRecoveryHost({
+  identity,
+  resourceId,
+  onOpen,
+}: {
+  identity: string;
+  resourceId: ResourceId;
+  onOpen(resourceId: ResourceId): void;
+}) {
+  useRecoveryHost({
+    identity,
+    context: policyFormContext(resourceId),
+    open: () => onOpen(resourceId),
+  });
+  return null;
 }
 
 /** One editor per displayed identity and resource: changing either starts a new one, with nothing carried over (R1). */
@@ -160,11 +193,67 @@ function PolicyEditorDialog({
     session.retained<RetainedPolicy>(retainedAs),
   );
   const [restored, setRestored] = useState(false);
+  // Revision 37 (WEB-14a R40): the draft is recoverable around an app-update reload (Q4), with the version it was composed against.
+  const touched = useRef(false);
+  /** The draft waiting for the first read is a recovery copy (the model holds it already), not one the sync control kept. */
+  const fromCopy = useRef(false);
+  const loaded = useRef(false);
+  loaded.current = policyLoad.status === "ready";
+  const recovery = useRecoverableEditor<{ policy: Policy; base: number }>({
+    identity: env.identity,
+    context: policyFormContext(resourceId),
+    encode: encodePolicyDraft,
+    decode: decodePolicyDraft,
+    start: () => ({ policy: emptyPolicy(), base: -1 }),
+    untouched: () => !touched.current,
+    restored: ({ policy, base }) => {
+      const kept: RetainedPolicy = {
+        draft: { policy, refused: null, base },
+        attempt: null,
+        outcome: null,
+        learnt: [],
+      };
+      // Before the first read: shown when it lands, as a draft the sync control kept is. After it: shown now. Never sent.
+      if (!loaded.current) {
+        restore.current = kept;
+        fromCopy.current = true;
+        return;
+      }
+      setDraft(kept.draft);
+      uncertain.current = null;
+      setOutcome(null);
+      setRestored(true);
+    },
+    // "Discard instead" (revision 38, R40-A): the draft is the policy as read now, at the gesture, never when the copies' removal completes.
+    baseline: () =>
+      loaded.current && policyLoad.status === "ready"
+        ? { policy: policyLoad.value.policy, base: policyLoad.value.version }
+        : { policy: emptyPolicy(), base: -1 },
+    reset: ({ policy, base }) => {
+      touched.current = false;
+      if (!loaded.current) {
+        // Before the first read: a copy waiting for it is not shown when it lands.
+        if (fromCopy.current) restore.current = undefined;
+        fromCopy.current = false;
+        return;
+      }
+      setDraft({ policy, refused: null, base });
+      setRestored(false);
+    },
+  });
   const [view, setView] = useState<"edit" | "grant" | "exclude">("edit");
   const [outcome, setOutcome] = useState<Outcome>(null);
   const [busy, setBusy] = useState(false);
   // Held synchronously while a save is being sent: a second click or a Try again cannot send it twice at once.
   const sending = useRef(false);
+  // WEB-14a revision 51 (F-R51-1): the restored policy, and "Discard instead", focus its first grant (that grant's chosen access), or the
+  // grants' first control for a policy with none ("Add account grant"), read from the committed DOM at each attempt, since a reset can
+  // insert or remove grants.
+  const grants = useRef<HTMLDivElement>(null);
+  const grantsFocus = () =>
+    grants.current?.querySelector<HTMLElement>(
+      '[data-grant] [role="radio"][data-state="checked"]',
+    ) ?? firstControl(grants.current);
   const uncertain = useRef<Attempt | null>(null);
   const mounted = useRef(true);
   // Set on every mount: development's replay of every effect runs this cleanup and then mounts again (WEB-11a review 23).
@@ -184,6 +273,15 @@ function PolicyEditorDialog({
     const kept = restore.current;
     restore.current = undefined;
     if (kept !== undefined) {
+      // A draft the sync control kept is unsaved input of this session (R40): the read is its start, the draft an edit of it.
+      if (!fromCopy.current) {
+        recovery.begin({
+          policy: policyLoad.value.policy,
+          base: policyLoad.value.version,
+        });
+        recovery.edit({ policy: kept.draft.policy, base: kept.draft.base });
+      }
+      fromCopy.current = false;
       setDraft(kept.draft);
       setLearnt(kept.learnt);
       uncertain.current = kept.attempt;
@@ -198,6 +296,12 @@ function PolicyEditorDialog({
       refused: null,
       base: policyLoad.value.version,
     });
+    // A fresh read is where a new editing session of the draft starts (R40).
+    touched.current = false;
+    recovery.begin({
+      policy: policyLoad.value.policy,
+      base: policyLoad.value.version,
+    });
     uncertain.current = null;
   }, [policyLoad]);
 
@@ -205,15 +309,23 @@ function PolicyEditorDialog({
     () => labelsFrom(known?.households ?? [], learnt),
     [known, learnt],
   );
+  const latestDraft = useRef(draft);
+  latestDraft.current = draft;
   const dispatch = (action: PolicyAction) => {
+    const state = latestDraft.current;
+    if (state === null) return;
+    const next = {
+      ...reducePolicy(state, action, env.accountId),
+      base: state.base,
+    };
+    // Refused while an update reload is prepared (R40): the draft stays what was saved.
+    if (!recovery.edit({ policy: next.policy, base: next.base })) return;
+    touched.current = true;
+    latestDraft.current = next;
     // Any edit ends an uncertain attempt: the next save is a new attempt, which the policy version guards (D-12a-2).
     uncertain.current = null;
     setOutcome(null);
-    setDraft((state) =>
-      state === null
-        ? state
-        : { ...reducePolicy(state, action, env.accountId), base: state.base },
-    );
+    setDraft(next);
   };
 
   const close = () => onOpenChange(false);
@@ -229,6 +341,8 @@ function PolicyEditorDialog({
   };
   const keep = () => {
     if (draft === null) return;
+    // The sync control keeps it (R40): the editor's unmount is not a dismissal, and an update still saves it.
+    recovery.keep();
     const read = policyLoad.status === "ready" ? policyLoad.value : null;
     const edited =
       read === null ||
@@ -260,6 +374,9 @@ function PolicyEditorDialog({
     // Admitted at the action as well as shown on the buttons: offline, unsupported or already sending, nothing is sent and the
     // outcome on screen (an uncertain attempt's Try again) stays as it is.
     if (sending.current || !env.online || !env.writable) return;
+    // Its ticket first (R40): none while an update reload is prepared.
+    const ticket = recovery.submitting();
+    if (ticket === null) return;
     const attempt = nextAttempt(uncertain.current, commands, env.newId);
     uncertain.current = attempt;
     const shown = outcome;
@@ -271,6 +388,9 @@ function PolicyEditorDialog({
       { isCurrent: () => mounted.current },
     );
     sending.current = false;
+    // Only a confirmed save covers what was sent; an uncertain or refused one keeps the draft (never replayed by recovery).
+    if (result.ok) void ticket.succeeded();
+    else ticket.failed();
     if (!mounted.current) return;
     setBusy(false);
     if (result.ok) {
@@ -322,6 +442,8 @@ function PolicyEditorDialog({
   // Reload abandons the local edit: what was kept for it goes first, so a failed read cannot bring it back.
   const reload = () => {
     restore.current = undefined;
+    // The abandoned draft's recovery copies go too (R40): it never comes back after a reload either.
+    void recovery.end();
     session.forget(retainedAs);
     setDraft(null);
     setRestored(false);
@@ -433,6 +555,7 @@ function PolicyEditorDialog({
           </strong>{" "}
           {copy.POLICY_ONLINE_ONLY}
         </p>
+        <RecoveryNotice recovery={recovery} firstFieldRef={grantsFocus} />
         {restored ? (
           <p className="text-xs text-foreground" data-policy-restored="">
             {copy.RESTORED_UNSAVED}
@@ -451,16 +574,18 @@ function PolicyEditorDialog({
           membersAsOf={known ? formatWhen(known.at, env.now()) : null}
           parentLabel={parentLabel}
         />
-        <PolicyGrantsEditor
-          policy={draft.policy}
-          labels={labels}
-          membership={membership}
-          onRetryMembership={retryMembership}
-          disabled={busy}
-          refused={draft.refused}
-          dispatch={dispatch}
-          onLookup={(purpose) => setView(purpose)}
-        />
+        <div ref={grants}>
+          <PolicyGrantsEditor
+            policy={draft.policy}
+            labels={labels}
+            membership={membership}
+            onRetryMembership={retryMembership}
+            disabled={busy}
+            refused={draft.refused}
+            dispatch={dispatch}
+            onLookup={(purpose) => setView(purpose)}
+          />
+        </div>
         <OutcomeBanner
           outcome={outcome}
           onReload={reload}

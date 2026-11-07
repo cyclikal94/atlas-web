@@ -18,17 +18,28 @@ import { PageHeading } from "../../../components/ui/page-heading";
 import { ResourcePolicyEditor } from "../../sharing";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { keptKey } from "../kept-input";
+import { keptKey, useKeptRecovery } from "../kept-input";
 import { archiveResource } from "../model/commands";
 import { atCapacity, listItemOf, listRows } from "../model/list-view";
 import { listItem } from "../model/lists";
 import { LISTS_TITLE } from "../titles";
 import { useListActions } from "./actions";
 import { DETAIL } from "./copy";
-import { holdsInput, RenameListDialog, renameEditor } from "./dialogs";
+import {
+  holdsInput,
+  RenameListDialog,
+  renameEditor,
+  renameRecovery,
+  renameStart,
+} from "./dialogs";
 import { ReadNotice } from "./ReadNotice";
 import { useListDetail } from "./reads";
-import { pickerEditor, TaskPicker } from "./TaskPicker";
+import {
+  pickerEditor,
+  pickerRecovery,
+  pickerStart,
+  TaskPicker,
+} from "./TaskPicker";
 
 /**
  * The list detail (plan §4.2-4.3, 4.7): the list's name and controls, its tasks (each a link to the task; a WITHHELD row for a task id
@@ -68,6 +79,30 @@ export function ListDetail({ listId }: { listId: string }) {
     list === null || value === null
       ? []
       : listRows(list, value.tasks, new Set(value.projected.keys()));
+  // Revision 38 (WEB-14a, DA-R40-D): neither dialog is open after an app-update reload, so this screen looks for the copies the page before
+  // it left, and opens the dialog on one (restored, never saved). A rename's start is the list as read now.
+  const renameKey = keptKey(env.identity, renameEditor(listId));
+  const pickerKey = keptKey(env.identity, pickerEditor(listId));
+  const renamed = useKeptRecovery(
+    renameKey,
+    env.identity,
+    renameRecovery(listId),
+    () => renameStart(list, env.newId),
+    false,
+  );
+  const picked = useKeptRecovery(
+    pickerKey,
+    env.identity,
+    pickerRecovery(listId, env.newId),
+    pickerStart,
+    false,
+  );
+  useEffect(() => {
+    if (dialog !== null) return;
+    if (renamed.restored !== null && holdsInput(renameKey)) setDialog("rename");
+    else if (picked.restored !== null && holdsInput(pickerKey))
+      setDialog("picker");
+  }, [dialog, renamed.restored, picked.restored, renameKey, pickerKey]);
   useEffect(() => {
     if (focusAfter === null) return;
     const root = article.current;

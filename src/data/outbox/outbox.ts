@@ -92,7 +92,12 @@ export type RefusalReason =
    */
   | "predecessor_changed"
   /** The transaction read a known denial for a target this request needs to write. */
-  | "denied";
+  | "denied"
+  /**
+   * The request ends a timer session (`EnqueueRequest.expectTimer`) that the writing transaction found no longer standing, or observed
+   * in another database incarnation: nothing was stored (WEB-10c revision 7, review R32). Never resubmitted on the person's behalf.
+   */
+  | "timer_ended";
 
 /**
  * The form copy a save TAKES OVER (WEB-11a review 4, finding 1; `FormHandOff`): `source` (live, exactly as read) ends in the SAME

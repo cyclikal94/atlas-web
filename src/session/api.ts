@@ -59,6 +59,7 @@ export interface StampedApi {
     klass: RequestClass,
     account: AccountId,
     epoch: Epoch,
+    send?: SendOptions,
   ): ReturnType<typeof createApiClient>;
   /**
    * A stamped `fetch`: the Response it returns has been read in full and was validated against the record when it was
@@ -319,6 +320,12 @@ export type Result<T> =
  */
 export interface SendOptions {
   readonly withdraw?: AbortSignal;
+  /**
+   * WEB-10c (revision 11, review R36): the caller's permission asked AT the send boundary, in its synchronous step, and at every top
+   * guard before it: false, and a request not yet issued is never issued (`not_sent`), exactly as a withdrawn one. It grants nothing and
+   * never aborts an issued request. It must not throw.
+   */
+  readonly admits?: () => boolean;
 }
 /** `GET /me`: the contract's own fields and nothing else (no display name, no link date). */
 export interface AccountSummary {
@@ -518,6 +525,12 @@ export interface Session {
   readonly recovery: Recovery;
   readonly wipe: Wipe;
   readonly compat: Store<ApiCompatibility>;
+  /**
+   * Ask the server's API version again (WEB-14a): at once if no check is in flight, otherwise exactly once more after the one in
+   * flight, so an answer asked for after an event is never replaced by one asked for before it. The app-update coordinator calls it
+   * after a newer client build is loaded; the session itself asks at every `online`, on a return to the page and on its paced timer.
+   */
+  recheckCompatibility(): void;
   /** Actions the neutral states offer. */
   readonly actions: NeutralActions;
   /** The persistence hold: orders a commit in an account's own database against every settlement of the session record. */

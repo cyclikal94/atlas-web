@@ -178,11 +178,13 @@ export const DEFAULT_STACKS = [
     oidc: false,
     mutates: "account data seeded for the snapshot; paced by its stack ledger",
   },
-  // WEB-10a: task journeys have their own backend, accounts and pacing state.
+  // WEB-10a: task journeys have their own backend, accounts and pacing state. WEB-10c's catch-up, dependency, timer, rota and streak
+  // journeys share it (the same accounts, paced against the same ledger), and so do WEB-18's dependency-graph journeys (their own
+  // accounts, heidi to liam, on the same backend and ledger).
   {
     name: "tasks",
     suffix: "-tasks",
-    files: [SPEC("tasks")],
+    files: [SPEC("tasks"), SPEC("tasks-10c"), SPEC("tasks-18")],
     oidc: false,
     mutates:
       "tasks, evidence, sharing and enrolment; paced by its stack ledger",
@@ -210,13 +212,26 @@ export const DEFAULT_STACKS = [
 ];
 
 /** Discovered by Playwright but NOT run by the default suite: a separate, mandatory command. Never counted as passed by it. */
-export const SEPARATE = [];
+export const SEPARATE = [
+  {
+    name: "pwa",
+    files: [SPEC("pwa")],
+    obligation:
+      "I-U2 needs the worker-enabled build: node scripts/integration/run.mjs --app dist-pwa/fixture-a --browsers chromium,firefox,webkit -- tests/integration/integration.pwa.spec.ts",
+  },
+];
 
 /**
  * The skips a passing stack may contain, each with the condition under which it is designed. Any other skipped or unexecuted case
  * makes the stack incomplete. A designed skip is reported as not run, never as passed.
  */
 export const DESIGNED_SKIPS = [
+  {
+    file: "integration.pwa.spec.ts",
+    description:
+      "needs the worker-enabled build: scripts/integration/run.mjs --app dist-pwa/fixture-a",
+    when: ({ app }) => !(app ?? "").includes("dist-pwa"),
+  },
   {
     file: "integration.profile.spec.ts",
     description: "not run: measurements are taken by `pnpm profile:session`",

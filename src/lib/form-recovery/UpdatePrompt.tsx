@@ -7,7 +7,8 @@ export const UPDATE_TEXT =
 
 /**
  * State 1: an update is ready. The user chooses when to reload (Q4); nothing happens automatically.
- * WEB-14a supplies the update event and the reload, and wires these two callbacks.
+ * WEB-14a supplies the update event and the reload, and wires these two callbacks. "Save and reload" is the first button: the banner
+ * that shows the prompt focuses it when the prompt appears (WEB-14a revision 19, R26: `focus.ts`).
  */
 export function UpdatePrompt({
   onSaveAndReload,

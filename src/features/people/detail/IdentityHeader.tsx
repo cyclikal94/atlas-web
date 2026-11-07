@@ -13,11 +13,18 @@ import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
 import { PageHeading } from "../../../components/ui/page-heading";
 import type { DraftWithCommand } from "../../../data";
+import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { ResourcePolicyEditor } from "../../sharing";
 import type { PeopleFailure } from "../api";
 import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
+import {
+  completeTicket,
+  usePeopleRecovery,
+  usePeopleRecoveryHost,
+} from "../form-recovery";
 import {
   admit,
   completeSession,
@@ -48,6 +55,7 @@ import {
   unlinkOffer,
 } from "../model/linkage";
 import type { ShownRow } from "../model/project";
+import { type RenameInput, renameCodec } from "../model/recovery";
 import { isMergedAlias } from "../model/requests";
 import {
   type EditSnapshot,
@@ -94,6 +102,29 @@ export function IdentityHeader({
   const synced = shown.projected ? undefined : person.version;
   const { linkage, retry } = usePersonLinkage(person.id, synced);
   const [renaming, setRenaming] = useState(false);
+  // WEB-14a (F-INT-PEOPLE-Q4): a rename left by the page before an update reload opens again on its copy (never sent).
+  const renameKey = `rename:${person.id}`;
+  usePeopleRecoveryHost<RenameInput>({
+    memory: env.memory,
+    key: renameKey,
+    codec: renameCodec(person.id),
+    start: () => ({
+      name: person.label,
+      snapshot: snapshotOf(person, drafts, shown.latest?.localId ?? null),
+    }),
+    holds: () => holdsRename(env.memory, renameKey),
+    park: (value) => {
+      const session = env.newId();
+      env.memory.drafts.set(renameKey, {
+        session,
+        name: value.name,
+        revision: 1,
+        snapshot: value.snapshot,
+      } satisfies RetainedRename);
+      return session;
+    },
+    open: () => setRenaming(true),
+  });
   // The version the open unlink confirmation was opened on: it confirms that unlink only, never one of a later linkage (review 25).
   const [unlinking, setUnlinking] = useState<number | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -414,6 +445,13 @@ interface RetainedRename {
   snapshot: EditSnapshot;
 }
 
+/** WEB-14a (F-INT-PEOPLE-Q4): page memory keeps input of the rename under `key` (typed, or a rename of it running). */
+function holdsRename(memory: PeopleMemory, key: string): boolean {
+  const kept = memory.drafts.get(key) as RetainedRename | undefined;
+  if (kept === undefined) return false;
+  return kept.revision > 0 || isPending(memory, kept.session);
+}
+
 function RenameForm({
   shown,
   linkage,
@@ -462,12 +500,48 @@ function RenameForm({
   useMemoryRevision(env.memory);
   // Whether this session's rename runs, whichever mount of it started it (review 7, finding 1).
   const saving = isPending(env.memory, session);
+  // WEB-14a (F-INT-PEOPLE-Q4): the input as last given (the recoverable model has it in the same step).
+  const input = useRef<RenameInput>({
+    name: initial.name,
+    snapshot: initial.snapshot,
+  });
+  const take = (next: RenameInput, edited: boolean) => {
+    input.current = next;
+    setName(next.name);
+    setSnapshot(next.snapshot);
+    if (edited) setRevision((value) => value + 1);
+  };
+  const recovery = usePeopleRecovery<RenameInput>({
+    memory: env.memory,
+    key: retainedKey,
+    session,
+    codec: renameCodec(person.id),
+    // What a form opened now starts from (a fresh binding to the person as shown now).
+    start: () => ({
+      name: shownRef.current.person.label,
+      snapshot: snapshotOf(
+        shownRef.current.person,
+        draftsRef.current,
+        shownRef.current.latest?.localId ?? null,
+      ),
+    }),
+    value: () => input.current,
+    holds: () => holdsRename(env.memory, retainedKey),
+    untouched: () =>
+      revisionRef.current === 0 && !isPending(env.memory, session),
+    busy: () => isPending(env.memory, session),
+    // A copy restored, or "Discard instead": the session's input from now on.
+    restored: (value) => take(value, true),
+    reset: (value) => take(value, true),
+  });
   const [message, setMessage] = useState<RenameMessage | null>(null);
   const errorId = useId();
   const max = route.kind === "rename_profile" ? 200 : 300;
   // The typed name is kept across a remount of the tree (a 403 elsewhere), for this identity and this person only.
   // Nothing of this form keeps it again once the session ended (review 8, finding 1).
   const retired = useRef(false);
+  // The form's first field: focused when B restores the rename and after "Discard instead" (WEB-14a revision 51, F-R51-1).
+  const nameRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (retired.current) return;
     env.memory.drafts.set(retainedKey, {
@@ -503,7 +577,13 @@ function RenameForm({
     close,
     keep: () => setMessage({ text: copy.LATER_EDITS_KEPT }),
     report: (update) => {
-      if (update.snapshot !== undefined) setSnapshot(update.snapshot);
+      if (update.snapshot !== undefined) {
+        // A re-binding the save confirmed is what the save left in the input, never the person's edit (WEB-14a, F-INT-PEOPLE-Q4).
+        const next = { ...input.current, snapshot: update.snapshot };
+        input.current = next;
+        recovery.settle(next);
+        setSnapshot(update.snapshot);
+      }
       if (update.message !== undefined) setMessage(update.message);
     },
   });
@@ -525,10 +605,22 @@ function RenameForm({
     if (!owns()) return;
     const admission = admit(env.memory, [session], env.newId);
     if (admission === null) return;
+    // WEB-14a (F-INT-PEOPLE-Q4): the recoverable model's ticket, in the same step (none while an update reload is prepared: nothing is
+    // sent). Only a durable success (a receipt, or the edit queued) covers what it sent; a refusal, an uncertain attempt or a stale
+    // binding keeps the input for an update to save.
+    const kept = recovery.submitting();
+    if (kept === null) {
+      settle(admission);
+      return;
+    }
+    let durable = false;
     try {
-      await run();
+      await run(() => {
+        durable = true;
+      });
     } finally {
       settle(admission);
+      completeTicket(kept, durable);
     }
   };
   /** What an online rename's answer does to the form: success ends the session at `ticket`; anything else is shown. */
@@ -536,8 +628,10 @@ function RenameForm({
     result: Awaited<ReturnType<typeof env.api.peopleCommand>>,
     version: number,
     ticket: number,
+    done: () => void,
   ) => {
     if (result.ok) {
+      done();
       env.memory.drafts.set(`renaming:${person.id}`, version);
       readLinkage(env, person.id, { force: true });
       announcer.announce(copy.RENAMED, "polite");
@@ -558,7 +652,7 @@ function RenameForm({
         },
       });
   };
-  const run = async () => {
+  const run = async (done: () => void) => {
     // The uncertain rename of this name is resolved first, exactly as it was sent (review 26, R26.2): not judged on the linkage, the
     // person's version or the form's binding as read now, and never re-bound (a sync of its own commit would otherwise make it "stale").
     const replay = renameReplay(env.memory, person.id, name);
@@ -571,7 +665,7 @@ function RenameForm({
         replay,
         (attempt) => env.api.peopleCommand(attempt),
       );
-      answered(result, attemptVersion(replay) as number, ticket);
+      answered(result, attemptVersion(replay) as number, ticket, done);
       return;
     }
     // Who controls the name is judged at the press (review 25): a press of a render whose linkage is no longer current sends nothing; the
@@ -610,7 +704,7 @@ function RenameForm({
         body,
         (attempt) => env.api.peopleCommand(attempt),
       );
-      answered(result, version, ticket);
+      answered(result, version, ticket, done);
       return;
     }
     if (route.kind !== "edit" || snapshot.policyVersion === null) {
@@ -671,6 +765,7 @@ function RenameForm({
         tell({ message: { text: outcome.message } });
       return;
     }
+    done();
     announcer.announce(copy.SAVED_NOT_SENT, "polite");
     ended(ticket);
   };
@@ -680,17 +775,19 @@ function RenameForm({
   const replaying = renameReplay(env.memory, person.id, name) !== null;
   const reason = !env.writable
     ? copy.READ_ONLY_COMPAT
-    : saving
-      ? copy.SAVING
-      : replaying
-        ? env.online
-          ? null
-          : copy.NEEDS_CONNECTION
-        : route.kind === "disabled"
-          ? renameDisabled(route.reason, person.label)
-          : offlineBlocked
-            ? copy.NEEDS_CONNECTION
-            : null;
+    : recovery.locked
+      ? UNAVAILABLE_WHILE_RELOADING
+      : saving
+        ? copy.SAVING
+        : replaying
+          ? env.online
+            ? null
+            : copy.NEEDS_CONNECTION
+          : route.kind === "disabled"
+            ? renameDisabled(route.reason, person.label)
+            : offlineBlocked
+              ? copy.NEEDS_CONNECTION
+              : null;
   return (
     <form
       data-rename-form=""
@@ -701,14 +798,17 @@ function RenameForm({
       }}
     >
       <fieldset disabled={saving} className="flex flex-col gap-2">
+        <RecoveryNotice recovery={recovery} firstFieldRef={nameRef} />
         <Input
+          ref={nameRef}
           label={copy.NAME}
           value={name}
           aria-invalid={message ? true : undefined}
           aria-describedby={message ? errorId : undefined}
           onChange={(event) => {
-            setName(event.target.value);
-            setRevision((value) => value + 1);
+            // Given to the recoverable model first; not taken while an update reload is being prepared (WEB-14a, F-INT-PEOPLE-Q4).
+            const next = { ...input.current, name: event.target.value };
+            if (recovery.edit(next)) take(next, true);
           }}
         />
         {message ? (

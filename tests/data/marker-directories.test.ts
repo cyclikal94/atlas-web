@@ -287,6 +287,7 @@ describe("the order and the failure of the two writes (a crash or a refusal at e
     storage.setItem = setItem;
     storage.removeItem = removeItem;
     // The directory still lists the failure whose key was never written.
+    expect(storage.items.get(directoryKey(scopeOf(A), 0))).toBeDefined();
     expect(storage.items.get(directoryKey(scopeOf(A), 0))).toContain(OP);
     expect(markerStands(storage, A, OP)).toBe(false);
     expect(theirs.probe(scopeOf(A), OP)).toBe("unmarked");

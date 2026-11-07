@@ -12,6 +12,7 @@ import { destinationFor } from "./destinations";
 import { type ShellEnv, ShellEnvProvider } from "./env";
 import { useLayoutMode } from "./layout-mode";
 import { MoreSheet } from "./MoreSheet";
+import { useSidebarPreference } from "./preferences";
 import { Rail, WorkspaceChip } from "./Rail";
 import { RouteFocus } from "./RouteFocus";
 import { TabBar } from "./TabBar";
@@ -22,6 +23,11 @@ export interface AppShellProps extends ShellEnv {
   children: ReactNode;
   /** Detail screens hide the tab bar and show a back affordance on mobile. */
   mobileBack?: { label: string; to: string };
+  /**
+   * The app update prompt (WEB-14a): drawn in the sidebar above the sync status while the sidebar is open (the Final design's update
+   * card), else at the top of the page.
+   */
+  updateSlot?: ReactNode;
 }
 
 /**
@@ -34,8 +40,17 @@ export interface AppShellProps extends ShellEnv {
  * header and the bottom tabs are sticky. A screen supplies ordinary long content in <main> and does nothing else.
  * Sticky bars cover part of the viewport, so `useChromeInsets` keeps focus scrolling clear of them.
  */
-export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
+export function AppShell({
+  children,
+  mobileBack,
+  updateSlot,
+  ...env
+}: AppShellProps) {
   const mode = useLayoutMode();
+  const preference = useSidebarPreference();
+  const railOpen =
+    mode !== "mobile" &&
+    (preference === "auto" ? mode === "desktop" : preference === "expanded");
   const [moreOpen, setMoreOpen] = useState(false);
   const moreButton = useRef<HTMLButtonElement>(null);
   const [header, setHeader] = useState<HTMLElement | null>(null);
@@ -52,6 +67,7 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
       // isolate: nothing a screen positions inside main can be stacked above the sticky chrome.
       className="isolate min-w-0 flex-1 px-4 py-3 tablet:px-9 tablet:py-8 desktop:px-12 desktop:py-10"
     >
+      {railOpen ? null : updateSlot}
       {children}
     </main>
   );
@@ -112,7 +128,7 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
           </div>
         ) : (
           <div className="flex min-h-dvh bg-background">
-            <Rail mode={mode} />
+            <Rail mode={mode} footerSlot={railOpen ? updateSlot : null} />
             {main}
           </div>
         )}

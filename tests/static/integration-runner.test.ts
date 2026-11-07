@@ -404,8 +404,9 @@ const endsCleanly = (events: string[]) => {
 };
 
 describe("R22: every discovered integration case is in exactly one stack (Playwright's own listing)", () => {
-  test("the default stacks cover the whole listing once, in every engine (no separate obligation on this branch)", async () => {
+  test("the default stacks and the separate I-U2 obligation cover the whole listing once, in every engine", async () => {
     const whole = await keysOf([]);
+    const pwa = await keysOf(["tests/integration/integration.pwa.spec.ts"]);
     const stacks = STACKS.map((s) => ({
       name: s.name,
       keys: planned.get(s.name) ?? [],
@@ -414,7 +415,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       assignCases({
         all: whole,
         stacks,
-        separate: [],
+        separate: [{ name: "pwa", keys: pwa }],
         browsers: BROWSERS,
       }),
     ).toEqual({ ok: true, problems: [] });
@@ -424,16 +425,18 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
           stacks.map((s) => [s.name, inBrowser(s.keys, browser).length]),
         ),
       ).toEqual({
-        // WEB-09c: integration.profile-sync.spec.ts adds W2-limits, a fifth measurement case (a designed skip without ATLAS_PROFILE).
-        base: 29,
+        // WEB-14a: +5 base cases; WEB-09c: integration.profile-sync.spec.ts adds W2-limits, a fifth measurement case (a designed skip
+        // without ATLAS_PROFILE).
+        base: 34,
         pages: 18,
         "password-path": 8,
         i14e: 4,
         i14d: 4,
-        data: 32,
+        data: 37,
         calendar: 13,
         // WEB-11b: I-PPL17..I-PPL23 (seven tests, revision 1's I-PPL21 both-linked case included) join WEB-11a's 16 People cases.
-        people: 23,
+        // WEB-19: I-PPL24..I-PPL29 (six activity-timeline tests) join them in the People stack.
+        people: 29,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -443,12 +446,18 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        tasks: 22,
+        // WEB-10a's 22 and WEB-10c's 22 task cases (revision 11 split I-10C-M4 into M4a/M4b; revision 14, review 15's R38, added the
+        // task-day rollover control I-10C-M4c); WEB-08d's labels retain their own stack. WEB-18: +10 (I-18-G1..G6, G7a, G7b, G8, G9).
+        tasks: 54,
         labels: 15,
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(279); // WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-09c: +1 profiling case (W2-limits)
+      // 327 default-stack cases plus two separately scheduled PWA cases (WEB-14a: +10 default-stack cases and the 2 PWA cases). WEB-10c: +22
+      // task cases; WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-09c: +1 profiling case (W2-limits); WEB-18: +10 task cases; WEB-19: +6
+      // (I-PPL24..I-PPL29).
+      expect(inBrowser(pwa, browser)).toHaveLength(2);
+      expect(inBrowser(whole, browser)).toHaveLength(329);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -464,7 +473,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "base",
         [
           "--grep-invert",
-          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|L)[0-9]|I-CAL|I-2[0-9]|I-30",
+          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|L|U)[0-9]|I-CAL|I-2[0-9]|I-30",
         ],
       ],
       ["i14e", ["--grep", "I-14e"]],
@@ -501,21 +510,23 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 23 (WEB-11b: +7).
+    // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 29 (WEB-11b: +7;
+    // WEB-19: +6).
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
       pages: 54,
       "password-path": 24,
-      people: 69,
-      tasks: 66,
+      people: 87,
+      // WEB-10a's 22, WEB-10c's 22 (revision 14 added I-10C-M4c) and WEB-18's 10 task cases, in three engines.
+      tasks: 162,
       labels: 45,
       lists: 24,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
 
-  test("omitting the People stack refuses all 69 unassigned cases before any backend starts", async () => {
+  test("omitting the People stack refuses all 87 unassigned cases before any backend starts", async () => {
     const w = await world({
       stacks: STACKS.filter((s) => s.name !== "people"),
     });
@@ -525,7 +536,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       readFileSync(join(w.evidence, "discovery/discovery.json"), "utf8"),
     );
     expect(discovery.assignment.ok).toBe(false);
-    expect(discovery.assignment.problems).toHaveLength(69);
+    expect(discovery.assignment.problems).toHaveLength(87);
     for (const problem of discovery.assignment.problems)
       expect(problem).toMatch(
         /in no stack: integration-.*integration\.people\.spec\.ts/,
@@ -639,8 +650,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 279,
-        passed: 272,
+        planned_cases: 327,
+        passed: 320,
         designed_skips: 7,
         failed: 0,
         interrupted: 0,
@@ -654,7 +665,12 @@ describe("R23: the next stack or browser starts only after the previous one pass
       evidence: { complete: true, errors: [] },
     });
     expect(existsSync(join(w.evidence, OWNER))).toBe(true);
-    expect(summary.separate_obligations).toEqual([]);
+    expect(summary.separate_obligations).toEqual([
+      expect.objectContaining({
+        name: "pwa",
+        state: "not run by this command",
+      }),
+    ]);
   }, 120_000);
 
   const failAt =

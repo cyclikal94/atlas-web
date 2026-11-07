@@ -35,7 +35,7 @@ import { editList, listItem, projectCreateList } from "./model/lists";
 import { slotOn, windows } from "./model/time";
 
 /**
- * The registrations of WEB-10a's queued kinds (plan §4.7) and WEB-10b's list kinds (its plan §3.4): a description for the queue, the
+ * The registrations of WEB-10a/10c's queued kinds (plan §4.7) and WEB-10b's list kinds (its plan §3.4): a description for the queue, the
  * projection of a create the cache does not hold yet, the authorised current-state read of WF-QUEUE-02 (D-10a-15) and the rebuild of
  * "Resend as a new operation". Registered ONCE per registry (the registry throws on a second registration), before the routes render.
  */
@@ -47,6 +47,12 @@ export const DESCRIPTIONS: Readonly<Record<string, string>> = {
   exclude: "Streak exclusion",
   revise_occurrence: "Correction to one day",
   archive: "Archive or restore",
+  // WEB-10c (provisional copy)
+  set_dependencies: "Set what this waits for",
+  complete_dependencies: "Complete with what it waits for",
+  start_timer: "Timer start",
+  stop_timer: "Timer stop",
+  cancel_timer: "Discard timer",
   create_list: "New list",
   edit_list: "List name change",
   list_item: "List change",
@@ -471,6 +477,41 @@ function admissionOf(draft: DraftWithCommand): TargetNeeds {
       return isString(command.id)
         ? { [command.id]: { requiresEdit: true } }
         : {};
+    // WEB-10c. Setting what a day waits for needs the day's edit access.
+    case "set_dependencies":
+      return isString(occurrence)
+        ? { [occurrence]: { requiresEdit: true } }
+        : {};
+    // A completion with its prerequisites writes my streams (side effects, the root's first, as its builder names them), and creating
+    // the root's (an Anyone root) needs the root's edit access.
+    case "complete_dependencies": {
+      if (!isString(occurrence)) return {};
+      const [rootStream, ...others] = Object.keys(
+        draft.side_effect_bases ?? {},
+      );
+      const needs: Record<
+        string,
+        { requiresEdit: true; joinRequiresEdit?: string }
+      > = {};
+      if (rootStream !== undefined)
+        needs[rootStream] = {
+          requiresEdit: true,
+          joinRequiresEdit: occurrence,
+        };
+      for (const id of others) needs[id] = { requiresEdit: true };
+      return needs;
+    }
+    // A timer writes my stream of its occurrence (its one side effect; its primaries are the session and the occurrence); starting one
+    // on an Anyone occurrence may create it (the occurrence's edit access).
+    case "start_timer":
+    case "stop_timer":
+    case "cancel_timer": {
+      const mine = Object.keys(draft.side_effect_bases ?? {})[0];
+      if (mine === undefined) return {};
+      return command.kind === "start_timer" && isString(occurrence)
+        ? { [mine]: { requiresEdit: true, joinRequiresEdit: occurrence } }
+        : { [mine]: { requiresEdit: true } };
+    }
     case "list_item":
       return isString(command.list_id)
         ? { [command.list_id]: { requiresEdit: true } }
@@ -724,6 +765,23 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
       rebuild: rebuildArchive,
       admission: admissionOf,
     },
+    // WEB-10c. No authorised read returns an occurrence's prerequisites, a preview's token or a timer session's current state as the
+    // queue could compare it, so none registers `readCurrent` or `rebuild`: WF-QUEUE-02 offers discard, and the task's own detail offers
+    // the review ("Keep editing", "Review and send again", the timer's sessions).
+    set_dependencies: {
+      describe: describe("set_dependencies"),
+      admission: admissionOf,
+    },
+    complete_dependencies: {
+      describe: describe("complete_dependencies"),
+      admission: admissionOf,
+    },
+    start_timer: { describe: describe("start_timer"), admission: admissionOf },
+    stop_timer: { describe: describe("stop_timer"), admission: admissionOf },
+    cancel_timer: {
+      describe: describe("cancel_timer"),
+      admission: admissionOf,
+    },
     create_list: {
       describe: describe("create_list"),
       projectCreate: projectCreateList,
@@ -745,7 +803,7 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
 
 const registered = new WeakSet<CommandRegistry>();
 
-/** Registers every WEB-10a and WEB-10b kind into `registry`, once (idempotent per registry). */
+/** Registers every WEB-10a, WEB-10b and WEB-10c kind into `registry`, once (idempotent per registry). */
 export function registerTaskCommands(registry: CommandRegistry): void {
   if (registered.has(registry)) return;
   registered.add(registry);

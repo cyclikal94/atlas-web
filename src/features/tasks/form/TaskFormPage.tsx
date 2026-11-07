@@ -1,5 +1,12 @@
 import { useNavigate } from "@tanstack/react-router";
-import { type ReactNode, useId, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { Input, inputClass } from "../../../components/ui/input";
 import { NativeSelect } from "../../../components/ui/native-select";
@@ -12,12 +19,20 @@ import {
   useDataEnv,
   useSharingDefaults,
 } from "../../../data";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { DETAIL_COPY } from "../detail/TaskDetail";
 import { useTaskDetail } from "../detail/useTaskDetail";
 import { useTasksEnv } from "../env";
-import { completeKept, keptEntry, keptKey, useKeptInput } from "../kept-input";
+import {
+  completeKept,
+  type KeptRecovery,
+  keptEntry,
+  keptKey,
+  useKeptInput,
+  useKeptRecovery,
+} from "../kept-input";
 import {
   commandOf,
   createTask,
@@ -44,7 +59,11 @@ import {
   visibleFields,
 } from "../model/form";
 import { occurrenceId, progressId } from "../model/ids";
-import { taskFormContext } from "../model/recovery";
+import {
+  decodeTaskFormInput,
+  encodeTaskFormInput,
+  taskFormContext,
+} from "../model/recovery";
 import { firstSlot, todayIn } from "../model/time";
 import { editable } from "../reasons";
 import { knownZones } from "../today/TodayPage";
@@ -120,6 +139,16 @@ export function TaskFormPage({ mode }: { mode: Mode }) {
 const NEW_FORM = "task-form:new";
 const NEW_PICK = "task-form:new:preset";
 
+/**
+ * Revision 37 (WEB-14a R40): the task form's input is recoverable around an app-update reload (Q4), as one versioned text of its editing
+ * session (`model/recovery.ts`), under a context of the editor and its target (the new task's, or the task edited).
+ */
+const formRecovery = (context: string): KeptRecovery<FormInput> => ({
+  context,
+  encode: encodeTaskFormInput,
+  decode: decodeTaskFormInput,
+});
+
 function NewTask() {
   const env = useTasksEnv();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -134,6 +163,23 @@ function NewTask() {
     () => emptyForm(zone, todayIn(zone, env.now())),
     [zone, env],
   );
+  // Revision 37 (R40): the form opens only once a stage is chosen, so this screen looks for what the page before an update left to it:
+  // a copy restored is the stage the person had reached (the form, with its input), never the picker again; nothing is submitted.
+  const recovered = useKeptRecovery<FormInput>(
+    keptKey(env.identity, NEW_FORM),
+    env.identity,
+    formRecovery(NEW_FORM),
+    () => ({ initial: base, state: base }),
+    true,
+  );
+  useEffect(() => {
+    if (
+      stage === "pick" &&
+      recovered.restored !== null &&
+      keptEntry(keptKey(env.identity, NEW_FORM)) !== null
+    )
+      setStage("kept");
+  }, [stage, recovered.restored, env.identity]);
   if (stage === "pick")
     return (
       <>
@@ -304,6 +350,8 @@ function TaskForm({
   const actions = useTaskActions();
   const defaults = useSharingDefaults();
   const navigate = useNavigate();
+  const formRef = useRef<HTMLFormElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
   // What was typed is the editing session's (revision 18, R33; `kept-input.ts`), not this mount's: a visit to the sync screens keeps it,
   // whole and raw, and coming back shows it again, as is the new form's stage. Every edit moves the session's revision; a save consumes the
   // session, and closes the form onto its task, only if nothing was typed after what it submitted, and only the form mounted then (if
@@ -328,9 +376,19 @@ function TaskForm({
         return null;
       },
       unedited: mode.kind === "new",
+      recover: formRecovery(
+        mode.kind === "new" ? NEW_FORM : taskFormContext(mode.taskId),
+      ),
+      // A date or time field partly typed has no value the session can hold: unfinished, never saved as empty (R40).
+      unfinished: () =>
+        Array.from(formRef.current?.querySelectorAll("input") ?? []).some(
+          (input) => input.validity?.badInput === true,
+        ),
     },
   );
   const { state } = kept.value;
+  const recovery = kept.recovery;
+  const locked = recovery?.locked === true;
   const [errors, setErrors] = useState<FormErrors>({});
   const { note: notice, setNote: setNotice, busy } = kept;
   const id = useId();
@@ -513,8 +571,10 @@ function TaskForm({
   const lockedRepeat = editing;
   return (
     <form
+      ref={formRef}
       className="atlas-enter flex max-w-[620px] flex-col gap-5"
       data-task-form={mode.kind}
+      data-recovery-ready={recovery?.view.ready === false ? "false" : "true"}
       noValidate
       onSubmit={(event) => {
         event.preventDefault();
@@ -524,12 +584,17 @@ function TaskForm({
       <PageHeading>
         {editing ? FORM_COPY.editTitle : FORM_COPY.newTitle}
       </PageHeading>
+      {recovery ? (
+        <RecoveryNotice recovery={recovery} firstFieldRef={nameRef} />
+      ) : null}
+      {/* Held while an update reload is prepared (R40): nothing is typed or saved after the last save. */}
       <fieldset
-        disabled={busy}
+        disabled={busy || locked}
         className="flex flex-col gap-5 rounded-xl border bg-card p-5 shadow-sm"
       >
         <Field id={fid("title")} label={FORM_COPY.name} error={errors.title}>
           <input
+            ref={nameRef}
             {...described("title")}
             value={state.title}
             data-field-edge=""

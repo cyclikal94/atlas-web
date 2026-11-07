@@ -324,6 +324,7 @@ describe("R25 (revision 14): a named property of an array is part of the write",
         expect(outcome.kind).not.toBe("refused");
         const id = path === "edit" ? OLD : NEW;
         const stored = w.drafts().find((row) => row.local_id === id);
+        expect(form.read(stored as DraftRow, "x")).toBeDefined();
         expect(form.read(stored as DraftRow, "x")).toHaveLength(BIG);
       });
 
