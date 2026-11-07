@@ -7,6 +7,7 @@ import {
   describe,
   expect,
   test,
+  vi,
 } from "vitest";
 import type {
   SetRotaCommand,
@@ -75,6 +76,10 @@ import {
  * (the editor is not registered), not at an import. FIXTURE/COMPONENT evidence (jsdom), not a native browser result.
  */
 installMatchMedia({ width: 1440 });
+// WEB-18 revision 5 (Review 6 F-R13; design assessment option B): a wait that never completes under a mutant costs about 5 s (`until` is
+// 20 settles: a 4 s timer floor plus CPU), the vitest default, so a catch raced the time-out. Suite level, timing only: nothing asserted
+// changes.
+vi.setConfig({ testTimeout: SLOW.timeout });
 beforeAll(installRecoveryLocks);
 /** Every coordinator a test started, disposed after it whatever happened (a frozen registry must never leak into the next test). */
 const started: { dispose(): void }[] = [];

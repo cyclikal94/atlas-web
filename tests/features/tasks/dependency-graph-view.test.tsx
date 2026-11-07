@@ -6,7 +6,7 @@ import {
   within,
 } from "@testing-library/react";
 import { axe } from "jest-axe";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { DEPENDENCY_COPY } from "../../../src/features/tasks/detail/Dependencies";
 import { GRAPH_COPY } from "../../../src/features/tasks/detail/DependencyGraph";
@@ -46,6 +46,10 @@ import {
  * with the answer's edges and states, the summary and notices say only what is visible, and the modes still come from the preview alone.
  */
 const media = installMatchMedia({ width: 1440 });
+// WEB-18 revision 5 (Review 6 F-R13; design assessment option B): a wait that never completes under a mutant costs about 5 s (`until` is
+// 20 settles: a 4 s timer floor plus CPU), the vitest default, so a catch raced the time-out. Suite level, timing only: nothing asserted
+// changes.
+vi.setConfig({ testTimeout: SLOW.timeout });
 afterEach(() => {
   cleanup();
   forgetTaskMemory();

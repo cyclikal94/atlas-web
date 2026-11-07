@@ -38,6 +38,10 @@ import {
  * evidence: the preview is the stub's.
  */
 installMatchMedia({ width: 1440 });
+// WEB-18 revision 5 (Review 6 F-R13; design assessment option B): a wait that never completes under a mutant costs about 5 s (`until` is
+// 20 settles: a 4 s timer floor plus CPU), the vitest default, so a catch raced the time-out. Suite level, timing only: nothing asserted
+// changes.
+vi.setConfig({ testTimeout: SLOW.timeout });
 afterEach(() => {
   cleanup();
   forgetTaskMemory();

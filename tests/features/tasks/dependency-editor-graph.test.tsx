@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import * as copy from "../../../src/features/tasks/copy";
 import { DEPENDENCY_COPY } from "../../../src/features/tasks/detail/Dependencies";
@@ -29,6 +29,10 @@ import {
  * unsettled change of its version.
  */
 installMatchMedia({ width: 1440 });
+// WEB-18 revision 5 (Review 6 F-R13; design assessment option B): a wait that never completes under a mutant costs about 5 s (`until` is
+// 20 settles: a 4 s timer floor plus CPU), the vitest default, so a catch raced the time-out. Suite level, timing only: nothing asserted
+// changes.
+vi.setConfig({ testTimeout: SLOW.timeout });
 afterEach(() => {
   cleanup();
   forgetTaskMemory();
