@@ -39,6 +39,7 @@ import { FLUSH_START_GRACE_MS } from "../../../src/lib/pwa/coordinator";
 import { installMatchMedia } from "../../helpers/match-media";
 import { FakeOrigin } from "../../pwa/coordinator-world";
 import { draftRow } from "../../support/data/rows";
+import { present } from "../../support/present";
 import {
   contextsOf,
   forgetRecoveryWorld,
@@ -313,7 +314,7 @@ describe("D-1: the dependency editor (WEB-10c D-10c-7) takes part in app-update 
           .checked,
       ).toBe(true);
       expect(
-        within(editorBody() as HTMLElement).queryByText(RESTORED_TEXT),
+        within(present(editorBody(), "the editor")).queryByText(RESTORED_TEXT),
         "the restored notice",
       ).not.toBeNull();
       expect(t.drafts(), "restored, never saved").toEqual([]);
@@ -389,9 +390,12 @@ describe("D-1: the dependency editor (WEB-10c D-10c-7) takes part in app-update 
             `[data-editor-item="${pre.occurrenceId}"]`,
           ) != null,
       );
-      const remove = within(editorBody() as HTMLElement).getByRole("button", {
-        name: new RegExp(`^${DEPENDENCY_COPY.remove}: `),
-      });
+      const remove = within(present(editorBody(), "the editor")).getByRole(
+        "button",
+        {
+          name: new RegExp(`^${DEPENDENCY_COPY.remove}: `),
+        },
+      );
       fireEvent.click(remove);
       expect(contextsOf(pageFormRegistry.dirty())).toContain(CONTEXT);
 
@@ -408,9 +412,11 @@ describe("D-1: the dependency editor (WEB-10c D-10c-7) takes part in app-update 
         editorBody(),
         "Keep editing opened again on the copy",
       ).not.toBeNull();
-      expect(editorBody()).toHaveTextContent(DEPENDENCY_COPY.editorEmpty);
+      expect(present(editorBody(), "the editor")).toHaveTextContent(
+        DEPENDENCY_COPY.editorEmpty,
+      );
       expect(
-        within(editorBody() as HTMLElement).queryByText(RESTORED_TEXT),
+        within(present(editorBody(), "the editor")).queryByText(RESTORED_TEXT),
         "the restored notice",
       ).not.toBeNull();
       expect(
@@ -507,7 +513,7 @@ describe("D-1: the turn order dialog (WEB-10c WF-TASK-05) takes part in app-upda
       expect(contextsOf(pageFormRegistry.all())).toContain(CONTEXT);
       expect(contextsOf(pageFormRegistry.dirty())).not.toContain(CONTEXT);
       fireEvent.click(
-        within(rotaDialog() as HTMLElement).getByRole("button", {
+        within(present(rotaDialog(), "the rota dialog")).getByRole("button", {
           name: `${ROTA_COPY.add}: Someone (2222…)`,
         }),
       );
@@ -525,10 +531,17 @@ describe("D-1: the turn order dialog (WEB-10c WF-TASK-05) takes part in app-upda
       await t.until(() => rotaDialog() !== null);
       expect(rotaDialog(), "the dialog opened on the copy").not.toBeNull();
       expect(
-        (rotaDialog() as HTMLElement).querySelector("[data-rota-count]"),
+        present(
+          present(rotaDialog(), "the rota dialog").querySelector(
+            "[data-rota-count]",
+          ),
+          "the rota count",
+        ),
       ).toHaveTextContent(ROTA_COPY.count(2));
       expect(
-        within(rotaDialog() as HTMLElement).queryByText(RESTORED_TEXT),
+        within(present(rotaDialog(), "the rota dialog")).queryByText(
+          RESTORED_TEXT,
+        ),
         "the restored notice",
       ).not.toBeNull();
       expect(sent, "restored, never sent").toEqual([]);
@@ -552,7 +565,7 @@ describe("D-1: the turn order dialog (WEB-10c WF-TASK-05) takes part in app-upda
       fireEvent.click(screen.getByRole("button", { name: ROTA_COPY.order }));
       await t.until(() => rotaDialog() !== null);
       fireEvent.click(
-        within(rotaDialog() as HTMLElement).getByRole("button", {
+        within(present(rotaDialog(), "the rota dialog")).getByRole("button", {
           name: `${ROTA_COPY.add}: Someone (2222…)`,
         }),
       );
@@ -566,7 +579,12 @@ describe("D-1: the turn order dialog (WEB-10c WF-TASK-05) takes part in app-upda
       await t.until(() => rotaDialog() !== null);
       expect(rotaDialog(), "the dialog opened on the copy").not.toBeNull();
       expect(
-        (rotaDialog() as HTMLElement).querySelector("[data-rota-count]"),
+        present(
+          present(rotaDialog(), "the rota dialog").querySelector(
+            "[data-rota-count]",
+          ),
+          "the rota count",
+        ),
       ).toHaveTextContent(ROTA_COPY.count(2));
       fireEvent.click(screen.getByRole("button", { name: ROTA_COPY.save }));
       await t.until(() => sent.length === 1);
@@ -579,11 +597,19 @@ describe("D-1: the turn order dialog (WEB-10c WF-TASK-05) takes part in app-upda
       await t.until(
         () => document.querySelector("[data-rota-conflict]") !== null,
       );
-      expect(document.querySelector("[data-rota-conflict]")).toHaveTextContent(
-        ROTA_COPY.conflict,
-      );
       expect(
-        (rotaDialog() as HTMLElement).querySelector("[data-rota-count]"),
+        present(
+          document.querySelector("[data-rota-conflict]"),
+          "the rota conflict",
+        ),
+      ).toHaveTextContent(ROTA_COPY.conflict);
+      expect(
+        present(
+          present(rotaDialog(), "the rota dialog").querySelector(
+            "[data-rota-count]",
+          ),
+          "the rota count",
+        ),
       ).toHaveTextContent(ROTA_COPY.count(2));
     },
   );
@@ -655,7 +681,7 @@ describe("D-1: a restored editor opens ONCE; Cancel closes it and keeps WEB-10c'
       fireEvent.click(screen.getByRole("button", { name: ROTA_COPY.order }));
       await t.until(() => rotaDialog() !== null);
       fireEvent.click(
-        within(rotaDialog() as HTMLElement).getByRole("button", {
+        within(present(rotaDialog(), "the rota dialog")).getByRole("button", {
           name: `${ROTA_COPY.add}: Someone (2222…)`,
         }),
       );
@@ -839,7 +865,7 @@ async function restoredTurnOrder(options: { another?: boolean } = {}) {
   fireEvent.click(screen.getByRole("button", { name: ROTA_COPY.order }));
   await t.until(() => rotaDialog() !== null);
   fireEvent.click(
-    within(rotaDialog() as HTMLElement).getByRole("button", {
+    within(present(rotaDialog(), "the rota dialog")).getByRole("button", {
       name: `${ROTA_COPY.add}: Someone (2222…)`,
     }),
   );
@@ -907,9 +933,15 @@ describe("revision 57 (F-R57-1): a restored turn order dialog focuses its order,
     async () => {
       const { t } = await restoredTurnOrder();
       keyboardPress(
-        within(rotaDialog() as HTMLElement).getByRole("button", {
-          name: "Discard instead",
-        }),
+        present(
+          within(present(rotaDialog(), "the rota dialog")).queryByRole(
+            "button",
+            {
+              name: "Discard instead",
+            },
+          ),
+          "'Discard instead'",
+        ),
       );
       await t.until(() => rotaCount() === ROTA_COPY.count(1));
       await t.settle();
@@ -935,9 +967,15 @@ describe("revision 57 (F-R57-1): a restored turn order dialog focuses its order,
         false,
       );
       keyboardPress(
-        within(rotaDialog() as HTMLElement).getByRole("button", {
-          name: "Discard instead",
-        }),
+        present(
+          within(present(rotaDialog(), "the rota dialog")).queryByRole(
+            "button",
+            {
+              name: "Discard instead",
+            },
+          ),
+          "'Discard instead'",
+        ),
       );
       await t.until(() => rotaCount() === ROTA_COPY.count(1));
       await t.settle();
@@ -1044,9 +1082,12 @@ describe("revision 57 (F-R57-1, Review 57 judgement): a restored dependency edit
     async () => {
       const { t, prerequisite } = await restoredDependencies();
       keyboardPress(
-        within(editorBody() as HTMLElement).getByRole("button", {
-          name: "Discard instead",
-        }),
+        present(
+          within(present(editorBody(), "the editor")).queryByRole("button", {
+            name: "Discard instead",
+          }),
+          "'Discard instead'",
+        ),
       );
       const gone = () =>
         editorBody()?.querySelector(
@@ -1160,13 +1201,16 @@ describe("WEB-18 merge correction: D-1's dependency-editor recovery fitted to WE
         "the restored edit",
       ).not.toBeNull();
       expect(
-        within(editorBody() as HTMLElement).queryByText(RESTORED_TEXT),
+        within(present(editorBody(), "the editor")).queryByText(RESTORED_TEXT),
         "the restored notice",
       ).not.toBeNull();
       expect(changedShown(), "(b) WEB-18's changed block").toBe(true);
       expect(editorBody()?.dataset.dependencyEditor).toBe("changed");
       expect(
-        screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+        present(
+          screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+          "Save",
+        ),
         "Save withheld",
       ).toBeDisabled();
       expect(t.drafts()).toEqual([]);
@@ -1180,7 +1224,10 @@ describe("WEB-18 merge correction: D-1's dependency-editor recovery fitted to WE
         "built from the current list",
       ).toBeNull();
       expect(
-        screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+        present(
+          screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+          "Save",
+        ),
       ).not.toBeDisabled();
       expect(t.drafts(), "nothing sent").toEqual([]);
     },
@@ -1228,7 +1275,7 @@ describe("WEB-18 merge correction: D-1's dependency-editor recovery fitted to WE
         "never restored in part",
       ).toBeNull();
       expect(
-        within(editorBody() as HTMLElement).queryByText(RESTORED_TEXT),
+        within(present(editorBody(), "the editor")).queryByText(RESTORED_TEXT),
       ).toBeNull();
       expect(await t.data.formRecovery.list(CONTEXT)).toHaveLength(1);
       expect(broken()).toBe(false);
@@ -1255,9 +1302,12 @@ describe("WEB-18 merge correction: D-1's dependency-editor recovery fitted to WE
         "premise: restored",
       ).not.toBeNull();
       fireEvent.click(
-        within(editorBody() as HTMLElement).getByRole("button", {
-          name: "Discard instead",
-        }),
+        present(
+          within(present(editorBody(), "the editor")).queryByRole("button", {
+            name: "Discard instead",
+          }),
+          "'Discard instead'",
+        ),
       );
       await t.until(
         () => item(prerequisite.occurrenceId) === null && editorReady(),
@@ -1271,7 +1321,10 @@ describe("WEB-18 merge correction: D-1's dependency-editor recovery fitted to WE
         "built again from the answer shown",
       ).toBe("open");
       expect(
-        screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+        present(
+          screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+          "Save",
+        ),
       ).not.toBeDisabled();
       expect(t.drafts()).toEqual([]);
     },

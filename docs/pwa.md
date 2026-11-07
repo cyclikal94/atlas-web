@@ -417,8 +417,8 @@ two kept-input editors that took no part in the protocol, so an accepted update 
 (R40's class). Both now declare a codec on their `useKeptInput`, as the Record amount does, and so are registered while open (the update
 offers "Save and reload"), frozen while it is prepared, saved by it and restored into an untouched session:
 
-- **The dependency editor** ("Set what this waits for", `Dependencies.tsx`) keeps its chosen list and strict rule (`{ v: 1, list, strict }`),
-  per day and per conflicted set it replaces ("Keep editing"). A task or day picked in the selects but not yet added is not input (WEB-10c
+- **The dependency editor** ("Set what this waits for", `Dependencies.tsx`) keeps its chosen list and strict rule (`{ v: 1, list, strict }`
+  in the build of that correction; version 2 since WEB-18's maintenance merge, below), per day and per conflicted set it replaces ("Keep editing"). A task or day picked in the selects but not yet added is not input (WEB-10c
   keeps only the list; a visit to the sync screens does not keep the picks either). The day's work reopens a new list's editor on a copy
   (`DependencyEditorRecoveryHost`); the conflict block, which holds the refused set, reopens "Keep editing" on it. The editor reads the
   preview again when it opens, so a restored list is saved only on the answer of now, and only by the person.

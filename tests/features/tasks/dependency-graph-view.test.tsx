@@ -16,6 +16,7 @@ import type {
   DependencyPreview,
 } from "../../../src/features/tasks/model/contract";
 import { installMatchMedia } from "../../helpers/match-media";
+import { present } from "../../support/present";
 import {
   branchSpec,
   budgetPartialSpec,
@@ -146,7 +147,12 @@ async function openDialog(options: {
       (document.querySelector("[data-dependencies]") as HTMLElement | null)
         ?.dataset.dependencies === "ready",
   );
-  fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
+  fireEvent.click(
+    present(
+      screen.queryByRole("button", { name: DEPENDENCY_COPY.see }),
+      "the 'See' button",
+    ),
+  );
   await t.until(
     () =>
       dialog()?.dataset.dependencyDialog === "ready" &&
@@ -201,7 +207,10 @@ async function expandAll(t: { settle(): Promise<void> }) {
   }
 }
 const nodeItem = (id: string) =>
-  document.querySelector(`[data-tree-node="${id}"]`) as HTMLElement;
+  present(
+    document.querySelector<HTMLElement>(`[data-tree-node="${id}"]`),
+    `the list's item ${id}`,
+  );
 
 describe("S-G1..S-G3: the tree and the map agree with the answer's edges and states", () => {
   test.each([
@@ -238,13 +247,23 @@ describe("S-G1..S-G3: the tree and the map agree with the answer's edges and sta
         document.querySelectorAll(`[data-tree-node="${node.occurrence_id}"]`),
       ).toHaveLength(1);
     // The map is decoration: hidden from assistive technology, nothing in it focusable.
-    const map = document.querySelector("[data-graph-map]") as HTMLElement;
+    const map = present(
+      document.querySelector<HTMLElement>("[data-graph-map]"),
+      "the map",
+    );
     expect(map.getAttribute("aria-hidden")).toBe("true");
     expect(map.querySelectorAll("button, a, [tabindex]")).toHaveLength(0);
     // The decorative chain of WEB-10c (connections implied by order) is gone, and so is the fallback list.
     expect(document.querySelector("[data-dependency-list]")).toBeNull();
     expect(
-      (await axe(dialog()?.closest("[role=dialog]") as HTMLElement)).violations,
+      (
+        await axe(
+          present(
+            dialog()?.closest<HTMLElement>("[role=dialog]"),
+            "the dialog",
+          ),
+        )
+      ).violations,
     ).toEqual([]);
   });
 
@@ -252,8 +271,12 @@ describe("S-G1..S-G3: the tree and the map agree with the answer's edges and sta
     const { graph } = await openDialog({ spec: sharedSpec() });
     const refs = document.querySelectorAll("[data-tree-ref]");
     expect(refs).toHaveLength(1);
-    expect(refs[0]).toHaveTextContent(/Needs “Set the table · .*” too/);
-    expect(document.querySelector("[data-graph-summary]")).toHaveTextContent(
+    expect(present(refs[0], "the reference")).toHaveTextContent(
+      /Needs “Set the table · .*” too/,
+    );
+    expect(
+      present(document.querySelector("[data-graph-summary]"), "the summary"),
+    ).toHaveTextContent(
       `${GRAPH_COPY.summary(2, 1)}. ${GRAPH_COPY.open(["Cook"])}. ${GRAPH_COPY.furtherBack(1)}.`,
     );
     expect(graph.direct_prerequisites).toHaveLength(2);
@@ -271,9 +294,10 @@ describe("S-G1..S-G3: the tree and the map agree with the answer's edges and sta
         edges: [[gid(61), gid(60)]],
       },
     });
-    const summary = document.querySelector(
-      "[data-graph-summary]",
-    ) as HTMLElement;
+    const summary = present(
+      document.querySelector<HTMLElement>("[data-graph-summary]"),
+      "the summary",
+    );
     expect(summary.textContent).toBe(
       `${GRAPH_COPY.summary(1, 0)}. ${GRAPH_COPY.open([title])}, ${GRAPH_COPY.hiddenToo}.`,
     );
@@ -288,9 +312,10 @@ describe("S-G1b: one name for this day in both views", () => {
       spec: sharedSpec(),
       title: "Hang the washing",
     });
-    const box = document.querySelector(
-      `[data-map-node="${graph.root_id}"]`,
-    ) as HTMLElement;
+    const box = present(
+      document.querySelector<HTMLElement>(`[data-map-node="${graph.root_id}"]`),
+      "the map's box for this day",
+    );
     expect(box).toHaveTextContent("Hang the washing");
     expect(box).not.toHaveTextContent("Serve dinner");
     expect(nodeItem(graph.root_id)).toHaveTextContent(
@@ -303,15 +328,19 @@ describe("S-G4 / S-G7: empty, and the graph and the preview disagreeing", () => 
   test("S-G4 the root alone: 'Nothing needs doing first', no map; the modes still follow the preview (S-G7)", async () => {
     await openDialog({ spec: emptySpec() });
     expect(
-      document.querySelector("[data-graph-summary=none]"),
+      present(
+        document.querySelector("[data-graph-summary=none]"),
+        "the summary",
+      ),
     ).toHaveTextContent(GRAPH_COPY.none);
     expect(document.querySelector("[data-graph-map]")).toBeNull();
     expect(document.querySelectorAll("[data-tree-node]")).toHaveLength(1);
     // The preview (another snapshot) still lists something open: the completion modes are the preview's, never the graph's.
-    const modes = screen.getByRole("radiogroup", {
-      name: DEPENDENCY_COPY.modesName,
-    });
-    expect(within(modes).getAllByRole("radio").length).toBeGreaterThan(1);
+    const modes = present(
+      screen.queryByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+      "the completion modes",
+    );
+    expect(within(modes).queryAllByRole("radio").length).toBeGreaterThan(1);
   });
 
   test("S-G7 a graph that can't be shown: the preview's order is the labelled fallback (and only then)", async () => {
@@ -320,14 +349,17 @@ describe("S-G4 / S-G7: empty, and the graph and the preview disagreeing", () => 
       answers: [() => ({ ok: false, kind: "uncertain", requestId: "req-7" })],
     });
     expect(section()?.dataset.dependencyGraph).toBe("error");
-    expect(document.querySelector("[data-graph-error]")).toHaveTextContent(
-      GRAPH_COPY.failed,
+    const failed = present(
+      document.querySelector("[data-graph-error]"),
+      "the error notice",
     );
-    expect(document.querySelector("[data-graph-error]")).toHaveTextContent(
-      "req-7",
-    );
+    expect(failed).toHaveTextContent(GRAPH_COPY.failed);
+    expect(failed).toHaveTextContent("req-7");
     expect(
-      document.querySelector("[data-dependency-fallback]"),
+      present(
+        document.querySelector("[data-dependency-fallback]"),
+        "the fallback label",
+      ),
     ).toHaveTextContent(GRAPH_COPY.fallback);
     expect(document.querySelector("[data-dependency-list]")).not.toBeNull();
     expect(document.querySelector("[data-dependency-tree]")).toBeNull();
@@ -347,19 +379,30 @@ describe("S-G4 / S-G7: empty, and the graph and the preview disagreeing", () => 
     });
     expect(
       within(
-        screen.getByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+        present(
+          screen.queryByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+          "the completion modes",
+        ),
       )
-        .getAllByRole("radio")
+        .queryAllByRole("radio")
         .map((r) => r.textContent),
     ).toEqual([DEPENDENCY_COPY.wait]);
     expect(
-      document.querySelector("[data-dependency-strict]"),
+      present(
+        document.querySelector("[data-dependency-strict]"),
+        "the strict notice",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.strict("Serve dinner"));
     expect(
-      document.querySelector("[data-mode-reason=complete_prerequisites]"),
+      present(
+        document.querySelector("[data-mode-reason=complete_prerequisites]"),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.completeAllWhy.cannot_complete);
     // The graph's items are never annotated from the preview.
-    expect(tree()).not.toHaveTextContent(DEPENDENCY_COPY.cantHere);
+    expect(present(tree(), "the list")).not.toHaveTextContent(
+      DEPENDENCY_COPY.cantHere,
+    );
   });
 });
 
@@ -370,12 +413,16 @@ describe("S-G5: restricted data is never presented as whole, and nothing hidden 
     ["root restricted with nothing visible", restrictedOnlySpec, true],
   ])("%s", async (_name, spec, rootHidden) => {
     const { graph } = await openDialog({ spec: spec() });
-    expect(document.querySelector("[data-graph-restricted]")).toHaveTextContent(
-      GRAPH_COPY.restricted,
+    expect(
+      present(
+        document.querySelector("[data-graph-restricted]"),
+        "the restricted notice",
+      ),
+    ).toHaveTextContent(GRAPH_COPY.restricted);
+    const summary = present(
+      document.querySelector<HTMLElement>("[data-graph-summary]"),
+      "the summary",
     );
-    const summary = document.querySelector(
-      "[data-graph-summary]",
-    ) as HTMLElement;
     if (rootHidden)
       expect(summary).toHaveTextContent(
         graph.nodes.length === 1
@@ -413,21 +460,30 @@ describe("S-G5: restricted data is never presented as whole, and nothing hidden 
 describe("S-G6: an incomplete answer says so", () => {
   test("budget partial: the notice, an unexpanded day 'Not shown here' whose inspector offers to open it", async () => {
     const { t, graph } = await openDialog({ spec: budgetPartialSpec() });
-    expect(document.querySelector("[data-graph-partial]")).toHaveTextContent(
-      GRAPH_COPY.partial,
-    );
+    expect(
+      present(
+        document.querySelector("[data-graph-partial]"),
+        "the partial notice",
+      ),
+    ).toHaveTextContent(GRAPH_COPY.partial);
     const cut = graph.nodes.find((n) => n.prerequisites === "unexpanded");
     const item = nodeItem(cut?.occurrence_id as string);
     expect(item).toHaveTextContent(GRAPH_COPY.state.unknown);
     expect(item.getAttribute("aria-expanded")).toBeNull();
     fireEvent.click(item);
     await t.settle();
-    const inspector = document.querySelector(
-      `[data-graph-inspect="${cut?.occurrence_id}"]`,
-    ) as HTMLElement;
+    const inspector = present(
+      document.querySelector<HTMLElement>(
+        `[data-graph-inspect="${cut?.occurrence_id}"]`,
+      ),
+      "the inspector",
+    );
     expect(inspector).toHaveTextContent(GRAPH_COPY.notExpanded);
     expect(
-      within(inspector).getByRole("button", { name: GRAPH_COPY.openTask }),
+      present(
+        within(inspector).queryByRole("button", { name: GRAPH_COPY.openTask }),
+        "'Open this task'",
+      ),
     ).toBeInTheDocument();
     // "Complete" is never claimed.
     expect(dialog()?.textContent).not.toMatch(/whole picture\b(?! )/);
@@ -442,9 +498,10 @@ describe("S-G8: the inspector and 'Open this task'", () => {
     fireEvent.keyDown(item, { key: "Enter" });
     await t.settle();
     expect(item.getAttribute("aria-selected")).toBe("true");
-    const inspector = document.querySelector(
-      `[data-graph-inspect="${cook}"]`,
-    ) as HTMLElement;
+    const inspector = present(
+      document.querySelector<HTMLElement>(`[data-graph-inspect="${cook}"]`),
+      "the inspector",
+    );
     expect(inspector).toHaveTextContent("Cook");
     expect(inspector).toHaveTextContent(GRAPH_COPY.direct);
     expect(inspector).toHaveTextContent(`${GRAPH_COPY.waitsFor} Set the table`);
@@ -456,9 +513,12 @@ describe("S-G8: the inspector and 'Open this task'", () => {
     await t.settle();
     expect(
       within(
-        document.querySelector(
-          `[data-graph-inspect="${graph.root_id}"]`,
-        ) as HTMLElement,
+        present(
+          document.querySelector<HTMLElement>(
+            `[data-graph-inspect="${graph.root_id}"]`,
+          ),
+          "the inspector",
+        ),
       ).queryByRole("button", {
         name: GRAPH_COPY.openTask,
       }),
@@ -466,11 +526,17 @@ describe("S-G8: the inspector and 'Open this task'", () => {
     fireEvent.keyDown(item, { key: "Enter" });
     await t.settle();
     fireEvent.click(
-      within(
-        document.querySelector(`[data-graph-inspect="${cook}"]`) as HTMLElement,
-      ).getByRole("button", {
-        name: GRAPH_COPY.openTask,
-      }),
+      present(
+        within(
+          present(
+            document.querySelector<HTMLElement>(
+              `[data-graph-inspect="${cook}"]`,
+            ),
+            "the inspector",
+          ),
+        ).queryByRole("button", { name: GRAPH_COPY.openTask }),
+        "'Open this task'",
+      ),
     );
     await t.until(() => dialog() === null);
     expect(dialog()).toBeNull();
@@ -482,7 +548,10 @@ describe("S-G8: the inspector and 'Open this task'", () => {
   test("a pick on the map selects the day in the list and moves focus there", async () => {
     const { t } = await openDialog({ spec: sharedSpec() });
     fireEvent.click(
-      document.querySelector(`[data-map-node="${gid(23)}"]`) as HTMLElement,
+      present(
+        document.querySelector<HTMLElement>(`[data-map-node="${gid(23)}"]`),
+        "the map's box",
+      ),
     );
     await t.settle();
     expect(document.activeElement).toBe(nodeItem(gid(23)));
@@ -493,7 +562,7 @@ describe("S-G8: the inspector and 'Open this task'", () => {
 describe("S-G9: the keyboard model and the tree's semantics", () => {
   test("roving tab stop; Up/Down, Right opens then enters, Left closes then goes up, Home/End; a reference moves to its day", async () => {
     const { t, graph } = await openDialog({ spec: sharedSpec() });
-    const t0 = tree() as HTMLElement;
+    const t0 = present(tree(), "the list");
     expect(t0.getAttribute("role")).toBe("tree");
     expect(t0).toHaveAccessibleName(GRAPH_COPY.treeName);
     expect(t0).toHaveAccessibleDescription(GRAPH_COPY.keys);
@@ -526,7 +595,10 @@ describe("S-G9: the keyboard model and the tree's semantics", () => {
     fireEvent.keyDown(cook, { key: "ArrowRight" });
     expect(document.activeElement).toBe(nodeItem(gid(23)));
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: "End" });
-    const ref = document.querySelector("[data-tree-ref]") as HTMLElement;
+    const ref = present(
+      document.querySelector<HTMLElement>("[data-tree-ref]"),
+      "the reference",
+    );
     expect(document.activeElement).toBe(ref);
     expect(ref.getAttribute("role")).toBe("treeitem");
     fireEvent.keyDown(ref, { key: "Enter" });
@@ -542,7 +614,10 @@ describe("S-G9: the keyboard model and the tree's semantics", () => {
     await t.settle();
     expect(document.querySelector(`[data-tree-node="${gid(23)}"]`)).toBeNull();
     fireEvent.keyDown(
-      document.querySelector("[data-tree-ref]") as HTMLElement,
+      present(
+        document.querySelector<HTMLElement>("[data-tree-ref]"),
+        "the reference",
+      ),
       { key: " " },
     );
     await t.settle();
@@ -609,14 +684,20 @@ describe("S-G10: states and the map's conditions", () => {
     });
     expect(section()?.dataset.dependencyGraph).toBe("ready");
     fireEvent.click(
-      screen.getByRole("button", { name: GRAPH_COPY.checkAgain }),
+      present(
+        screen.queryByRole("button", { name: GRAPH_COPY.checkAgain }),
+        "'Check again'",
+      ),
     );
     await t.settle();
     expect(section()?.dataset.dependencyGraph).toBe("checking");
     expect(section()?.getAttribute("aria-busy")).toBe("true");
-    expect(document.querySelector("[data-graph-checking]")).toHaveTextContent(
-      GRAPH_COPY.checking,
-    );
+    expect(
+      present(
+        document.querySelector("[data-graph-checking]"),
+        "the checking notice",
+      ),
+    ).toHaveTextContent(GRAPH_COPY.checking);
     // The previous whole answer stays meanwhile.
     expect(nodeItem(graph.root_id)).not.toBeNull();
     await act(async () => {
@@ -625,18 +706,24 @@ describe("S-G10: states and the map's conditions", () => {
     await t.settle();
     expect(section()?.dataset.dependencyGraph).toBe("ready");
     fireEvent.click(
-      screen.getByRole("button", { name: GRAPH_COPY.checkAgain }),
+      present(
+        screen.queryByRole("button", { name: GRAPH_COPY.checkAgain }),
+        "'Check again'",
+      ),
     );
     await t.until(() => section()?.dataset.dependencyGraph === "stale");
-    expect(document.querySelector("[data-graph-stale]")).toHaveTextContent(
+    const stale = present(
+      document.querySelector<HTMLElement>("[data-graph-stale]"),
+      "the stale notice",
+    );
+    expect(stale).toHaveTextContent(
       /Couldn't check again\. Shown as it was at \d\d:\d\d\./,
     );
     fireEvent.click(
-      within(
-        document.querySelector("[data-graph-stale]") as HTMLElement,
-      ).getByRole("button", {
-        name: "Try again",
-      }),
+      present(
+        within(stale).queryByRole("button", { name: "Try again" }),
+        "'Try again'",
+      ),
     );
     await t.until(() => section()?.dataset.dependencyGraph === "ready");
     expect(document.querySelector("[data-graph-stale]")).toBeNull();
@@ -656,20 +743,34 @@ describe("S-G10: states and the map's conditions", () => {
       ],
     });
     fireEvent.click(
-      screen.getByRole("button", { name: GRAPH_COPY.checkAgain }),
+      present(
+        screen.queryByRole("button", { name: GRAPH_COPY.checkAgain }),
+        "'Check again'",
+      ),
     );
     await t.until(() => section()?.dataset.dependencyGraph === "stale");
     expect(section()?.getAttribute("aria-busy")).toBeNull();
     expect(document.querySelector("[data-graph-checking]")).toBeNull();
-    const stale = document.querySelector("[data-graph-stale]") as HTMLElement;
-    fireEvent.click(within(stale).getByRole("button", { name: "Try again" }));
+    const stale = present(
+      document.querySelector<HTMLElement>("[data-graph-stale]"),
+      "the stale notice",
+    );
+    fireEvent.click(
+      present(
+        within(stale).queryByRole("button", { name: "Try again" }),
+        "'Try again'",
+      ),
+    );
     await t.settle();
     // Still the old answer, still labelled stale, and now visibly checking beside the button that asked.
     expect(section()?.dataset.dependencyGraph).toBe("stale");
     expect(section()?.getAttribute("aria-busy")).toBe("true");
-    expect(stale.querySelector("[data-graph-checking]")).toHaveTextContent(
-      GRAPH_COPY.checking,
-    );
+    expect(
+      present(
+        stale.querySelector("[data-graph-checking]"),
+        "the checking notice in the stale notice",
+      ),
+    ).toHaveTextContent(GRAPH_COPY.checking);
     expect(document.querySelectorAll("[data-graph-checking]")).toHaveLength(1);
     await act(async () => {
       release?.();
@@ -696,14 +797,25 @@ describe("S-G10: states and the map's conditions", () => {
     expect(section()?.dataset.dependencyGraph).toBe("error");
     expect(section()?.getAttribute("aria-busy")).toBeNull();
     expect(document.querySelector("[data-graph-checking]")).toBeNull();
-    const error = document.querySelector("[data-graph-error]") as HTMLElement;
-    fireEvent.click(within(error).getByRole("button", { name: "Try again" }));
+    const error = present(
+      document.querySelector<HTMLElement>("[data-graph-error]"),
+      "the error notice",
+    );
+    fireEvent.click(
+      present(
+        within(error).queryByRole("button", { name: "Try again" }),
+        "'Try again'",
+      ),
+    );
     await t.settle();
     expect(section()?.dataset.dependencyGraph).toBe("error");
     expect(section()?.getAttribute("aria-busy")).toBe("true");
-    expect(error.querySelector("[data-graph-checking]")).toHaveTextContent(
-      GRAPH_COPY.checking,
-    );
+    expect(
+      present(
+        error.querySelector("[data-graph-checking]"),
+        "the checking notice in the error notice",
+      ),
+    ).toHaveTextContent(GRAPH_COPY.checking);
     expect(document.querySelector("[data-dependency-list]")).not.toBeNull();
     // Failing again: the error stands, no longer checking.
     await act(async () => {
@@ -714,9 +826,15 @@ describe("S-G10: states and the map's conditions", () => {
     expect(section()?.getAttribute("aria-busy")).toBeNull();
     expect(document.querySelector("[data-graph-checking]")).toBeNull();
     fireEvent.click(
-      within(
-        document.querySelector("[data-graph-error]") as HTMLElement,
-      ).getByRole("button", { name: "Try again" }),
+      present(
+        within(
+          present(
+            document.querySelector<HTMLElement>("[data-graph-error]"),
+            "the error notice",
+          ),
+        ).queryByRole("button", { name: "Try again" }),
+        "'Try again'",
+      ),
     );
     await t.until(() => section()?.dataset.dependencyGraph === "ready");
     expect(nodeItem(graph.root_id)).not.toBeNull();
@@ -747,9 +865,12 @@ describe("S-G10: states and the map's conditions", () => {
   test("deeper than the map draws: the list alone, with the note", async () => {
     const { t, graph } = await openDialog({ spec: deepSpec(6) });
     expect(document.querySelector("[data-graph-map]")).toBeNull();
-    expect(document.querySelector("[data-graph-too-much]")).toHaveTextContent(
-      GRAPH_COPY.tooMuch,
-    );
+    expect(
+      present(
+        document.querySelector("[data-graph-too-much]"),
+        "the 'too much' note",
+      ),
+    ).toHaveTextContent(GRAPH_COPY.tooMuch);
     await expandAll(t);
     expect(treePairs()).toEqual(edgePairs(graph));
   });

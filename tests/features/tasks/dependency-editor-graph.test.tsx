@@ -10,6 +10,7 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
+import { present } from "../../support/present";
 import { rootGraph } from "../../support/tasks/graphs";
 import { SLOW } from "../../support/tasks/journal";
 import {
@@ -37,9 +38,24 @@ const TOKEN = "e".repeat(64);
 const editor = () =>
   document.querySelector("[data-dependency-editor]") as HTMLElement | null;
 const state = () => editor()?.getAttribute("data-dependency-editor");
-const save = () => screen.getByRole("button", { name: DEPENDENCY_COPY.save });
+const save = () =>
+  present(screen.queryByRole("button", { name: DEPENDENCY_COPY.save }), "Save");
 const item = (id: string) =>
-  document.querySelector(`[data-editor-item="${id}"]`);
+  document.querySelector<HTMLElement>(`[data-editor-item="${id}"]`);
+/** The editor's item for `id`, asserted present (an absent one fails by assertion, not by a matcher that throws). */
+const shown = (id: string) => present(item(id), `the editor's item ${id}`);
+const control = <T extends HTMLElement>(label: string) =>
+  present(screen.queryByLabelText(label) as T | null, `"${label}"`);
+const button = (name: string | RegExp, within_: HTMLElement | null = null) =>
+  present(
+    (within_ ? within(within_) : screen).queryByRole("button", { name }),
+    `the button ${String(name)}`,
+  );
+const row = () =>
+  present(
+    document.querySelector<HTMLElement>("[data-dependencies]"),
+    "the dependency row",
+  );
 
 type Graph = (
   root: SeededTask,
@@ -136,11 +152,7 @@ async function openEditor(options: {
       (document.querySelector("[data-dependencies]") as HTMLElement | null)
         ?.dataset.dependencies === "ready",
   );
-  fireEvent.click(
-    within(
-      document.querySelector("[data-dependencies]") as HTMLElement,
-    ).getByRole("button", { name: DEPENDENCY_COPY.set }),
-  );
+  fireEvent.click(button(DEPENDENCY_COPY.set, row()));
   await t.until(() => editor() !== null && state() !== "loading");
   return { t, root, pres, api };
 }
@@ -154,25 +166,22 @@ describe("S-ED1 / S-ED4: built from the authoritative direct list, saved on its 
       { occurrenceId: root.occurrenceId, maxDepth: 1 },
     ]);
     expect(state()).toBe("open");
-    expect(item(pres[0]?.occurrenceId as string)).toHaveTextContent(
+    expect(shown(pres[0]?.occurrenceId as string)).toHaveTextContent(
       "Graph title 0",
     );
-    expect(item(pres[1]?.occurrenceId as string)).toHaveTextContent(
+    expect(shown(pres[1]?.occurrenceId as string)).toHaveTextContent(
       "Graph title 1",
     );
     // The preview says not strict; the graph's root says strict: the editor's start is the graph's.
-    expect(
-      (screen.getByLabelText(DEPENDENCY_COPY.strictLabel) as HTMLInputElement)
-        .checked,
-    ).toBe(true);
+    expect(control<HTMLInputElement>(DEPENDENCY_COPY.strictLabel).checked).toBe(
+      true,
+    );
     // Remove one and save: the WHOLE intended visible list, on the graph's version 7 (the cache holds 1).
     expect(item(pres[1]?.occurrenceId as string)).not.toBeNull();
     fireEvent.click(
-      within(item(pres[1]?.occurrenceId as string) as HTMLElement).getByRole(
-        "button",
-        {
-          name: new RegExp(`^${DEPENDENCY_COPY.remove}: Graph title 1 · `),
-        },
+      button(
+        new RegExp(`^${DEPENDENCY_COPY.remove}: Graph title 1 · `),
+        shown(pres[1]?.occurrenceId as string),
       ),
     );
     await t.settle();
@@ -189,27 +198,35 @@ describe("S-ED1 / S-ED4: built from the authoritative direct list, saved on its 
 
   test("an empty authoritative list starts empty (and a day added from the cache is labelled from the cache)", async () => {
     const { t, pres } = await openEditor({ graphs: [graphOf({ direct: [] })] });
-    expect(editor()).toHaveTextContent(DEPENDENCY_COPY.editorEmpty);
+    expect(present(editor(), "the editor")).toHaveTextContent(
+      DEPENDENCY_COPY.editorEmpty,
+    );
     await t.until(() =>
       [
-        ...(screen.getByLabelText(DEPENDENCY_COPY.addTask) as HTMLSelectElement)
-          .options,
+        ...((
+          screen.queryByLabelText(
+            DEPENDENCY_COPY.addTask,
+          ) as HTMLSelectElement | null
+        )?.options ?? []),
       ].some((o) => o.value === pres[2]?.taskId),
     );
-    fireEvent.change(screen.getByLabelText(DEPENDENCY_COPY.addTask), {
+    fireEvent.change(control(DEPENDENCY_COPY.addTask), {
       target: { value: pres[2]?.taskId },
     });
     await t.until(
       () =>
-        (screen.getByLabelText(DEPENDENCY_COPY.addDay) as HTMLSelectElement)
-          .options.length > 1,
+        ((
+          screen.queryByLabelText(
+            DEPENDENCY_COPY.addDay,
+          ) as HTMLSelectElement | null
+        )?.options.length ?? 0) > 1,
     );
-    fireEvent.change(screen.getByLabelText(DEPENDENCY_COPY.addDay), {
+    fireEvent.change(control(DEPENDENCY_COPY.addDay), {
       target: { value: pres[2]?.occurrenceId },
     });
-    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.add }));
+    fireEvent.click(button(DEPENDENCY_COPY.add));
     await t.settle();
-    expect(item(pres[2]?.occurrenceId as string)).toHaveTextContent(
+    expect(shown(pres[2]?.occurrenceId as string)).toHaveTextContent(
       "Fold the towels",
     );
   });
@@ -248,9 +265,7 @@ describe("S-ED2: a base that moves (changed dependencies)", () => {
         graphOf({ version: 8, direct: [1] }),
       ],
     });
-    fireEvent.click(
-      screen.getByLabelText(DEPENDENCY_COPY.strictLabel) as HTMLInputElement,
-    );
+    fireEvent.click(control(DEPENDENCY_COPY.strictLabel));
     await t.settle();
     await t.commitSync([
       {
@@ -264,9 +279,7 @@ describe("S-ED2: a base that moves (changed dependencies)", () => {
     // What was typed is not replaced behind the person's back.
     expect(item(pres[0]?.occurrenceId as string)).not.toBeNull();
     expect(t.drafts()).toHaveLength(0);
-    fireEvent.click(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.editorRestart }),
-    );
+    fireEvent.click(button(DEPENDENCY_COPY.editorRestart));
     await t.settle();
     expect(state()).toBe("open");
     expect(item(pres[0]?.occurrenceId as string)).toBeNull();
@@ -284,25 +297,15 @@ describe("S-ED2: a base that moves (changed dependencies)", () => {
     });
     expect(item(pres[0]?.occurrenceId as string)).not.toBeNull();
     fireEvent.click(
-      within(item(pres[0]?.occurrenceId as string) as HTMLElement).getByRole(
-        "button",
-        {
-          name: new RegExp(`^${DEPENDENCY_COPY.remove}`),
-        },
+      button(
+        new RegExp(`^${DEPENDENCY_COPY.remove}`),
+        shown(pres[0]?.occurrenceId as string),
       ),
     );
     await t.settle();
-    fireEvent.click(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.cancel }),
-    );
+    fireEvent.click(button(DEPENDENCY_COPY.cancel));
     await t.until(() => editor() === null);
-    fireEvent.click(
-      within(
-        document.querySelector("[data-dependencies]") as HTMLElement,
-      ).getByRole("button", {
-        name: DEPENDENCY_COPY.set,
-      }),
-    );
+    fireEvent.click(button(DEPENDENCY_COPY.set, row()));
     await t.until(() => editor() !== null && state() === "open");
     expect(item(pres[0]?.occurrenceId as string)).toBeNull();
     expect(item(pres[1]?.occurrenceId as string)).not.toBeNull();
@@ -346,7 +349,10 @@ describe("S-ED3: a stale write is never a silent overwrite", () => {
       ],
       drafts: conflicted,
     });
-    const now = document.querySelector("[data-editor-now]") as HTMLElement;
+    const now = present(
+      document.querySelector<HTMLElement>("[data-editor-now]"),
+      "the current list",
+    );
     expect(now).toHaveTextContent(
       `${DEPENDENCY_COPY.editorWaitsNow} Run the washing machine`,
     );
@@ -401,9 +407,7 @@ async function openEditorFromConflict(
       screen.queryByRole("button", { name: DEPENDENCY_COPY.keepEditing }) !==
       null,
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: DEPENDENCY_COPY.keepEditing }),
-  );
+  fireEvent.click(button(DEPENDENCY_COPY.keepEditing));
   await t.until(() => editor() !== null && state() !== "loading");
   return { t, root, pres, api };
 }

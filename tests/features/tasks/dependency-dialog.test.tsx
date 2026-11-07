@@ -20,6 +20,7 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
+import { present } from "../../support/present";
 import { rootGraph } from "../../support/tasks/graphs";
 import { SLOW } from "../../support/tasks/journal";
 import {
@@ -148,11 +149,16 @@ async function mount(options: {
 describe("the detail's row (A8)", () => {
   test("nothing waited for: says so, and an editor may set what it waits for", async () => {
     await mount({ preview: (root) => answer(root, []) });
-    expect(row()).toHaveTextContent(DEPENDENCY_COPY.none);
+    expect(present(row(), "the dependency row")).toHaveTextContent(
+      DEPENDENCY_COPY.none,
+    );
     expect(
-      within(row() as HTMLElement).getByRole("button", {
-        name: DEPENDENCY_COPY.set,
-      }),
+      present(
+        within(present(row(), "the dependency row")).queryByRole("button", {
+          name: DEPENDENCY_COPY.set,
+        }),
+        "the 'Set' button",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -171,10 +177,10 @@ describe("the detail's row (A8)", () => {
           },
         ]),
     });
-    expect(row()).toHaveTextContent(
+    expect(present(row(), "the dependency row")).toHaveTextContent(
       DEPENDENCY_COPY.progress(1, 2, DEPENDENCY_COPY.notHere),
     );
-    expect(row()).not.toHaveTextContent(away);
+    expect(present(row(), "the dependency row")).not.toHaveTextContent(away);
   });
 
   test("offline: it can be checked when online, and nothing is read", async () => {
@@ -182,7 +188,9 @@ describe("the detail's row (A8)", () => {
       preview: (root) => answer(root, []),
       online: false,
     });
-    expect(row()).toHaveTextContent(DEPENDENCY_COPY.offline);
+    expect(present(row(), "the dependency row")).toHaveTextContent(
+      DEPENDENCY_COPY.offline,
+    );
     expect(api.calls.readDependencies).toBeUndefined();
   });
 
@@ -190,9 +198,11 @@ describe("the detail's row (A8)", () => {
     await mount({
       preview: (root, pre) => answer(root, [item(pre)], { unavailable: true }),
     });
-    expect(row()).toHaveTextContent(DEPENDENCY_COPY.unavailable);
+    expect(present(row(), "the dependency row")).toHaveTextContent(
+      DEPENDENCY_COPY.unavailable,
+    );
     expect(
-      within(row() as HTMLElement).queryByRole("button", {
+      within(present(row(), "the dependency row")).queryByRole("button", {
         name: DEPENDENCY_COPY.set,
       }),
     ).toBeNull();
@@ -210,21 +220,36 @@ describe("the dialog (A8, A9)", () => {
         dialog()?.dataset.dependencyDialog === "ready" &&
         (dialog()?.textContent ?? "").includes("Run the washing machine"),
     );
-    const list = document.querySelector(
-      "[data-dependency-list]",
-    ) as HTMLElement;
+    const list = present(
+      document.querySelector<HTMLElement>("[data-dependency-list]"),
+      "the list",
+    );
     expect(list.tagName).toBe("OL");
-    const items = within(list).getAllByRole("listitem");
+    const items = within(list).queryAllByRole("listitem");
     expect(items).toHaveLength(2);
-    expect(items[0]).toHaveTextContent("Run the washing machine");
-    expect(items[0]).toHaveTextContent(DEPENDENCY_COPY.toDo);
-    expect(items[1]).toHaveTextContent(DEPENDENCY_COPY.thisTask);
-    const modes = screen.getByRole("radiogroup", {
-      name: DEPENDENCY_COPY.modesName,
-    });
-    expect(within(modes).getAllByRole("radio")).toHaveLength(3);
+    expect(present(items[0], "the first item")).toHaveTextContent(
+      "Run the washing machine",
+    );
+    expect(present(items[0], "the first item")).toHaveTextContent(
+      DEPENDENCY_COPY.toDo,
+    );
+    expect(present(items[1], "the second item")).toHaveTextContent(
+      DEPENDENCY_COPY.thisTask,
+    );
+    const modes = present(
+      screen.queryByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+      "the completion modes",
+    );
+    expect(within(modes).queryAllByRole("radio")).toHaveLength(3);
     expect(
-      (await axe(dialog()?.closest("[role=dialog]") as HTMLElement)).violations,
+      (
+        await axe(
+          present(
+            dialog()?.closest<HTMLElement>("[role=dialog]"),
+            "the dialog",
+          ),
+        )
+      ).violations,
     ).toEqual([]);
     fireEvent.click(
       within(modes).getByRole("radio", { name: DEPENDENCY_COPY.completeAll }),
@@ -252,21 +277,30 @@ describe("the dialog (A8, A9)", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
-    const modes = screen.getByRole("radiogroup", {
-      name: DEPENDENCY_COPY.modesName,
-    });
+    const modes = present(
+      screen.queryByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+      "the completion modes",
+    );
     expect(
       within(modes)
-        .getAllByRole("radio")
+        .queryAllByRole("radio")
         .map((r) => r.textContent),
     ).toEqual([DEPENDENCY_COPY.wait]);
     expect(
-      document.querySelector("[data-mode-reason=advisory_override]"),
+      present(
+        document.querySelector("[data-mode-reason=advisory_override]"),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.strict("Hang the washing"));
     expect(
-      document.querySelector("[data-mode-reason=complete_prerequisites]"),
+      present(
+        document.querySelector("[data-mode-reason=complete_prerequisites]"),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.completeAllWhy.cannot_complete);
-    expect(dialog()).toHaveTextContent(DEPENDENCY_COPY.cantHere);
+    expect(present(dialog(), "the dialog")).toHaveTextContent(
+      DEPENDENCY_COPY.cantHere,
+    );
   });
 
   test("everything done: the primary act is Mark done (require_satisfied)", async () => {
@@ -343,7 +377,9 @@ describe("the record card's gate", () => {
       }),
     );
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
-    expect(dialog()).toHaveTextContent(DEPENDENCY_COPY.evidenceKept);
+    expect(present(dialog(), "the dialog")).toHaveTextContent(
+      DEPENDENCY_COPY.evidenceKept,
+    );
     fireEvent.click(
       screen.getByRole("button", { name: DEPENDENCY_COPY.close }),
     );
@@ -388,16 +424,17 @@ describe("the editor (D-10c-7)", () => {
       preview: (r, pre) => answer(r, [item(pre)], { strict: true }),
     });
     fireEvent.click(
-      within(row() as HTMLElement).getByRole("button", {
+      within(present(row(), "the dependency row")).getByRole("button", {
         name: DEPENDENCY_COPY.set,
       }),
     );
     await t.until(
       () => document.querySelector("[data-dependency-editor]") !== null,
     );
-    const editor = document.querySelector(
-      "[data-dependency-editor]",
-    ) as HTMLElement;
+    const editor = present(
+      document.querySelector<HTMLElement>("[data-dependency-editor]"),
+      "the editor",
+    );
     // WEB-18 FIXTURE ADAPTATION (labelled; the assertions below are unchanged): since D-18-7 the editor's start is built from its own
     // depth-one read, so its start is judged once that read has answered (before it, the editor is "loading" and shows nothing built).
     await t.until(
@@ -409,8 +446,12 @@ describe("the editor (D-10c-7)", () => {
       DEPENDENCY_COPY.editorLead("Hang the washing"),
     );
     expect(
-      (screen.getByLabelText(DEPENDENCY_COPY.strictLabel) as HTMLInputElement)
-        .checked,
+      present(
+        screen.queryByLabelText(
+          DEPENDENCY_COPY.strictLabel,
+        ) as HTMLInputElement | null,
+        "the strict choice",
+      ).checked,
     ).toBe(true);
     // The cached tasks are read when the editor opens.
     await t.until(() =>
@@ -434,13 +475,16 @@ describe("the editor (D-10c-7)", () => {
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.add }));
     await t.settle();
     expect(
-      document.querySelector(
-        `[data-editor-item="${prerequisite.occurrenceId}"]`,
+      present(
+        document.querySelector(
+          `[data-editor-item="${prerequisite.occurrenceId}"]`,
+        ),
+        "the added item",
       ),
     ).toHaveTextContent("Run the washing machine");
-    expect(document.querySelector("[data-editor-counter]")).toHaveTextContent(
-      DEPENDENCY_COPY.counter(1),
-    );
+    expect(
+      present(document.querySelector("[data-editor-counter]"), "the counter"),
+    ).toHaveTextContent(DEPENDENCY_COPY.counter(1));
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.save }));
     await t.until(() => t.drafts().length === 1);
     expect(t.bodies()[0]?.command.command).toEqual({
@@ -487,7 +531,10 @@ describe("conflicts (A11)", () => {
         document.querySelector("[data-completion-conflict=satisfied]") !== null,
     );
     expect(
-      document.querySelector("[data-completion-conflict]"),
+      present(
+        document.querySelector("[data-completion-conflict]"),
+        "the completion conflict",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.cause.satisfied);
     // The submitted operation is read from the queue (its durable body).
     await t.until(
@@ -545,7 +592,10 @@ describe("conflicts (A11)", () => {
       ],
     });
     await t.until(() => document.querySelector("[data-set-conflict]") !== null);
-    const block = document.querySelector("[data-set-conflict]") as HTMLElement;
+    const block = present(
+      document.querySelector<HTMLElement>("[data-set-conflict]"),
+      "the conflict notice",
+    );
     expect(block).toHaveTextContent(DEPENDENCY_COPY.setConflict);
     await t.until(
       () =>
@@ -635,7 +685,10 @@ describe("R4: one admission for a new and a replacing save", () => {
       document.querySelector(`[data-editor-item="${pre.occurrenceId}"]`),
     ).not.toBeNull();
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
     expect(document.body).toHaveTextContent(DEPENDENCY_COPY.editorUnavailable);
     expect(t.drafts().map((d) => d.local_id)).toEqual([
@@ -684,7 +737,10 @@ describe("R4: one admission for a new and a replacing save", () => {
     await keepEditing(t);
     expect(editor()).toBe("denied");
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
   });
 
@@ -728,13 +784,19 @@ describe("R4: one admission for a new and a replacing save", () => {
     ).toBeGreaterThan(0);
     expect(editor()).toBe("loading");
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
     release();
     await t.until(() => editor() === "unavailable");
     expect(editor()).toBe("unavailable");
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
   });
 });
@@ -843,7 +905,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         },
       } as never,
     });
-  const pane = () => within(dialog()?.closest("[role=dialog]") as HTMLElement);
+  const pane = () =>
+    within(
+      present(dialog()?.closest<HTMLElement>("[role=dialog]"), "the dialog"),
+    );
   const review = async (t: Awaited<ReturnType<typeof mount>>["t"]) => {
     await t.until(
       () =>
@@ -870,7 +935,7 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         name: DEPENDENCY_COPY.startAnyway,
       });
       if (!strict) {
-        expect(button).toBeEnabled();
+        expect(present(button, "the button")).toBeEnabled();
         fireEvent.click(button as HTMLElement);
         await t.until(() => t.drafts().some((d) => d.local_id !== local));
         expect(
@@ -886,7 +951,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         pane().queryByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
       ).toBeNull();
       expect(
-        pane().getByRole("radio", { name: DEPENDENCY_COPY.wait }),
+        present(
+          pane().queryByRole("radio", { name: DEPENDENCY_COPY.wait }),
+          "DEPENDENCY_COPY.wait",
+        ),
       ).toBeChecked();
       await t.settle();
       expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
@@ -913,7 +981,7 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         name: DEPENDENCY_COPY.completeAll,
       });
       if (why === "none") {
-        expect(button).toBeEnabled();
+        expect(present(button, "the button")).toBeEnabled();
         return;
       }
       expect(button).toBeNull();
@@ -935,7 +1003,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
     // Everything done: Mark done is offered.
     expect(
-      pane().getByRole("button", { name: DEPENDENCY_COPY.markDone }),
+      present(
+        pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+        "DEPENDENCY_COPY.markDone",
+      ),
     ).toBeEnabled();
     // It becomes unmet: no remembered plain completion slips through.
     done = false;
@@ -953,7 +1024,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
       pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
     );
     expect(
-      pane().getByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+      present(
+        pane().queryByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+        "DEPENDENCY_COPY.startAnyway",
+      ),
     ).toBeEnabled();
     // The rule becomes strict while it is open: the choice is Wait, and nothing can be sent.
     strict = true;
@@ -987,7 +1061,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     // "Review and send again" opens with the plain completion (the cause was "everything is done now").
     await review(t);
     expect(
-      pane().getByRole("button", { name: DEPENDENCY_COPY.markDone }),
+      present(
+        pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+        "DEPENDENCY_COPY.markDone",
+      ),
     ).toBeEnabled();
     done = false;
     t.rerender(tasksEnv(t.api, { online: false }));
@@ -1005,7 +1082,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     ])
       expect(pane().queryByRole("button", { name })).toBeNull();
     expect(
-      pane().getByRole("radio", { name: DEPENDENCY_COPY.wait }),
+      present(
+        pane().queryByRole("radio", { name: DEPENDENCY_COPY.wait }),
+        "DEPENDENCY_COPY.wait",
+      ),
     ).toBeChecked();
     expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
       [local, "version_conflict"],
@@ -1060,7 +1140,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         expect(t.drafts()).toEqual([]);
         expect(dialog()).not.toBeNull();
         expect(
-          document.querySelector("[data-dependency-message]"),
+          present(
+            document.querySelector("[data-dependency-message]"),
+            "the message",
+          ),
         ).toHaveTextContent(DEPENDENCY_COPY.changedWhileSaving);
       } else {
         expect(t.drafts().map((d) => d.kind)).toEqual([
@@ -1101,9 +1184,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     fireEvent.click(
       pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
     );
-    const button = pane().getByRole("button", {
-      name: DEPENDENCY_COPY.startAnyway,
-    });
+    const button = present(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+      "'Start anyway'",
+    );
     expect(button).toBeDisabled();
     fireEvent.click(button);
     await t.settle();
@@ -1223,7 +1307,10 @@ describe("R15: the root's admission at every entry point", () => {
         goal: { kind: "numeric", minimum: "20", maximum: null, unit: "pages" },
       },
     });
-  const pane = () => within(dialog()?.closest("[role=dialog]") as HTMLElement);
+  const pane = () =>
+    within(
+      present(dialog()?.closest<HTMLElement>("[role=dialog]"), "the dialog"),
+    );
   const refused = (
     root: SeededTask,
     local: string,
@@ -1265,10 +1352,16 @@ describe("R15: the root's admission at every entry point", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
-    const done = pane().getByRole("button", { name: DEPENDENCY_COPY.markDone });
+    const done = present(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+      "'Mark done'",
+    );
     expect(done).toBeDisabled();
     expect(
-      document.querySelector('[data-mode-reason="require_satisfied"]'),
+      present(
+        document.querySelector('[data-mode-reason="require_satisfied"]'),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.rootWhy);
     fireEvent.click(done);
     await t.settle();
@@ -1321,7 +1414,7 @@ describe("R15: the root's admission at every entry point", () => {
         ]);
         return;
       }
-      expect(button).toBeEnabled();
+      expect(present(button, "the button")).toBeEnabled();
       fireEvent.click(button as HTMLElement);
       await t.until(() => t.drafts().some((d) => d.local_id !== local));
       const queued = t.drafts().filter((d) => d.status === "queued");
@@ -1379,7 +1472,10 @@ describe("R15: the root's admission at every entry point", () => {
       if (changes) {
         expect(t.drafts()).toEqual([]);
         expect(
-          document.querySelector("[data-dependency-message]"),
+          present(
+            document.querySelector("[data-dependency-message]"),
+            "the message",
+          ),
         ).toHaveTextContent(DEPENDENCY_COPY.changedWhileSaving);
       } else
         expect(t.bodies().map((b) => b.command.command.mode)).toEqual([
