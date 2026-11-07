@@ -4,6 +4,7 @@ import {
 } from "../../../src/data/model/composition";
 import {
   accountDatabaseName,
+  DECLARED_IDB_VERSION,
   KEY_PATHS,
   type RowOf,
   STORE_NAMES,
@@ -30,6 +31,7 @@ import {
   type WriteSink,
 } from "../../../src/data/store/port";
 import type { ConnectionRegistry } from "../../../src/data/store/registry";
+import { ownedByTest } from "../lifetime";
 import type { World } from "../session/world";
 import {
   compareKeys,
@@ -154,6 +156,8 @@ class FakeDatabase {
   stalled: StalledCommit | null = null;
   /** Deletes waiting for every connection to close. */
   waitingDeletes: Array<() => void> = [];
+  /** The installed IndexedDB version (WEB-14a D-P8): this build's declared version unless a newer build upgraded it (`upgradeTo`). */
+  version = DECLARED_IDB_VERSION;
   constructor(
     readonly name: string,
     readonly world: World,
@@ -173,6 +177,10 @@ class FakeDatabase {
 
 export class FakeIdb {
   readonly databases = new Map<string, FakeDatabase>();
+  private readonly superseded = new WeakMap<
+    ConnectionRegistry,
+    Set<AccountId>
+  >();
   private counter = 0;
   private injections: Injection[] = [];
   private listeners = new Set<
@@ -223,47 +231,122 @@ export class FakeIdb {
    */
   autoDrive = false;
   private pumping = false;
-  /** The run of the pump in progress (it never rejects: its failure is kept in `pumpFailures`), for `pumpIdle`. */
-  private pumpRun: Promise<void> | null = null;
+  private drain: Promise<void> | null = null;
   /**
-   * Every failure of an automatic drive (WEB-09c R41-MUT, revision 41), kept so that a test's teardown can report it. Observation only: the
-   * pump still lets the failure surface as before (an unhandled rejection of the run), so no consumer's behaviour changes.
+   * The automatic driver's state between drains (R30/DA-H1, revision 25). A drain delivers what is runnable; when it ends with work
+   * still queued but none of it deliverable (a future timer, a frozen page's event), the driver PARKS on the world's wake instead of
+   * draining again and again without progress, and the next event scheduled, released, thawed or destroyed resumes it. That is the
+   * delivery the old restart-while-anything-is-queued loop gave, without the loop: it never advances fake time (only `advance` does).
+   */
+  private parked = false;
+  private unwake: (() => void) | null = null;
+  private disposed = false;
+  /**
+   * The first rejection of a drain of the automatic driver: it stops the driver and is the owning test's failure (`dispose`). Held in
+   * a box so that presence never depends on the value (R32, revision 26): any value can be thrown, `null` and `undefined` included.
+   */
+  private failure: { readonly reason: unknown } | null = null;
+  private failureReported = false;
+  /** Whether a drain of the automatic driver has failed. */
+  get pumpFailed(): boolean {
+    return this.failure !== null;
+  }
+  /** What the first failed drain was rejected with (meaningful only when `pumpFailed`). */
+  get pumpFailure(): unknown {
+    return this.failure?.reason;
+  }
+  /** Drains the automatic driver ran, and how many of them delivered nothing (a diagnostic and a regression oracle). */
+  readonly pumpStats = { drains: 0, idleDrains: 0 };
+  /**
+   * Every failure of an automatic drive (WEB-09c R41-MUT, revision 41), kept so that a test's teardown can report it (`EngineWorld.dispose`
+   * counts them). In this driver the first failure also ENDS automatic driving and is the owning test's failure (`dispose`, R32 above), so
+   * the list holds at most one entry: the same boxed failure, recorded once in each of the two places that report it.
    */
   readonly pumpFailures: unknown[] = [];
 
   /** @internal */
   pump(): void {
-    if (!this.autoDrive || this.pumping) return;
+    if (!this.autoDrive || this.pumping || this.disposed) return;
+    if (this.failure !== null) return;
     this.pumping = true;
-    const run = this.world.runUntilIdle();
-    this.pumpRun = run.then(
-      () => undefined,
+    this.parked = false;
+    this.unwake ??= this.world.onWake(() => {
+      if (this.parked) this.pump();
+    });
+    this.drain = this.world.runUntilIdle().then(
+      (steps) => {
+        this.pumpStats.drains += 1;
+        if (steps === 0) this.pumpStats.idleDrains += 1;
+        this.pumping = false;
+        // Decided synchronously, so work that arrived while the drain was finishing is either seen here or wakes the park.
+        if (this.world.hasRunnable()) this.pump();
+        else if (this.world.pendingCount() > 0 && !this.disposed)
+          this.parked = true;
+      },
       (error: unknown) => {
-        this.pumpFailures.push(error);
+        this.pumping = false;
+        // The first failure is kept and ends automatic driving: no wake, request or later `pump` starts another drain.
+        if (this.failure === null) {
+          this.failure = { reason: error };
+          this.pumpFailures.push(error);
+        }
+        this.unwake?.();
+        this.unwake = null;
       },
     );
-    void run.finally(() => {
-      this.pumping = false;
-      if (this.world.pendingCount() > 0) this.pump();
-    });
   }
 
-  /** Whether an automatic drive is running now. */
+  /** Whether the automatic driver is draining or parked on the world's wake (not stopped, not disposed). */
+  get driving(): boolean {
+    return this.pumping || this.parked;
+  }
+
+  /**
+   * End this double's automatic driving (the test that owns it is over): no drain starts again, a parked driver is released, and a
+   * drain in flight finishes without restarting. The committed data stays (a simulated reload keeps it; disposal is not a reload).
+   * Throws the drain failure, if there was one, once: whoever disposes first reports it (the test, or else its teardown).
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.parked = false;
+    this.unwake?.();
+    this.unwake = null;
+    if (this.failure !== null && !this.failureReported) {
+      this.failureReported = true;
+      throw this.failure.reason;
+    }
+  }
+
+  constructor(readonly world: World) {
+    // The test that made this double ends its driving, passed or failed (`tests/setup.ts`), so no driver outlives its test.
+    ownedByTest(() => this.disposeAndWait());
+  }
+
+  /** Stop restarting, join the active drain, then report failures before the owning test finishes. */
+  async disposeAndWait(): Promise<void> {
+    try {
+      this.dispose();
+    } finally {
+      await this.drain;
+      this.dispose();
+    }
+  }
+
+  /** Whether a drain of the automatic driver is running now (WEB-09c R41-MUT; a parked driver is not running: it waits on the wake). */
   get pumpActive(): boolean {
     return this.pumping;
   }
 
   /**
-   * JOINS the automatic drive (WEB-09c R41-MUT): resolves once no run of the pump is in progress, including a run it restarted itself,
-   * within `rounds` successive runs; false when one was still running after them. `stop(); await settled()` of an engine does not join
-   * it (it is the world's, not the engine's), so a teardown that must prove quiescence awaits this.
+   * JOINS the automatic drive (WEB-09c R41-MUT): resolves once no drain is in progress, including a drain it restarted itself, within
+   * `rounds` successive drains; false when one was still running after them. `stop(); await settled()` of an engine does not join it (it
+   * is the world's, not the engine's), so a teardown that must prove quiescence awaits this. A drain never rejects (its failure is boxed
+   * above), so joining it never throws.
    */
   async pumpIdle(rounds = 1_000): Promise<boolean> {
-    for (let i = 0; i < rounds && this.pumping; i += 1) await this.pumpRun;
+    for (let i = 0; i < rounds && this.pumping; i += 1) await this.drain;
     return !this.pumping;
   }
-
-  constructor(readonly world: World) {}
 
   // ---- faults and inspection ----------------------------------------------------------------------------------------
   inject(injection: Injection): () => void {
@@ -347,6 +430,26 @@ export class FakeIdb {
       accountDatabaseName(account),
       new FakeDatabase(accountDatabaseName(account), this.world, this),
     );
+  }
+  /**
+   * A NEWER BUILD upgrades the database (WEB-14a D-P8), as another tab's open at a higher version does: every open connection is sent an
+   * upgrading `versionchange` first (each page's handler closes its own), then the version is raised. The data stays as it was.
+   */
+  upgradeTo(name: string, version: number, page = "newer-build"): void {
+    const db = this.databases.get(name);
+    if (!db) throw new Error(`no database ${name}`);
+    for (const connection of [...db.connections]) {
+      if (connection.closing) continue;
+      this.world.schedule(
+        "misc",
+        connection.page,
+        { what: "idb.versionchange", name },
+        () => connection.onVersionChange(version),
+      );
+    }
+    this.world.schedule("misc", page, { what: "idb.upgraded", name }, () => {
+      db.version = version;
+    });
   }
   /** Removes a database as if another browser profile action did it, with no versionchange. */
   vanish(name: string): void {
@@ -543,9 +646,20 @@ export class FakeIdb {
       ) => void;
     } = {},
   ): EngineOpener {
+    // The adapter's page-sticky supersession (D-P8), per page registry.
+    let superseded = this.superseded.get(registry);
+    if (!superseded) {
+      superseded = new Set();
+      this.superseded.set(registry, superseded);
+    }
+    const supersededHere = superseded;
     return {
       open: async (account, openOptions): Promise<OpenResult> => {
         const name = accountDatabaseName(account);
+        if (supersededHere.has(account)) {
+          registry.closeAll(account, { latch: "upgrade_pending" });
+          throw new StoreFailure("closed");
+        }
         this.beforeOpen?.(name);
         let db = this.databases.get(name);
         let created = false;
@@ -564,6 +678,14 @@ export class FakeIdb {
           created = true;
         }
         const target = db;
+        // The probe: a database a newer build upgraded is not used by this build's code; the page latches it and is told once.
+        if (target.version > DECLARED_IDB_VERSION) {
+          const first = !supersededHere.has(account);
+          supersededHere.add(account);
+          registry.closeAll(account, { latch: "upgrade_pending" });
+          if (first) options.onVersionChange?.(account, "upgraded");
+          throw new StoreFailure("closed");
+        }
         const makeConnection = (
           durability: "strict" | "default",
         ): FakeConnection => {
@@ -575,7 +697,11 @@ export class FakeIdb {
               const deleted = newVersion === null;
               const latch = deleted ? "closed_for_deletion" : "upgrade_pending";
               // The real adapter reports a closure once per page, whatever the engine delivers.
-              const first = registry.latch(account) !== latch;
+              let first = registry.latch(account) !== latch;
+              if (!deleted) {
+                first = !supersededHere.has(account);
+                supersededHere.add(account);
+              }
               registry.closeAll(account, { latch });
               if (first)
                 options.onVersionChange?.(
@@ -705,13 +831,14 @@ export class FakeIdb {
     // A transaction that is already COMMITTING refuses (`InvalidStateError`) and completes: its data lands when the engine says.
     if (tx.over || tx.committing) return;
     tx.aborted = true;
-    const rejectLater = (): void =>
+    const rejectLater = (): void => {
       this.world.schedule(
         "D0",
         tx.info.page,
         { label: tx.info.label, tx: tx.info.order },
         () => tx.reject(new StoreFailure("abort")),
       );
+    };
     // Stuck, or its body has begun (reading, or awaiting something inside `apply`): IndexedDB aborts the transaction at once and the
     // caller hears of it whatever the body is waiting for; the body, if it resumes, stops at its next checkpoint and does nothing.
     if (db.running === tx && (tx.begun || db.stuck === tx)) {

@@ -107,7 +107,9 @@ const ADMISSION_ROUNDS = 3;
 
 const unwritten = (result: FormWriteResult): ConditionalPut | null =>
   result.kind === "changed"
-    ? { kind: "changed", stored: result.stored }
+    ? result.stored === undefined
+      ? { kind: "failed" }
+      : { kind: "changed", stored: result.stored }
     : result.kind === "refused"
       ? { kind: "refused" }
       : result.kind === "saved" || result.kind === "unchanged"

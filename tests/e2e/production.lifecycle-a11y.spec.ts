@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from "@playwright/test";
-import { test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { expect } from "./helpers";
+import { test } from "./intercepted-auth";
 import {
   allowFreeze,
   displayedAs,
@@ -37,6 +37,10 @@ import {
  * whole interval, not samples that stop 200 ms short. The kernel's display read gives up only after 6 s (`displayReadStallMs`, human
  * decision T22-READ-BOUND-20261012); every cover and write keeps its hard 5 s. Controls: no hold; an early (4.9 s) delivery that the oracle
  * must flag; O-3 beyond 6 s fails closed. No product hook exists.
+ *
+ * Intercepted authentication (R37, WEB-14a revision 34): the stubbed API is a `context.route`, which a worker-controlled WebKit page's
+ * requests bypass, so `test` from ./intercepted-auth blocks service worker registration for this file's contexts. Its peer pages,
+ * navigations and reloads are therefore never worker-controlled; the shipped worker is covered by the PWA and offline suites.
  */
 async function newStub(context: BrowserContext, ...names: string[]) {
   const stub = new AuthStub();

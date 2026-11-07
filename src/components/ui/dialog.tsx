@@ -163,6 +163,15 @@ export function Dialog({
             if (event.defaultPrevented) return;
             // Radix would focus a Trigger, which this dialog does not use; return focus explicitly instead.
             event.preventDefault();
+            // Only where nothing has taken focus since the dialog went: a focus request it was holding back (an update's recovery action,
+            // WEB-14a revision 20) keeps it.
+            const active = document.activeElement;
+            if (
+              active &&
+              active !== document.body &&
+              !content?.contains(active)
+            )
+              return;
             const target = returnFocusRef?.current ?? opener.current;
             if (target?.isConnected && target !== document.body) target.focus();
           }}

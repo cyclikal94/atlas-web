@@ -4,6 +4,8 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { List } from "../../components/ui/list";
 import { type SnapshotHousehold, useSharingDefaults } from "../../data";
+import { useRecoverableEditor } from "../../lib/form-recovery/editor";
+import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import {
   type Invitation,
   type ManagementCommand,
@@ -16,6 +18,67 @@ import * as copy from "./copy";
 import { useSharingEnv } from "./env";
 import { type Attempt, nextAttempt } from "./model/submission";
 import { Banner, formatWhen, useSharingLoad } from "./parts";
+
+/**
+ * Revision 37 (WEB-14a R40): the households' ordinary non-secret drafts (a new household's name, a username to invite) are recoverable
+ * around an app-update reload (Q4): one text each, version 1, under a context of the form and its household. An unresolved attempt is
+ * never part of it (a restored draft is a new operation the person sends).
+ */
+const textCodec = {
+  encode: (text: string) => JSON.stringify({ v: 1, text }),
+  decode: (raw: string): string | null => {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+      return parsed !== null &&
+        typeof parsed === "object" &&
+        parsed.v === 1 &&
+        typeof parsed.text === "string"
+        ? parsed.text
+        : null;
+    } catch {
+      return null;
+    }
+  },
+};
+
+/** A text draft of an inline form, kept in the form's recoverable model (edits refused while an update reload is prepared). */
+function useRecoverableText(identity: string, context: string) {
+  const [text, setText] = useState("");
+  const touched = useRef(false);
+  const field = useRef<HTMLInputElement>(null);
+  const recovery = useRecoverableEditor<string>({
+    identity,
+    context,
+    ...textCodec,
+    start: () => "",
+    untouched: () => !touched.current,
+    restored: setText,
+    // "Discard instead" (revision 38, R40-A): at the gesture, never when the copies' removal completes.
+    reset: (value) => {
+      touched.current = false;
+      setText(value);
+    },
+  });
+  return {
+    text,
+    field,
+    change(next: string) {
+      if (!recovery.edit(next)) return;
+      touched.current = true;
+      setText(next);
+    },
+    /**
+     * Cleared after a send that succeeded: a new session from nothing. Revision 38 (I7): only while the input is still what that send
+     * sent (`ModelTicket.current`, asked at the answer); text typed while it was on its way stays.
+     */
+    clear() {
+      touched.current = false;
+      recovery.begin("");
+      setText("");
+    },
+    recovery,
+  };
+}
 
 /** An attempt whose outcome is not known, with the identity that made it (see `uncertain` below). */
 interface Unresolved {
@@ -54,7 +117,8 @@ export function HouseholdsMinimal() {
     requestId?: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [name, setName] = useState("");
+  const draft = useRecoverableText(env.identity, "household-create");
+  const name = draft.text;
   /**
    * The attempt whose outcome is not known, for the identity that made it. Its command carries an id this page chose (a household's, an
    * invitation's), so it is never rebuilt: Try again resends it as it is (same key, same body). `sent` says whether it may have reached
@@ -412,23 +476,31 @@ export function HouseholdsMinimal() {
         onSubmit={(event) => {
           event.preventDefault();
           if (blocked !== null || nameLength < 1 || nameLength > 300) return;
+          // Its ticket first (R40): none while an update reload is prepared.
+          const ticket = draft.recovery.submitting();
+          if (ticket === null) return;
           void run(
             { kind: "create_household", id: env.newId(), name: name.trim() },
             copy.CREATED,
           ).then((ok) => {
-            if (ok && mounted.current) setName("");
+            const unchanged = ticket.current();
+            if (ok) void ticket.succeeded();
+            else ticket.failed();
+            if (ok && unchanged && mounted.current) draft.clear();
           });
         }}
       >
         <h3 id={ids.create} className="text-[13.5px] font-medium text-ink-1">
           {copy.CREATE_HEADING}
         </h3>
+        <RecoveryNotice recovery={draft.recovery} firstFieldRef={draft.field} />
         <Input
+          ref={draft.field}
           label={copy.CREATE_NAME}
           surface="panel"
           value={name}
           maxLength={300}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => draft.change(event.target.value)}
         />
         <span>
           {blocked !== null ? (
@@ -505,7 +577,12 @@ function HouseholdRow({
   blocked: string | null;
   onInvite(username: string): Promise<boolean>;
 }) {
-  const [username, setUsername] = useState("");
+  const env = useSharingEnv();
+  const draft = useRecoverableText(
+    env.identity,
+    `household-invite:${household.id}`,
+  );
+  const username = draft.text;
   return (
     <li
       data-household={household.id}
@@ -532,19 +609,30 @@ function HouseholdRow({
           onSubmit={(event) => {
             event.preventDefault();
             if (blocked !== null || username.trim() === "") return;
+            // Its ticket first (R40): none while an update reload is prepared.
+            const ticket = draft.recovery.submitting();
+            if (ticket === null) return;
             void onInvite(username.trim()).then((ok) => {
-              if (ok) setUsername("");
+              const unchanged = ticket.current();
+              if (ok) void ticket.succeeded();
+              else ticket.failed();
+              if (ok && unchanged) draft.clear();
             });
           }}
         >
           <div className="min-w-0 flex-1">
+            <RecoveryNotice
+              recovery={draft.recovery}
+              firstFieldRef={draft.field}
+            />
             <Input
+              ref={draft.field}
               label={copy.INVITE_LABEL(household.name)}
               surface="panel"
               value={username}
               autoCapitalize="none"
               spellCheck={false}
-              onChange={(event) => setUsername(event.target.value)}
+              onChange={(event) => draft.change(event.target.value)}
             />
           </div>
           {blocked !== null ? (

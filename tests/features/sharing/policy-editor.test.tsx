@@ -957,6 +957,7 @@ describe("DA-M1: the policy editor's membership read has its own loading, failur
     );
     first.settle({ ok: false, kind: "uncertain", requestId: "req-list" });
     await flush();
+    expect(failed()).not.toBeNull();
     expect(failed()?.textContent).toContain(copy.HOUSEHOLDS_FAILED);
     expect(failed()?.textContent).toContain("req-list");
     expect(homeName()).toBe(copy.HOUSEHOLD_UNCHECKED);

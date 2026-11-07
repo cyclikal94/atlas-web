@@ -21,6 +21,8 @@ import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
 import { useSteadyWhilePressed } from "../detail/steady";
 import { type PeopleEnv, usePeopleEnv } from "../env";
+import { usePeopleRecoveryHost } from "../form-recovery";
+import { newPersonForm } from "../model/person-form";
 import {
   byName,
   type Change,
@@ -30,6 +32,7 @@ import {
   projectedRows,
   type ShownRow,
 } from "../model/project";
+import { personCodec } from "../model/recovery";
 import {
   attributionOf,
   audienceText,
@@ -53,7 +56,12 @@ import {
   walkPages,
 } from "../summaries";
 import { SummaryNotes } from "../summary-notes";
-import { NewPersonDialog } from "./NewPersonDialog";
+import {
+  holdsNewPerson,
+  NewPersonDialog,
+  parkNewPerson,
+  RETAINED,
+} from "./NewPersonDialog";
 
 /**
  * WF-PEOPLE-01, the people list (§4.1). The list is read in BOUNDED STEPS (Q9; finding 7 of the review of 13 October 2026): a step keeps
@@ -99,6 +107,16 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<PeopleView>("all");
   const [creating, setCreating] = useState(false);
+  // WEB-14a (F-INT-PEOPLE-Q4): the "New person" form left by the page before an update reload opens again on its copy (never saved).
+  usePeopleRecoveryHost({
+    memory: env.memory,
+    key: RETAINED,
+    codec: personCodec,
+    start: newPersonForm,
+    holds: () => holdsNewPerson(env.memory),
+    park: (form) => parkNewPerson(env.memory, form, env.newId),
+    open: () => setCreating(true),
+  });
   const actions = useDataActions();
   // "Try again" reads afresh: new watches of the cache and the unsent changes (a live query ends at its first error), and the data
   // layer's own retry of an unavailable database.

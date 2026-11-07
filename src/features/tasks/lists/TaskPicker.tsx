@@ -9,10 +9,22 @@ import {
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { completeKept, disownKept, keptKey, useKeptInput } from "../kept-input";
+import {
+  completeKept,
+  disownKept,
+  type KeptRecovery,
+  keptKey,
+  useKeptInput,
+} from "../kept-input";
 import { type ComposedList, roomFor } from "../model/list-view";
+import {
+  listPickerContext,
+  pickerRecoveryValues,
+  restorePicker,
+} from "../model/lists";
 import { type Evidence, type Issued, useListActions } from "./actions";
 import { PICKER } from "./copy";
 import { ReadNotice } from "./ReadNotice";
@@ -53,7 +65,77 @@ interface PickerInput {
   unresolved: Unresolved[];
 }
 
-const empty = (): PickerInput => ({ query: "", selected: [], unresolved: [] });
+export const pickerStart = (): PickerInput => ({
+  query: "",
+  selected: [],
+  unresolved: [],
+});
+
+/**
+ * APP-UPDATE RECOVERY of the picker (WEB-14a revision 38; design assessment DA-R40-D, C5; Q4): the search and the tasks selected, in order,
+ * with the titles shown for them (version 1; the ids are checked by WEB-10b's `restorePicker`). An add's id, a missing mark and any add
+ * whose outcome is not known are NOT kept (docs/lists.md: page memory only; no attempt history across a reload): each restored selection
+ * is a new add under a new id, and adding stays the person's act. `ListDetail` looks for a copy and opens the picker on it.
+ */
+export const pickerRecovery = (
+  listId: string,
+  newId: () => string,
+): KeptRecovery<PickerInput> => ({
+  context: listPickerContext(listId),
+  encode: (value) =>
+    JSON.stringify({
+      v: 1,
+      query: value.query,
+      selected: value.selected.map((c) => ({ task: c.task, title: c.title })),
+    }),
+  decode: (text, start) => {
+    try {
+      const raw = JSON.parse(text) as Record<string, unknown> | null;
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        raw.v !== 1 ||
+        Object.keys(raw).length !== 3 ||
+        !Array.isArray(raw.selected)
+      )
+        return null;
+      const titles: string[] = [];
+      const tasks: string[] = [];
+      for (const item of raw.selected as unknown[]) {
+        const entry = item as { task?: unknown; title?: unknown } | null;
+        if (
+          entry === null ||
+          typeof entry !== "object" ||
+          Object.keys(entry).length !== 2 ||
+          typeof entry.task !== "string" ||
+          typeof entry.title !== "string"
+        )
+          return null;
+        tasks.push(entry.task);
+        titles.push(entry.title);
+      }
+      const found = restorePicker(
+        pickerRecoveryValues({
+          query: typeof raw.query === "string" ? raw.query : "",
+          selected: tasks,
+        }),
+      );
+      if (found === null || typeof raw.query !== "string") return null;
+      return {
+        ...start,
+        query: found.query,
+        selected: found.selected.map((task, n) => ({
+          task,
+          localId: newId(),
+          title: titles[n] ?? "",
+        })),
+        unresolved: [],
+      };
+    } catch {
+      return null;
+    }
+  },
+});
 
 /**
  * "Add task to list" (plan §4.6, D-10b-10..12): the tasks this device can offer (its cached tasks and the ones it created and has not
@@ -89,7 +171,8 @@ export function TaskPicker({
   close.current = onClose;
   const latest = useRef(list);
   latest.current = list;
-  const kept = useKeptInput<PickerInput>(key, env.identity, empty, {
+  const kept = useKeptInput<PickerInput>(key, env.identity, pickerStart, {
+    recover: pickerRecovery(listId, env.newId),
     consumed: () => {
       close.current();
       return null;
@@ -98,6 +181,8 @@ export function TaskPicker({
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const [note, setNote] = useState<string | null>(null);
   const search = useId();
+  // The search field: a restored copy and "Discard instead" focus it (WEB-14a revision 51, F-R51-1).
+  const searchRef = useRef<HTMLInputElement>(null);
   const caption = useId();
   const decision = useId();
   const query = useDeferredValue(kept.value.query);
@@ -320,10 +405,14 @@ export function TaskPicker({
       }
     >
       <div className="flex flex-col gap-3" data-task-picker="">
+        {kept.recovery ? (
+          <RecoveryNotice recovery={kept.recovery} firstFieldRef={searchRef} />
+        ) : null}
         <label htmlFor={search} className="sr-only">
           {PICKER.searchLabel}
         </label>
         <input
+          ref={searchRef}
           id={search}
           type="search"
           value={kept.value.query}

@@ -1,6 +1,7 @@
 import { useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
+import { admitActivity } from "../../../lib/form-recovery/activity";
 import { type AccountSummary, useSession } from "../../../session";
 import { startSso } from "../../authentication/controller";
 import { RequestId } from "../../authentication/MessageText";
@@ -171,9 +172,21 @@ export function LinkedIdentities({
   const link = async () => {
     if (!online || !isOnlineNow() || recheck()) return;
     // The interaction only decides who may show the outcome: the sign-in attempt and its navigation keep their own protocol.
+    // WEB-14a revision 39 (DA-AUTH-LINK; design assessment C2, I3): admitted against the app update's freeze at the gesture, and
+    // outstanding until its outcome (leaving for the provider: until the page is shown again), so no update reload is made over it.
+    const departure = admitActivity("sso-link");
+    if (departure === null) return;
     const interaction = start("link");
-    if (!interaction) return;
-    const result = await startSso(session, { link: true }, { navigate });
+    if (!interaction) return departure.end();
+    let result: Awaited<ReturnType<typeof startSso>>;
+    try {
+      result = await startSso(session, { link: true }, { navigate });
+    } catch (error) {
+      departure.end();
+      throw error;
+    }
+    if (result.kind === "navigating") departure.depart();
+    else departure.end();
     if (!finish("link", interaction)) return;
     if (result.kind === "failed")
       fail("link", {

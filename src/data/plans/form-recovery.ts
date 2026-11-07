@@ -1,5 +1,5 @@
 import type { FormRecoveryRow, IsoInstant } from "../model/types";
-import { w } from "../store/port";
+import { range, w } from "../store/port";
 import { singletonPlan } from "./builders";
 
 /**
@@ -59,7 +59,8 @@ export interface FormWrite {
    * condition replaces the order of captures for this write (it is judged against the stored row itself, in the same transaction): a
    * conditional writer never overwrites a terminal row or a state it did not read, whatever generation another capture holds.
    */
-  expect?: { digest: string | null };
+  /** A string instead retires only the exact PWA capture identity; absent/terminal captures answer resolved. */
+  expect?: string | { digest: string | null };
 }
 
 export type FormWriteResult =
@@ -82,7 +83,13 @@ export type FormWriteResult =
   /** The form has no row and the write was not to create one (`mayCreate: false`): nothing was written. */
   | { kind: "absent" }
   /** A conditional write (`expect`) found another state: nothing was written. `stored` says what is there. */
-  | { kind: "changed"; stored: "absent" | "ended" | "live" };
+  | { kind: "changed"; stored: "absent" | "ended" | "live" }
+  /** Revision 8 (`expect`): no row, or a terminal one: that capture cannot be restored. Nothing was written. */
+  | { kind: "resolved" }
+  /** Revision 8 (`expect`): the row holds another capture (its own page wrote a newer one): left exactly as it is. */
+  | { kind: "changed"; stored?: never }
+  /** Revision 8 (`expect`): no unique generation can be issued for the terminal row (as a claim): nothing was written. */
+  | { kind: "no_generation" };
 
 const generationOf = (row: Pick<FormRecoveryRow, "writer_gen">): number =>
   row.writer_gen ?? 0;
@@ -125,17 +132,40 @@ export const saveFormRecovery = singletonPlan<
       return { result: { kind: "lease_lapsed" } };
     const incoming = input.row;
     if (input.expect !== undefined) {
-      const want = input.expect.digest;
-      const state = !stored ? "absent" : stored.terminal ? "ended" : "live";
-      const holds =
-        want === null
-          ? state === "absent"
-          : state === "live" && stored?.content_digest === want;
-      if (!holds) return { result: { kind: "changed", stored: state } };
-      if (state === "absent" && input.mayCreate === false)
-        return { result: { kind: "absent" } };
+      if (typeof input.expect === "object") {
+        const want = input.expect.digest;
+        const state = !stored ? "absent" : stored.terminal ? "ended" : "live";
+        const holds =
+          want === null
+            ? state === "absent"
+            : state === "live" && stored?.content_digest === want;
+        if (!holds) return { result: { kind: "changed", stored: state } };
+        if (state === "absent" && input.mayCreate === false)
+          return { result: { kind: "absent" } };
+        return {
+          writes: [w.put("form_recovery", incoming)],
+          result: { kind: "saved" },
+        };
+      }
+      if (!stored || stored.terminal) return { result: { kind: "resolved" } };
+      if (stored.meta?.capture !== input.expect)
+        return { result: { kind: "changed" } };
+      // The terminal row's generation is issued by the claim's own decision, in this transaction (one counter for every claim; none where
+      // none is unique), and the counter moves with it.
+      const issued = claimFormWriter.decide({ sync, reads: stored }, {
+        incarnationId: input.incarnationId,
+      } as FormClaim).result;
+      if (issued.kind !== "claimed" || !sync)
+        return { result: { kind: "no_generation" } };
       return {
-        writes: [w.put("form_recovery", incoming)],
+        writes: [
+          w.put("form_recovery", {
+            ...incoming,
+            writer_gen: issued.gen,
+            capture_seq: 0,
+          }),
+        ],
+        sync: { ...sync, form_writer_gen: issued.gen },
         result: { kind: "saved" },
       };
     }
@@ -147,6 +177,11 @@ export const saveFormRecovery = singletonPlan<
       // digest of the unsynced work does not move and an autosave landing between the fence transaction and the recount cannot
       // cause a spurious renewed-consent prompt. When this capture is the later one the ORDER record moves up (and only that), so
       // an earlier capture with other content that is still on its way cannot land above it.
+      //
+      // WEB-14a revision 8 (R16): the capture's identity and an update hand-off's lineage (`meta`) move WITH the order record (this capture is
+      // the later one, so what the row now holds is this capture), and never without it (an earlier capture that arrives late leaves the
+      // later one's identity in place). Its control state is content (in the digest), so equal digests hold equal state. The row's own
+      // content and `saved_at` are kept.
       if (
         !incoming.terminal &&
         !stored.terminal &&
@@ -159,6 +194,7 @@ export const saveFormRecovery = singletonPlan<
                   ...stored,
                   writer_gen: generationOf(incoming),
                   capture_seq: incoming.capture_seq,
+                  meta: incoming.meta,
                 }),
               ],
               result: { kind: "unchanged" },
@@ -282,5 +318,50 @@ export const loadFormRecovery = singletonPlan<
     reader.get("form_recovery", [input.formContext, input.tabInstanceId]),
   decide: ({ reads: stored }) => ({
     result: stored && !stored.terminal ? stored : null,
+  }),
+});
+
+/** How many rows of one form `listFormRecovery` reads in one step of its walk (terminal rows included). */
+export const LIST_PAGE_ROWS = 50;
+
+/**
+ * Every copy of one form that can still be restored (WEB-14a, D-P6): the non-terminal rows of `form_context`, newest first by `saved_at`.
+ *
+ * COMPLETE (WEB-14a revision 1, R5). The rows of a form are walked in pages of `LIST_PAGE_ROWS` entries of the `form_context` index, inside
+ * ONE readonly transaction (so no page shifts under the next), until a page comes back short, and the discarded and submitted rows are
+ * dropped as they are met. Only the restorable copies are kept, so what is held grows with the copies that can be restored, never with the
+ * terminal rows (which are kept on purpose: they order a late capture, and are never deleted). Revision 0 read only the FIRST 50 entries
+ * of the index (in primary-key order, not by `saved_at`) and answered at most ten copies: 50 terminal rows of other tabs whose ids sort
+ * first hid a durable copy for good, and ten open tabs' copies hid a closed tab's. Every copy is answered; which of them may be restored
+ * (only those whose owner has gone) is the caller's decision. READONLY, not refused by `closing` (like `loadFormRecovery`).
+ */
+export const listFormRecovery = singletonPlan<
+  { incarnationId: string; formContext: string },
+  FormRecoveryRow[],
+  FormRecoveryRow[]
+>({
+  name: "data.listFormRecovery",
+  meta: { writer: "W9", guards: ["INC"], quota: null },
+  scope: ["form_recovery"],
+  mode: "readonly",
+  durability: "default",
+  read: async (reader, input) => {
+    const restorable: FormRecoveryRow[] = [];
+    for (let offset = 0; ; offset += LIST_PAGE_ROWS) {
+      const page = await reader.byIndex(
+        "form_recovery",
+        "form_context",
+        range.only(input.formContext),
+        LIST_PAGE_ROWS,
+        offset,
+      );
+      for (const row of page) if (!row.terminal) restorable.push(row);
+      if (page.length < LIST_PAGE_ROWS) return restorable;
+    }
+  },
+  decide: ({ reads: rows }) => ({
+    result: [...rows].sort((a, b) =>
+      a.saved_at === b.saved_at ? 0 : a.saved_at < b.saved_at ? 1 : -1,
+    ),
   }),
 });

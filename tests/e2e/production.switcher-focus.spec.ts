@@ -1,6 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
-import { expect, test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
+import { expect, test } from "./intercepted-auth";
 import { displayedAs, passwordOf, publicSignIn } from "./lifecycle-browser";
 
 /**
@@ -13,6 +13,10 @@ import { displayedAs, passwordOf, publicSignIn } from "./lifecycle-browser";
  * the sheet, so focus returns to More, the failure the review reproduced) and Settings' persistent "Switch account". Closes: Escape and the
  * Close button on the picker; Escape on the credential step; Back from the credential step, then Close. The review's assertion messages
  * are kept as they were.
+ *
+ * Intercepted authentication (R37, WEB-14a revision 34): the stubbed API is a `context.route`, which a worker-controlled WebKit page's
+ * requests bypass, so `test` from ./intercepted-auth blocks service worker registration for this file's contexts. Its peer pages,
+ * navigations and reloads are therefore never worker-controlled; the shipped worker is covered by the PWA and offline suites.
  */
 const NAME = "focusreviewten";
 

@@ -113,6 +113,12 @@ type Memory =
 let memory: Memory = { kind: "unset" };
 /** The username chosen for an earlier invitation whose redemption committed or is in doubt, once a newer link holds the page. */
 let earlier: string | null = null;
+/**
+ * WEB-14a revision 40 (review of revision 39, R40-GATE; design assessment C2): the username submitted with this link when the server said
+ * the invitation cannot be used (`401`): what the page tells the person after that submission ("if you already submitted this…", and its
+ * sign-in), whichever surface is mounted. Not `spent` (nothing of ours consumed it): `get()` still holds nothing to draw from.
+ */
+let unusable: string | null = null;
 /** Changes only when a NEW link arrives, so the join page restarts for it; a redemption's `restore` and `spend` do not change it. */
 let version = 0;
 const listeners = new Set<() => void>();
@@ -123,6 +129,7 @@ const publish = () => {
 /** A link is replacing the page's invitation: what the page knew about a submitted one is kept as `earlier`, not lost. */
 function displace(): void {
   if (memory.kind === "spent") earlier = memory.username;
+  unusable = null;
   version += 1;
 }
 
@@ -141,6 +148,11 @@ export interface Redemption {
    * left exactly as it is and the submission is remembered as `earlier`.
    */
   spend(username: string): void;
+  /**
+   * WEB-14a revision 40 (R40-GATE): the server said the invitation cannot be used (`401`) after it was submitted with `username`: the page
+   * keeps that guidance for this link (`unusable()`), unless it has moved on to another.
+   */
+  unusable(username: string): void;
 }
 
 export const invitationMemory = {
@@ -185,13 +197,22 @@ export const invitationMemory = {
         else earlier = username;
         publish();
       },
+      unusable(username) {
+        if (version !== generation) return;
+        unusable = username;
+        publish();
+      },
     };
   },
+  /** WEB-14a revision 40: the username submitted with this link before the server said it cannot be used, or null. */
+  unusable: (): string | null => unusable,
   /** An account is displaying, so what this page knew about a submitted invitation is no longer news. */
   forgetSpent(): void {
-    if (memory.kind !== "spent" && earlier === null) return;
+    if (memory.kind !== "spent" && earlier === null && unusable === null)
+      return;
     if (memory.kind === "spent") memory = { kind: "unset" };
     earlier = null;
+    unusable = null;
     publish();
   },
   /** The person has read the note about an earlier submission. */
@@ -203,9 +224,11 @@ export const invitationMemory = {
   version: (): number => version,
   /** Forget everything this page holds about invitations: the link, a spent submission and an earlier one. */
   clear(): void {
-    if (memory.kind === "unset" && earlier === null) return;
+    if (memory.kind === "unset" && earlier === null && unusable === null)
+      return;
     memory = { kind: "unset" };
     earlier = null;
+    unusable = null;
     publish();
   },
   subscribe(listener: () => void): () => void {

@@ -402,6 +402,7 @@ export function fixtureSession(params: URLSearchParams): Session {
     recovery: {} as never,
     wipe: {} as never,
     compat: store({ status: "supported" as const, version: "0.31.0" }),
+    recheckCompatibility: () => undefined,
     actions: {
       signIn: () => undefined,
       retry: () => undefined,

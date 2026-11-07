@@ -8,6 +8,11 @@ import type { World } from "./world";
  * its holder's release has been PUBLISHED (delay knob D1); `ifAvailable` calls back with null while the lock is held or its
  * release is unpublished; a `signal` rejects a not-yet-granted request with AbortError and is ignored once granted;
  * `query()` and `steal` throw so any use fails the test. A destroyed page's locks are released by the platform (also through D1).
+ *
+ * `gate` (WEB-14a revision 36, R39) holds a page's exclusive request at one of two real stages, so a test can name the interval a
+ * protocol must cover: before the platform has admitted it to the queue (the name is free, so another page's `ifAvailable` request
+ * is granted), or after it is granted (the page holds the lock) but before its callback is delivered. Nothing is fabricated: the
+ * request is admitted, granted and delivered exactly as without the gate, only later.
  */
 interface Holder {
   page: string;
@@ -22,6 +27,11 @@ interface Pending {
   reject: (reason: unknown) => void;
   signal?: AbortSignal;
   onAbort?: () => void;
+}
+interface Gate {
+  stage: "admission" | "callback";
+  match: (page: string, name: string) => boolean;
+  parked: Array<{ page: string; go: () => void; fail: () => void }>;
 }
 interface LockState {
   /** Every current holder: one exclusive, or any number of shared. */
@@ -38,8 +48,41 @@ export class FakeLockManager {
   private tokens = 0;
   /** Every lock name each page currently holds (for destruction). */
   private heldBy = new Map<string, Set<string>>();
+  private gates: Gate[] = [];
 
   constructor(private readonly world: World) {}
+
+  /**
+   * Hold every matching exclusive (not `ifAvailable`) request at `stage` until `release()`, which lets them go on in the order they came;
+   * `fail()` rejects held admissions instead (the platform refusing the request). A held request of a page destroyed meanwhile is
+   * dropped, as the platform drops it. `held()` counts what is held now.
+   */
+  gate(
+    stage: "admission" | "callback",
+    match: (page: string, name: string) => boolean,
+  ): { held: () => number; release: () => void; fail: () => void } {
+    const gate: Gate = { stage, match, parked: [] };
+    this.gates.push(gate);
+    const drain = (each: (entry: Gate["parked"][number]) => void) => {
+      this.gates = this.gates.filter((g) => g !== gate);
+      const parked = gate.parked.splice(0);
+      for (const entry of parked)
+        if (!this.world.isDestroyed(entry.page)) each(entry);
+    };
+    return {
+      held: () => gate.parked.length,
+      release: () => drain((entry) => entry.go()),
+      fail: () => drain((entry) => entry.fail()),
+    };
+  }
+
+  private gateFor(
+    stage: Gate["stage"],
+    page: string,
+    name: string,
+  ): Gate | undefined {
+    return this.gates.find((g) => g.stage === stage && g.match(page, name));
+  }
 
   private state(name: string): LockState {
     let state = this.states.get(name);
@@ -91,6 +134,20 @@ export class FakeLockManager {
         reject(new DOMException("aborted", "AbortError"));
         return;
       }
+      const admission = options.ifAvailable
+        ? undefined
+        : this.gateFor("admission", page, name);
+      if (admission) {
+        log("lock.admission_held");
+        admission.parked.push({
+          page,
+          go: () => {
+            this.request(page, name, options, callback).then(resolve, reject);
+          },
+          fail: () => reject(new DOMException("refused", "InvalidStateError")),
+        });
+        return;
+      }
       log("lock.request", { ifAvailable: options.ifAvailable === true });
       const state = this.state(name);
       if (options.ifAvailable) {
@@ -118,6 +175,7 @@ export class FakeLockManager {
               callback,
               resolve,
               reject,
+              ifAvailable: true,
             });
           },
         );
@@ -182,7 +240,12 @@ export class FakeLockManager {
   private grantTo(
     state: LockState,
     name: string,
-    request: Pick<Pending, "page" | "mode" | "callback" | "resolve" | "reject">,
+    request: Pick<
+      Pending,
+      "page" | "mode" | "callback" | "resolve" | "reject"
+    > & {
+      ifAvailable?: boolean;
+    },
   ): void {
     const holder: Holder = {
       page: request.page,
@@ -202,9 +265,25 @@ export class FakeLockManager {
       name,
       mode: request.mode,
     });
+    const deliver = () => this.deliver(name, holder, request);
+    const gate = this.gateFor("callback", request.page, name);
+    if (gate && !request.ifAvailable) {
+      this.world.log({ type: "lock.callback_held", page: request.page, name });
+      gate.parked.push({ page: request.page, go: deliver, fail: deliver });
+      return;
+    }
+    deliver();
+  }
+
+  /** The callback of a granted request (later than the grant when a `callback` gate holds it). */
+  private deliver(
+    name: string,
+    holder: Holder,
+    request: Pick<Pending, "page" | "callback" | "resolve" | "reject">,
+  ): void {
     let outcome: unknown;
     try {
-      outcome = request.callback({ name, mode: request.mode });
+      outcome = request.callback({ name, mode: holder.mode });
     } catch (error) {
       this.release(name, holder, "callback_threw");
       request.reject(error);

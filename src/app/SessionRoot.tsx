@@ -1,4 +1,5 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { lazy, Suspense, useEffect, useRef, useSyncExternalStore } from "react";
+import { NeutralLiveRegion } from "../components/ui/announcer";
 import { NeutralGate } from "../components/ui/neutral-gate";
 import { NeutralState } from "../components/ui/neutral-state";
 import { authFeedback } from "../features/authentication/feedback";
@@ -8,6 +9,8 @@ import { publicSurfaceFor } from "../features/authentication/public-route";
 import { SignInSurface } from "../features/authentication/SignInSurface";
 import { signInRequest } from "../features/authentication/sign-in-request";
 import { switchFlow } from "../features/switch/state";
+import { settlePreAccountInput } from "../lib/form-recovery/editor";
+import { useAppUpdate } from "../lib/pwa/store";
 import {
   type NeutralStateId,
   useApiCompatibility,
@@ -40,11 +43,41 @@ export const SIGN_IN_STATES: ReadonlySet<NeutralStateId> = new Set([
  *  - `displaying`: nothing. The gate is lifted over the protected tree by `act`, and only by `act`.
  * It renders nothing about any account.
  */
+/** WEB-14a revision 40 (R40-GATE): the pre-account journeys of a signed-out page, and those of a displayed account (`settlePreAccountInput`). */
+const PUBLIC_JOURNEY = (context: string) =>
+  context === "sign-in" || context === "sign-in:again" || context === "join";
+const ACCOUNT_JOURNEY = (context: string) =>
+  context === "sign-in:switch" || context === "sign-in:confirm";
+
+// The neutral update banner (WEB-14a) is loaded only when there is something to say: the initial chunk carries the import, not the banner.
+const NeutralUpdateBanner = lazy(() => import("../lib/pwa/UpdateBanner"));
+
 export function SessionRoot({
   pathname = location.pathname,
 }: {
   pathname?: string;
 } = {}) {
+  const update = useAppUpdate();
+  const view = useSessionView();
+  const screen = <NeutralScreen pathname={pathname} />;
+  // While the account is displayed the shell shows the banner itself (`AppUpdateBanner`), and announces it through the protected tree.
+  if (view.kind === "displaying") return screen;
+  // The neutral live region is mounted (empty) whenever no account is displayed, BEFORE an update can be offered: a region inserted with
+  // its message is not reliably announced (revision 1, R8).
+  return (
+    <>
+      {screen}
+      <NeutralLiveRegion />
+      {update.kind === "none" ? null : (
+        <Suspense fallback={null}>
+          <NeutralUpdateBanner />
+        </Suspense>
+      )}
+    </>
+  );
+}
+
+function NeutralScreen({ pathname }: { pathname: string }) {
   const view = useSessionView();
   const api = useApiCompatibility();
   const session = useSession();
@@ -86,8 +119,14 @@ export function SessionRoot({
   const signedOut = view.kind === "signed_out" && view.state === null;
   useEffect(() => {
     if (shownAccount !== null) {
-      if (lastShown.current !== null && lastShown.current !== shownAccount)
+      if (lastShown.current !== null && lastShown.current !== shownAccount) {
         authFeedback.clearOnBegin();
+        // WEB-14a revision 40 (R40-GATE): a switch or confirmation journey was the previous account's.
+        settlePreAccountInput(ACCOUNT_JOURNEY);
+      }
+      // WEB-14a revision 40 (R40-GATE; design assessment C2): an account is signed in: what was typed to sign in or join (with no editor
+      // shown) is over; a durable success already consumed what it sent.
+      settlePreAccountInput(PUBLIC_JOURNEY);
       lastShown.current = shownAccount;
       // WEB-08c: a switch journey opened by another account is no longer anyone's (the protected tree's host also drops it).
       switchFlow.dropUnless(shownAccount);
@@ -98,9 +137,18 @@ export function SessionRoot({
     } else if (signedOut && lastShown.current !== null) {
       authFeedback.clearOnBegin();
       switchFlow.close();
+      settlePreAccountInput(ACCOUNT_JOURNEY);
       lastShown.current = null;
     }
   }, [shownAccount, signedOut]);
+  // WEB-14a revision 40 (R40-GATE): a newer invitation link replaced the join page: the earlier link's form never shows again, so its
+  // unfinished username ends (what its submission left is told beside the newer link, `invitationMemory.earlier`).
+  useEffect(() => {
+    settlePreAccountInput(
+      (context, journey) =>
+        context === "join" && journey !== null && journey !== `${linkVersion}`,
+    );
+  }, [linkVersion]);
 
   switch (view.kind) {
     case "booting":

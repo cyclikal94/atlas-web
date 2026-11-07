@@ -1,4 +1,21 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { useFormRecoveryPort } from "../../data";
+import {
+  createRecoverableModel,
+  type ModelTicket,
+  type ModelView,
+  type RecoverableModel,
+  type RecoveryControls,
+} from "../../lib/form-recovery/model";
+import type { DiscardResult } from "../../lib/form-recovery/port";
+import { pageFormRegistry } from "../../lib/form-recovery/registry";
 import {
   forgetTaskVisits,
   onTaskVisitEnded,
@@ -52,6 +69,58 @@ import {
  * was taken with. An editor whose session was consumed meanwhile starts afresh there, as a new mount would: a new session, from what the
  * screen shows now, never the consumed input to save twice and never an editor whose Save does nothing.
  */
+/**
+ * APP-UPDATE RECOVERY (WEB-14a revision 37; review of 25 October 2026, R40; design assessment C1-C3). Page memory is forgotten by a reload,
+ * so an editor that declares a recovery codec (`KeptRecovery`: a form context for its target and an explicitly versioned, non-secret text
+ * of its raw input) also has a RECOVERABLE MODEL (`lib/form-recovery/model.ts`) for its key: the session of the page's form registry that
+ * the app-update coordinator saves, hands off and seals through. This owner stays the one authority for the input: every edit, the stage
+ * an opening is, a submission's ticket and its completion, a departure that drops the input and a restore reach the model in the same step
+ * (`editKept`, `openKept`, `submitKept`, `completeKept`, the visit's end). While an update reload is prepared an edit or a save is refused
+ * (the editor keeps what it shows; nothing is typed after the last save). After the reload the editor's look restores the copy left to it
+ * into its session (`restoreKept`; never submitted), only while that session is untouched; a screen that shows no editor yet (the new
+ * task's preset picker) restores it as the stage the person had reached (`useKeptRecovery`).
+ *
+ * Revision 38 (review of revision 37, R40-B; design assessment C3, C5): a copy the PERSON chooses (the notice's other copies) replaces the
+ * session's input whatever was typed or restored before (the model has already checked that nothing changed it since the choice), unless a
+ * save of the session is pending; never submitted. What a settled save leaves in the session (`completeKept`'s `change`) reaches the
+ * model in the same transition when it changes the recoverable input (a partial save's remaining selection), never as the person's edit.
+ */
+export interface KeptRecovery<T> {
+  /** Where the copies are kept: the editor and its target (never a session number). The account is the store's. */
+  readonly context: string;
+  /** The input as one text (versioned; never a secret). */
+  encode(value: T): string;
+  /**
+   * The text of a copy back into input; null when it is not one this build can read (offered, never restored in part). `start`: what the
+   * editor would start from now (revision 38: what the codec does not keep, such as a new save's fresh ids, comes from it, never the copy).
+   */
+  decode(text: string, start: T): T | null;
+}
+
+interface Linked {
+  readonly identity: string;
+  readonly model: RecoverableModel;
+  readonly recovery: KeptRecovery<unknown>;
+  /** The visit an entry restored with no editor holding it belongs to (the screen that restores it). */
+  owner: () => TaskVisit | null;
+  /** What the editor starts from now (the latest caller's). */
+  start: () => unknown;
+  /** Opening the editor is itself input (the new task's stage). */
+  opened: boolean;
+}
+
+const noSubscription = () => () => undefined;
+const NO_VIEW: ModelView = {
+  restored: null,
+  alternatives: [],
+  unavailable: false,
+  ready: true,
+};
+const noView = () => NO_VIEW;
+
+/** The recoverable model of each key whose editor declared a codec (per identity: another identity retires it). */
+const models = new Map<string, Linked>();
+
 export interface KeptEntry<T> {
   readonly session: number;
   /** Edits accepted in this session (0: opened and not edited). */
@@ -67,13 +136,17 @@ export interface KeptTicket {
   readonly key: string;
   readonly session: number;
   readonly revision: number;
+  /** Revision 37 (R40): the recoverable model's ticket for what this save sent (its success covers exactly that). */
+  readonly recovery?: ModelTicket;
   /** The pending save this ticket is (only it settles the session). */
   readonly flight: number;
 }
 
 export type KeptEvent =
   | { kind: "consumed"; session: number; value: unknown; detail: string | null }
-  | { kind: "settled"; session: number };
+  | { kind: "settled"; session: number }
+  /** Revision 37 (R40): a copy left by the page before an update was restored into the session (or the session reset after a discard). */
+  | { kind: "restored"; session: number };
 
 interface Held {
   session: number;
@@ -105,8 +178,110 @@ const retained = (held: Held) =>
 // A visit that ends drops every session it owns that no editor holds (one still held is dropped when its editor lets go).
 onTaskVisitEnded((visit) => {
   for (const [key, held] of [...entries])
-    if (held.owner === visit && held.holders === 0) entries.delete(key);
+    if (held.owner === visit && held.holders === 0) drop(key);
 });
+
+/** The session of `key` is dropped (a departure, nothing of the person's): its recovery copies go with it (R40: never revived later). */
+function drop(key: string): void {
+  if (!entries.delete(key)) return;
+  void models.get(key)?.model.end();
+}
+
+/** Revision 37 (R40): another identity's editor opened: this one's models leave the page's registry (their copies stay in their store). */
+function retireOtherIdentities(identity: string): void {
+  for (const [key, linked] of [...models])
+    if (linked.identity !== identity) {
+      linked.model.retire();
+      models.delete(key);
+    }
+}
+
+/**
+ * Revision 37 (R40): the recoverable model of `key` for `identity`, made once (its codec and its first start are the first caller's).
+ * `owner` names the visit an entry it restores while no editor holds the key belongs to.
+ */
+export function linkKept<T>(
+  key: string,
+  identity: string,
+  recovery: KeptRecovery<T>,
+  start: () => T,
+  options: { owner?: () => TaskVisit | null; opened?: boolean } = {},
+): RecoverableModel {
+  retireOtherIdentities(identity);
+  const known = models.get(key);
+  if (known !== undefined) {
+    if (options.owner) known.owner = options.owner;
+    known.start = start;
+    return known.model;
+  }
+  const entry = entries.get(key);
+  const opened = options.opened === true;
+  const linked: Linked = {
+    identity,
+    recovery: recovery as KeptRecovery<unknown>,
+    owner: options.owner ?? (() => null),
+    start,
+    opened,
+    model: createRecoverableModel({
+      formContext: recovery.context,
+      start: opened ? "" : recovery.encode(start()),
+      restore: (text, chosen) => restoreKept(key, text, chosen),
+      untouched: () => {
+        const held = entries.get(key);
+        return (
+          held === undefined ||
+          (held.revision === 0 && held.submitting === null)
+        );
+      },
+    }),
+  };
+  models.set(key, linked);
+  // An editor already holding a session of this key (linked late): the model starts from what it holds.
+  if (entry !== undefined) {
+    linked.model.begin(recovery.encode(start()), opened);
+    if (entry.revision > 0)
+      linked.model.edit(recovery.encode(entry.value as T));
+  }
+  return linked.model;
+}
+
+/**
+ * Revision 37 (R40): a copy's text restored into `key`'s session (the model's look, or the person's choice of another copy). The look's
+ * automatic restore only while the session is untouched (nothing typed, chosen or submitted since it opened), or with no session yet (a
+ * screen restoring the stage the person had reached: a session of the restoring screen's visit, held by no editor until one opens it).
+ * Revision 38 (R40-B): the person's choice (`chosen`) replaces the session's input, typed or restored, unless a save of it is pending.
+ * Never submits.
+ */
+function restoreKept(key: string, text: string, chosen: boolean): boolean {
+  const linked = models.get(key);
+  if (linked === undefined) return false;
+  const value = linked.recovery.decode(text, linked.start());
+  if (value === null) return false;
+  const held = entries.get(key);
+  if (held === undefined) {
+    const owner = linked.owner();
+    if (owner === null || owner.ended()) return false;
+    sessions += 1;
+    entries.set(key, {
+      session: sessions,
+      revision: 1,
+      value,
+      submitting: null,
+      flight: null,
+      note: null,
+      holders: 0,
+      owner,
+      unedited: linked.opened,
+    });
+    return true;
+  }
+  if (held.submitting !== null || (!chosen && held.revision !== 0))
+    return false;
+  held.value = value;
+  held.revision += 1;
+  publish(key, { kind: "restored", session: held.session });
+  return true;
+}
 
 export const keptKey = (identity: string, editor: string) =>
   `${identity}\u0000${editor}`;
@@ -131,6 +306,7 @@ export function openKept<T>(
 ): KeptEntry<T> {
   for (const other of [...entries.keys()])
     if (!other.startsWith(`${identity}\u0000`)) entries.delete(other);
+  retireOtherIdentities(identity);
   const held = entries.get(key);
   if (
     held !== undefined &&
@@ -154,6 +330,10 @@ export function openKept<T>(
     unedited,
   };
   entries.set(key, created);
+  // Revision 37 (R40): a new session of a recoverable editor starts its model afresh (the stage, when opening it is input).
+  const linked = models.get(key);
+  if (linked !== undefined)
+    linked.model.begin(linked.recovery.encode(created.value), unedited);
   return { ...created } as KeptEntry<T>;
 }
 
@@ -185,7 +365,7 @@ function dropUnheld(key: string, held: Held): void {
   if (held.holders > 0 || retained(held)) return;
   setTimeout(() => {
     if (entries.get(key) === held && held.holders === 0 && !retained(held))
-      entries.delete(key);
+      drop(key);
   }, 0);
 }
 
@@ -200,11 +380,27 @@ export function disownKept(key: string): void {
   dropUnheld(key, held);
 }
 
-export function editKept<T>(key: string, session: number, value: T): void {
+/** Revision 37 (R40): "Discard instead": the session shows `value` again (no edit; the model has discarded its copies). */
+function resetKept<T>(key: string, session: number, value: T): void {
   const held = entries.get(key);
   if (held === undefined || held.session !== session) return;
   held.value = value;
+  publish(key, { kind: "restored", session });
+}
+
+/**
+ * An edit of the session. Revision 37 (R40): false, and nothing changes, while an update reload is being prepared (its model refuses it:
+ * nothing may be typed after the last save).
+ */
+export function editKept<T>(key: string, session: number, value: T): boolean {
+  const held = entries.get(key);
+  if (held === undefined || held.session !== session) return true;
+  const linked = models.get(key);
+  if (linked !== undefined && !linked.model.edit(linked.recovery.encode(value)))
+    return false;
+  held.value = value;
   held.revision += 1;
+  return true;
 }
 
 /** A save begins: the ticket names exactly the session, revision and flight submitted (null: another save of it is still pending). */
@@ -212,10 +408,20 @@ export function submitKept(key: string, session: number): KeptTicket | null {
   const held = entries.get(key);
   if (held === undefined || held.session !== session) return null;
   if (held.flight !== null) return null;
+  // Revision 37 (R40): its model's ticket, taken in the same step (none while an update reload is prepared: nothing is sent then).
+  const linked = models.get(key);
+  const recovery = linked?.model.submitting();
+  if (recovery === null) return null;
   flights += 1;
   held.submitting = held.revision;
   held.flight = flights;
-  return { key, session, revision: held.revision, flight: flights };
+  return {
+    key,
+    session,
+    revision: held.revision,
+    flight: flights,
+    ...(recovery ? { recovery } : {}),
+  };
 }
 
 /**
@@ -232,6 +438,9 @@ export function completeKept<T>(
     change?: (value: T) => T;
   } = {},
 ): "consumed" | "kept" | "gone" {
+  // Revision 37 (R40): the model acknowledges exactly what the save sent (newer input stays its own, dirty until saved); a failure covers nothing.
+  if (saved) void ticket.recovery?.succeeded();
+  else ticket.recovery?.failed();
   const held = entries.get(ticket.key);
   if (held === undefined || held.session !== ticket.session) return "gone";
   if (held.flight !== ticket.flight) return "gone";
@@ -246,12 +455,26 @@ export function completeKept<T>(
     });
     return "consumed";
   }
+  const before = held.value;
   if (outcome.change !== undefined)
     held.value = outcome.change(held.value as T);
   held.submitting = null;
   held.note = outcome.note ?? null;
   publish(ticket.key, { kind: "settled", session: ticket.session });
+  settleRecovery(ticket.key, before, held.value);
   return "kept";
+}
+
+/**
+ * Revision 38 (design assessment C5): what a settled save left in the session reaches its recoverable model in the same synchronous
+ * transition, only when it changes the recoverable input (a partial add's remaining selection; new ids or an attempt are not input), and
+ * never as the person's edit (`RecoverableModel.settle`, taken even while an update reload is prepared: the update waits for this save).
+ */
+function settleRecovery(key: string, before: unknown, after: unknown): void {
+  const linked = models.get(key);
+  if (linked === undefined || after === before) return;
+  const text = linked.recovery.encode(after);
+  if (text !== linked.recovery.encode(before)) linked.model.settle(text);
 }
 
 function publish(key: string, event: KeptEvent): void {
@@ -278,13 +501,20 @@ export function subscribeKept(
 export function forgetKept(): void {
   forgetTaskVisits();
   entries.clear();
+  for (const linked of models.values()) linked.model.retire();
+  models.clear();
 }
 
 /** What an editor holds of its session: the input shown, whether a save of it is pending, and the note a settled save left. */
+/** Revision 37 (R40): what a recoverable editor shows of its recovery (`RecoveryNotice`), and its actions. */
+export type KeptRecoveryState = RecoveryControls;
+
 export interface KeptInput<T> {
   value: T;
   busy: boolean;
   note: string | null;
+  /** Revision 37 (R40): null for an editor without a recovery codec. */
+  recovery: KeptRecoveryState | null;
   /** An edit by the person: moves the session's revision. */
   edit(change: (value: T) => T): void;
   setNote(note: string | null): void;
@@ -305,8 +535,14 @@ export function useKeptInput<T>(
   options: {
     consumed(value: T, detail: string | null): T | null;
     unedited?: boolean;
+    /** Revision 37 (R40): the editor's input is recoverable around an app-update reload (Q4). */
+    recover?: KeptRecovery<T>;
+    /** Revision 37 (R40): the editor shows a native editing state its value cannot hold (`RecoverableModel.probe`). */
+    unfinished?: () => boolean;
   },
 ): KeptInput<T> {
+  const port = useFormRecoveryPort();
+  const recover = options.recover;
   const visitOf = useTaskVisit();
   const attachTo = useTaskAttachment();
   const shownAt = useTaskScreenAt();
@@ -341,6 +577,33 @@ export function useKeptInput<T>(
   const session = useRef<number | null>(null);
   const latest = useRef({ initial, options });
   latest.current = { initial, options };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one model per key and identity (its codec is the first caller's)
+  const model = useMemo(
+    () =>
+      recover
+        ? linkKept(key, identity, recover, () => latest.current.initial(), {
+            opened: options.unedited === true,
+          })
+        : null,
+    [key, identity],
+  );
+  // Revision 37 (R40): the model is in the page's registry while the editor shows it, and is bound to the account's store once it is open.
+  useEffect(() => model?.show(), [model]);
+  useEffect(() => {
+    if (!model || !latest.current.options.unfinished) return;
+    model.probe(() => latest.current.options.unfinished?.() ?? false);
+    return () => model.probe(null);
+  }, [model]);
+  const view = useSyncExternalStore(
+    model?.subscribe ?? noSubscription,
+    model?.view ?? noView,
+    model?.view ?? noView,
+  );
+  const locked = useSyncExternalStore(
+    pageFormRegistry.subscribe,
+    pageFormRegistry.frozen,
+    pageFormRegistry.frozen,
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for when the editor opens (the key and identity are the reason)
   useEffect(() => {
     let owner = visitOf(identity);
@@ -393,6 +656,12 @@ export function useKeptInput<T>(
     const unheard = onRouteMoved(revive);
     const stop = subscribeKept(key, (event) => {
       if (event.session !== session.current) return;
+      if (event.kind === "restored") {
+        const entry = keptEntry<T>(key);
+        if (entry !== null)
+          setShown((s) => ({ ...s, key, value: entry.value }));
+        return;
+      }
       if (event.kind === "settled") {
         // The settled session as the entry now holds it (R1, revision 2): this editor may not be the one that took the save.
         const entry = keptEntry<T>(key);
@@ -427,16 +696,51 @@ export function useKeptInput<T>(
       session.current = null;
     };
   }, [key, identity]);
+  // Bound AFTER the session opened (R40): the look must find the session's start, not see it as input typed while it read.
+  useEffect(() => {
+    model?.bind(port);
+  }, [model, port]);
   const now = shown.key === key ? shown : peek();
+  const recovery: KeptRecoveryState | null =
+    model === null || recover === undefined
+      ? null
+      : {
+          view,
+          locked,
+          discard() {
+            // Admitted at the gesture or not at all (revision 38, R40-A): the session and the model show the start in this same step.
+            if (!model.accepting())
+              return Promise.resolve<DiscardResult>("failed");
+            const mine = session.current;
+            const fresh = latest.current.initial();
+            const result = model.discard(
+              options.unedited ? "" : recover.encode(fresh),
+            );
+            if (mine !== null) {
+              resetKept(key, mine, fresh);
+              setShown((s) => ({ ...s, key, value: fresh }));
+            }
+            return result;
+          },
+          retry: () => model.retry(),
+          checkAgain: model.checkAgain,
+          restoreAlternative: (copy) =>
+            model.restoreAlternative(copy.tabInstanceId),
+          discardAlternative: (copy) =>
+            model.discardAlternative(copy.tabInstanceId),
+        };
   return {
     ...now,
+    recovery,
     edit(change) {
       const entry = keptEntry<T>(key);
       const mine = session.current;
       const next = change(
         entry !== null && entry.session === mine ? entry.value : now.value,
       );
-      if (mine !== null) editKept(key, mine, next);
+      // Refused while an update reload is prepared (R40): what the editor shows stays what was saved.
+      if (mine !== null && !editKept(key, mine, next)) return;
+      if (mine === null && model?.frozen()) return;
       setShown((s) => ({ ...s, key, value: next }));
     },
     setNote(note) {
@@ -452,4 +756,37 @@ export function useKeptInput<T>(
       return ticket;
     },
   };
+}
+
+/**
+ * Revision 37 (R40; design assessment C1): a SCREEN that shows no editor of `key` yet looks for what the page before an update left to it.
+ * The new task's form opens only once a stage is chosen, so a look inside the form would never run while its picker is shown: the screen
+ * makes it instead, and a copy restored (only while nothing of `key` is held) becomes a session of this screen's visit, which the form then
+ * resumes at the stage the person had reached. `opened`: opening the editor is itself input. Returns the model's view.
+ */
+export function useKeptRecovery<T>(
+  key: string,
+  identity: string,
+  recover: KeptRecovery<T>,
+  start: () => T,
+  opened: boolean,
+): ModelView {
+  const port = useFormRecoveryPort();
+  const visitOf = useTaskVisit();
+  const latest = useRef({ start, visitOf });
+  latest.current = { start, visitOf };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one model per key and identity (its codec is the first caller's)
+  const model = useMemo(
+    () =>
+      linkKept(key, identity, recover, () => latest.current.start(), {
+        owner: () => latest.current.visitOf(identity),
+        opened,
+      }),
+    [key, identity],
+  );
+  // Bound, not shown: a screen that only looks is no editor (an editor that opens on what it restores shows the model).
+  useEffect(() => {
+    model.bind(port);
+  }, [model, port]);
+  return useSyncExternalStore(model.subscribe, model.view, model.view);
 }

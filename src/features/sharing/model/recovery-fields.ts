@@ -12,6 +12,8 @@ import {
  */
 export const policyFormContext = (resourceId: string) =>
   `sharing-policy:${resourceId}`;
+/** WEB-14a revision 37 (R40): one defaults layer form: its layer, household (or personal) and kind. */
+export const defaultsFormContext = (target: string) => `sharing-${target}`;
 export const templateFormContext = (
   kind: string,
   layer: "personal" | "household",
@@ -44,6 +46,31 @@ export function restoreTemplateDraft(
     if (raw === null) return { template: null };
     const template = parseTemplate(raw);
     return template === null ? null : { template };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WEB-14a revision 37 (R40): the policy editor's draft and the policy version it was composed against, as one recoverable text (version
+ * 1). A restored draft confers no authority: Save still sends `expected_version` = that base, so a policy changed meanwhile is a conflict.
+ */
+export function encodePolicyDraft(draft: {
+  policy: Policy;
+  base: number;
+}): string {
+  return JSON.stringify({ v: 1, policy: draft.policy, base: draft.base });
+}
+export function decodePolicyDraft(
+  text: string,
+): { policy: Policy; base: number } | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    if (raw === null || typeof raw !== "object" || raw.v !== 1) return null;
+    if (typeof raw.base !== "number" || !Number.isInteger(raw.base))
+      return null;
+    const policy = parsePolicy(raw.policy);
+    return policy === null ? null : { policy, base: raw.base };
   } catch {
     return null;
   }

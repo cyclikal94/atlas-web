@@ -7,6 +7,7 @@ import {
   createWriteFailureMarkers,
   type WriteFailureMarkers,
 } from "../engine/write-failure-marker";
+import type { AccountId } from "../model/types";
 import type { Outbox } from "../outbox/outbox";
 import {
   type CommandRegistry,
@@ -14,6 +15,7 @@ import {
   createCommandRegistry,
   createConflictHandlerRegistry,
 } from "../outbox/registries";
+import type { AccountStore } from "../store/port";
 
 /**
  * What every writer and every screen of ONE PAGE shares (P-4). No Dexie and no engine here: the page's protected tree and its leader
@@ -40,6 +42,11 @@ export type LeaderAttachment =
 export interface PageRuntime {
   readonly runtime: DataRuntime;
   readonly channel: SyncChannel;
+  /** The shared composition’s restricted recovery connection after schema supersession (WEB-14a). */
+  recoveryStore?(
+    account: AccountId,
+    incarnationId: string,
+  ): AccountStore | null;
 }
 
 export interface PageDataHost {
