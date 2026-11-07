@@ -21,6 +21,7 @@ import type {
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { rootGraph } from "../../support/tasks/graphs";
+import { SLOW } from "../../support/tasks/journal";
 import {
   fakeApi,
   ME,
@@ -290,28 +291,36 @@ describe("the dialog (A8, A9)", () => {
 });
 
 describe("the record card's gate", () => {
-  test("Mark done on a day still waiting opens the preview instead of a plain record; offline the plain record is queued", async () => {
-    const { t } = await mount({ preview: (r, pre) => answer(r, [item(pre)]) });
-    fireEvent.click(
-      within(
-        document.querySelector("[data-record-card]") as HTMLElement,
-      ).getByRole("button", { name: "Mark done" }),
-    );
-    await t.until(() => dialog() !== null);
-    expect(dialog()).not.toBeNull();
-    expect(t.drafts()).toEqual([]);
-    const offline = await mount({
-      preview: (r, pre) => answer(r, [item(pre)]),
-      online: false,
-    });
-    fireEvent.click(
-      within(
-        document.querySelectorAll("[data-record-card]")[1] as HTMLElement,
-      ).getByRole("button", { name: "Mark done" }),
-    );
-    await offline.t.until(() => offline.t.drafts().length === 1);
-    expect(offline.t.drafts().map((d) => d.kind)).toEqual(["record"]);
-  });
+  // WEB-18 maintenance merge of 2f42ac35 (7 November 2026): about 5 s on the merged tree under a loaded controller, the default limit; the
+  // suite's SLOW timeout (timing only, nothing asserted changes).
+  test(
+    "Mark done on a day still waiting opens the preview instead of a plain record; offline the plain record is queued",
+    SLOW,
+    async () => {
+      const { t } = await mount({
+        preview: (r, pre) => answer(r, [item(pre)]),
+      });
+      fireEvent.click(
+        within(
+          document.querySelector("[data-record-card]") as HTMLElement,
+        ).getByRole("button", { name: "Mark done" }),
+      );
+      await t.until(() => dialog() !== null);
+      expect(dialog()).not.toBeNull();
+      expect(t.drafts()).toEqual([]);
+      const offline = await mount({
+        preview: (r, pre) => answer(r, [item(pre)]),
+        online: false,
+      });
+      fireEvent.click(
+        within(
+          document.querySelectorAll("[data-record-card]")[1] as HTMLElement,
+        ).getByRole("button", { name: "Mark done" }),
+      );
+      await offline.t.until(() => offline.t.drafts().length === 1);
+      expect(offline.t.drafts().map((d) => d.kind)).toEqual(["record"]);
+    },
+  );
 
   test("MU-10C-32: an amount that would complete the day opens the preview; Wait keeps it typed; Start anyway sends it as the root's evidence and clears it", async () => {
     const root = await seededTask({

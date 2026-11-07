@@ -31,6 +31,7 @@ import {
   restrictedRootSpec,
   sharedSpec,
 } from "../../support/tasks/graphs";
+import { SLOW } from "../../support/tasks/journal";
 import {
   fakeApi,
   mountTasks,
@@ -549,40 +550,46 @@ describe("S-G9: the keyboard model and the tree's semantics", () => {
     expect(nodeItem(gid(21)).getAttribute("aria-expanded")).toBe("true");
   });
 
-  test("S-G9b: a key held with Alt, Ctrl or Meta is left to the browser (history Back, word moves); the plain key is the tree's", async () => {
-    const { t, graph } = await openDialog({ spec: sharedSpec() });
-    const root = nodeItem(graph.root_id);
-    const cook = nodeItem(gid(21));
-    cook.focus();
-    for (const modifier of ["altKey", "ctrlKey", "metaKey"] as const)
-      for (const key of [
-        "ArrowLeft",
-        "ArrowUp",
-        "ArrowDown",
-        "Home",
-        "End",
-        "Enter",
-        " ",
-      ]) {
-        const taken = !fireEvent.keyDown(cook, { key, [modifier]: true });
-        await t.settle();
-        expect(taken, `${modifier}+${key} is not taken`).toBe(false);
-        expect(document.activeElement, `${modifier}+${key}`).toBe(cook);
-        expect(cook.getAttribute("aria-expanded")).toBe("true");
-        expect(document.querySelector("[data-graph-inspect]")).toBeNull();
-      }
-    // Control: the same element and keys without a modifier are handled (prevented) and act.
-    expect(fireEvent.keyDown(cook, { key: "ArrowLeft" })).toBe(false);
-    await t.settle();
-    expect(cook.getAttribute("aria-expanded")).toBe("false");
-    expect(fireEvent.keyDown(cook, { key: "ArrowUp" })).toBe(false);
-    expect(document.activeElement).toBe(root);
-    // Shift is not a browser shortcut here and changes nothing about the tree's keys.
-    expect(fireEvent.keyDown(root, { key: "ArrowDown", shiftKey: true })).toBe(
-      false,
-    );
-    expect(document.activeElement).toBe(cook);
-  });
+  // WEB-18 maintenance merge of 2f42ac35 (7 November 2026): about 5 s on the merged tree under a loaded controller, the default limit; the
+  // suite's SLOW timeout (timing only, nothing asserted changes).
+  test(
+    "S-G9b: a key held with Alt, Ctrl or Meta is left to the browser (history Back, word moves); the plain key is the tree's",
+    SLOW,
+    async () => {
+      const { t, graph } = await openDialog({ spec: sharedSpec() });
+      const root = nodeItem(graph.root_id);
+      const cook = nodeItem(gid(21));
+      cook.focus();
+      for (const modifier of ["altKey", "ctrlKey", "metaKey"] as const)
+        for (const key of [
+          "ArrowLeft",
+          "ArrowUp",
+          "ArrowDown",
+          "Home",
+          "End",
+          "Enter",
+          " ",
+        ]) {
+          const taken = !fireEvent.keyDown(cook, { key, [modifier]: true });
+          await t.settle();
+          expect(taken, `${modifier}+${key} is not taken`).toBe(false);
+          expect(document.activeElement, `${modifier}+${key}`).toBe(cook);
+          expect(cook.getAttribute("aria-expanded")).toBe("true");
+          expect(document.querySelector("[data-graph-inspect]")).toBeNull();
+        }
+      // Control: the same element and keys without a modifier are handled (prevented) and act.
+      expect(fireEvent.keyDown(cook, { key: "ArrowLeft" })).toBe(false);
+      await t.settle();
+      expect(cook.getAttribute("aria-expanded")).toBe("false");
+      expect(fireEvent.keyDown(cook, { key: "ArrowUp" })).toBe(false);
+      expect(document.activeElement).toBe(root);
+      // Shift is not a browser shortcut here and changes nothing about the tree's keys.
+      expect(
+        fireEvent.keyDown(root, { key: "ArrowDown", shiftKey: true }),
+      ).toBe(false);
+      expect(document.activeElement).toBe(cook);
+    },
+  );
 });
 
 describe("S-G10: states and the map's conditions", () => {

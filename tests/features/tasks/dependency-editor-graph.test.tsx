@@ -11,6 +11,7 @@ import type {
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { rootGraph } from "../../support/tasks/graphs";
+import { SLOW } from "../../support/tasks/journal";
 import {
   fakeApi,
   ME,
@@ -523,6 +524,8 @@ describe("S-ED5..S-ED8: when Save is withheld, and why", () => {
     expect(save()).toBeDisabled();
   });
 
+  // WEB-18 maintenance merge of 2f42ac35 (7 November 2026): about 5 s on the merged tree under a loaded controller, the default limit; the
+  // suite's SLOW timeout (timing only, nothing asserted changes).
   test.each([
     [
       "an error",
@@ -540,5 +543,6 @@ describe("S-ED5..S-ED8: when Save is withheld, and why", () => {
       expect(state()).toBe("loading");
       expect(save()).toBeDisabled();
     },
+    SLOW.timeout,
   );
 });
