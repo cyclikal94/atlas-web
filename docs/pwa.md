@@ -479,13 +479,39 @@ key, for the displayed identity only.
   rename is saved under its base, so a household renamed since meets the server's conflict ("changed elsewhere") and is read again; the
   next Save is against the version read then.
 - When page memory drops a draft (a success, a Try again that completed the form, Rename's Escape) its session follows: with the dialog
-  shown the copies are discarded and the field shows its start; with none, the session ends. When another identity's memory is asked for,
-  the previous identity's household models leave the registry.
+  shown the copies are discarded and the field shows its start; with none, the session ends. A restored rename's base goes with its draft
+  (dropped, or reset by "Discard instead"), so a fresh rename afterwards is saved under the household's version of now. When another
+  identity's memory is asked for, the previous identity's household models leave the registry.
+- **Try again.** I7 is a FIRST-TRY rule. A Try again that is now known to have made the change completes the form as `docs/sharing.md`
+  D-12b-18 is written: it forgets the field's text even when the person typed a different name or username after the lost attempt (that
+  text is not saved by a later update). Whether a successful Try again should keep such newer text (I7 on the retry path), and whether a
+  Try again and Rename's Escape should be refused while an update reload is prepared (the latent DA-2 of the design assessment of
+  7 November 2026: no product path reaches it while the dialogs are modal), is decision **D-1**, reported to the coordinator and not yet
+  taken; the tests below pin the behaviour as written, so a change of that decision changes them visibly.
 - The household dialogs are modal, so while one is open the update banner behind it is inert: a person closes the dialog first (the draft
   stays), or another tab's update asks the page to save (the peer flush).
 
+**The rules and their tests, per input** (WEB-12b revision 2, Review 3 F-R3-1; the same map is machine-checked, with every writer of the
+drafts, bases and tickets, by `tests/static/household-draft-writers.test.ts`). "Rules" is
+`tests/features/sharing/households-submission-rules.test.tsx` (each title begins with the rule and the input), "M-1" is
+`households-recovery.test.tsx`:
+
+| Rule | New household | Rename | Invitation |
+| --- | --- | --- | --- |
+| R1 frozen: typing (or a directory choice) changes nothing, the press sends (and looks up) nothing | M-1 "while an update reload is being prepared…" (MU-6240, MU-6241) | Rules "R1 Rename…" ×2 (MU-6252, MU-6254) | Rules "R1 Invite…" ×3 (MU-6253, MU-6255, MU-6256) |
+| R2 I7: a durable success clears only what was sent | M-1 "I7: a create answered…" (MU-6242) | Rules "R2 Rename I7" (MU-6257) | Rules "R2 Invite I7" (MU-6258) |
+| O1 a durable success with nothing typed since clears the draft and its copy | Rules "O1 New household" | Rules "O1 Rename" (MU-6259) | Rules "O1 Invite" |
+| R3 only a durable success covers what was sent: uncertain, a definite refusal (and, for an invitation, a lookup that finds nobody) leave the input dirty; an accepted update saves it and nothing is resent after the reload | Rules "R3 New household…" ×3 (MU-6261) | Rules "R3 Rename…" ×3 (MU-6262) | Rules "R3 Invite…" ×4 (MU-6263) |
+| R4 a restored rename's base lives and dies with its draft | n/a | Rules "R4 Rename…" ×3 (MU-6264, MU-6265; MU-6243, MU-6244 in M-1) | n/a |
+| D-1 a successful Try again forgets text typed since (as D-12b-18 is written) | Rules "D-1 New household" (MU-6266) | Rules "D-1 Rename" (MU-6267) | Rules "D-1 Invite" (MU-6268) |
+
+The shared completion (`completeTicket`) is MU-6260 over every R3 test. Known asymmetries, listed in the writer inventory: a conflict forgets
+the base in page memory only (the model's last copy keeps it until the next keystroke; the server's version guard backstops it), and D-1
+above.
+
 Fixture evidence: `tests/features/sharing/households-recovery.test.tsx` (the production coordinator's accepted update, its save and its one
-reload, per dialog; mutants MU-6239..MU-6251), the household cases of `tests/features/recovery-owner-discard.test.tsx`,
+reload, per dialog; mutants MU-6239..MU-6251), `households-submission-rules.test.tsx` (the rules per input above; MU-6252..MU-6268), the
+household cases of `tests/features/recovery-owner-discard.test.tsx`,
 `recovery-owner-contract.test.tsx` and `recovery-check-again.test.tsx` (ported from `HouseholdsMinimal`), and the native household cases of
 `tests/e2e/fixture.pwa-editors.spec.ts` (revisions 52, 53 and 55 over the dialogs). The old screen's composition of several household
 forms on one page is gone: F-R52-1's overlapping looks, F-R52-2's three restored invitations and F-R54-1's late earlier restore are carried
