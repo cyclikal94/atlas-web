@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { List } from "../components/ui/list";
+import { updateReady, useAppUpdate } from "../lib/pwa/store";
 import type { ApiCompatibility } from "../session";
 import type { CapabilityId, CapabilityIssue } from "./capabilities";
 
@@ -26,6 +27,9 @@ export const API_EXPLANATION = {
     "This server didn't say which version it is, so Atlas can't be sure it is safe to use. Ask whoever runs Atlas for you to check it.",
 } as const;
 
+/** The update action (WEB-14a), loaded only when a newer version is ready: the initial chunk carries the import, not the component. */
+const UpdateReady = lazy(() => import("../lib/pwa/UpdateReady"));
+
 /** True when the API check, not a browser capability, is the reason to refuse. */
 export const isApiRefusal = (
   api: ApiCompatibility | undefined,
@@ -44,6 +48,7 @@ export function CompatibilityScreen({
   api?: ApiCompatibility;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
+  const update = useAppUpdate();
   useEffect(() => heading.current?.focus(), []);
   if (issues.length === 0 && isApiRefusal(api)) {
     return (
@@ -61,6 +66,11 @@ export function CompatibilityScreen({
         <p className="text-[14px] leading-[1.6] text-ink-1">
           {API_EXPLANATION[api.status]}
         </p>
+        {updateReady(update) ? (
+          <Suspense fallback={null}>
+            <UpdateReady />
+          </Suspense>
+        ) : null}
       </main>
     );
   }

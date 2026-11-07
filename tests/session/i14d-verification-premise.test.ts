@@ -2,6 +2,11 @@
 import { describe, expect, test } from "vitest";
 import type { KernelEvent } from "../integration/first-observer";
 import {
+  type DocumentSample,
+  judgeAbandonment,
+  judgeReplacement,
+} from "../integration/navigation-premise";
+import {
   judgeVerificationPremise,
   type VerificationPremiseInput,
 } from "../integration/verification-premise";
@@ -279,4 +284,196 @@ describe("I-14d premise over the real kernel: a target document's optional verif
       expect(stateOf(f).fences).toEqual({});
     });
   }
+});
+
+/**
+ * WEB-14a revision 46 (review r45 F-R45-I14D, R34-N1): the INTENTIONAL-ABANDONMENT witnesses (tests/integration/navigation-premise.ts,
+ * used by `abandonHarnessDocument`) over the real kernel, in both orders a navigation can meet a request and in the schedules its setup
+ * must refuse. The browser control freezes the request's continuation so that destruction always comes first; here the world holds the
+ * answer and the test chooses the order.
+ */
+const isProbe = (meta: EventMeta) =>
+  typeof meta.path === "string" && meta.path.endsWith("/probe");
+
+const sampleOf = (f: Fixture, page: FakePage): DocumentSample => {
+  const state = stateOf(f);
+  return {
+    bridged: true,
+    boot: page.session.bootId,
+    document: page.id,
+    settled: state.settled,
+    leases: state.leases as DocumentSample["leases"],
+    trace: traceOf(f, page),
+  };
+};
+
+const identityOf = (seed: SignedIn) => ({
+  account_id: seed.account,
+  epoch: seed.epoch,
+  session_id: seed.sessionId,
+});
+
+/** The seed with `count` probe requests issued and their answers held; returns the leases they hold, in creation order. */
+async function seedWithHeldRequests(count: number) {
+  const f = await newWorld();
+  const seed = await signedInPage(f);
+  age(f);
+  holdProbe(f);
+  for (let i = 0; i < count; i += 1)
+    void ordinaryGet(seed.page, seed.account, seed.epoch).catch(
+      () => undefined,
+    );
+  await f.world.runUntilIdle();
+  const issued = traceOf(f, seed.page)
+    .filter((e) => e.event === "request.issued")
+    .map((e) => e.data?.lease as string);
+  expect(issued).toHaveLength(count);
+  expect(leaseIds(f).sort()).toEqual([...issued].sort());
+  return { f, seed, issued };
+}
+
+describe("intentional abandonment over the real kernel (revision 46): before and after the navigation", () => {
+  test("the frozen owner is destroyed first: accepted before, the new boot still holds the lease, and its recovery displays the session", async () => {
+    const { f, seed, issued } = await seedWithHeldRequests(1);
+    const witness = {
+      lease: issued[0] as string,
+      boot: seed.page.session.bootId,
+      held: "probe",
+    };
+    const before = judgeAbandonment({
+      expected: identityOf(seed),
+      witness,
+      document: seed.page.id,
+      before: sampleOf(f, seed.page),
+      held: f.world.heldCount("Da", isProbe),
+    });
+    expect(before).toEqual({
+      problems: [],
+      waiting: [],
+      issued: expect.any(Number),
+    });
+    seed.page.destroy();
+    releaseProbe(f);
+    const verification = holdVerification(f);
+    const target = await bootTarget(f);
+    expect(
+      judgeReplacement({
+        expected: identityOf(seed),
+        witness,
+        document: seed.page.id,
+        after: sampleOf(f, target),
+      }),
+    ).toEqual([]);
+    // What the browser control then asserts: neutral, the exact lease captured, then recovered.
+    expect(target.session.view.get().kind).toBe("neutral");
+    const captured = traceOf(f, target).find(
+      (e) => e.event === "cover.committed" && e.data?.klass === "verification",
+    );
+    expect(captured?.data?.unresolved).toEqual([witness.lease]);
+    expect(verification.release()).toBe(1);
+    await f.world.runUntilIdle();
+    expect(target.session.view.get().kind).toBe("displaying");
+    expect(stateOf(f).leases[witness.lease]).toBeUndefined();
+    expect(stateOf(f).fences).toEqual({});
+  });
+
+  test("the live owner handles the answer before it is destroyed: accepted before, REJECTED after (the lease was retired: not an abandonment)", async () => {
+    const { f, seed, issued } = await seedWithHeldRequests(1);
+    const witness = {
+      lease: issued[0] as string,
+      boot: seed.page.session.bootId,
+      held: "probe",
+    };
+    expect(
+      judgeAbandonment({
+        expected: identityOf(seed),
+        witness,
+        document: seed.page.id,
+        before: sampleOf(f, seed.page),
+        held: f.world.heldCount("Da", isProbe),
+      }).problems,
+    ).toEqual([]);
+    // The other order: the answer reaches the live owner, which retires its lease, and only then is the document destroyed.
+    expect(releaseProbe(f)).toBe(1);
+    await f.world.runUntilIdle();
+    expect(leaseIds(f)).toEqual([]);
+    seed.page.destroy();
+    holdVerification(f);
+    const target = await bootTarget(f);
+    expect(target.session.view.get().kind).toBe("displaying");
+    expect(
+      judgeReplacement({
+        expected: identityOf(seed),
+        witness,
+        document: seed.page.id,
+        after: sampleOf(f, target),
+      }),
+    ).toEqual([
+      `after: the abandoned request's lease ${witness.lease} is not in the record (retired, or never written): this is not an abandonment`,
+    ]);
+  });
+
+  test("the request fails on the network while its owner is alive: the lease is retired, and the abandonment is REJECTED before navigating", async () => {
+    const f = await newWorld();
+    const seed = await signedInPage(f);
+    f.server.addRule({
+      match: (r) => r.path.endsWith("/probe"),
+      dropBeforeForward: true,
+    });
+    const failed = ordinaryGet(seed.page, seed.account, seed.epoch);
+    failed.catch(() => undefined);
+    await f.world.runUntilIdle();
+    await expect(failed).rejects.toThrow();
+    const [lease] = traceOf(f, seed.page)
+      .filter((e) => e.event === "request.issued")
+      .map((e) => e.data?.lease as string);
+    expect(typeof lease).toBe("string");
+    expect(
+      judgeAbandonment({
+        expected: identityOf(seed),
+        witness: {
+          lease: lease as string,
+          boot: seed.page.session.bootId,
+          held: "probe",
+        },
+        document: seed.page.id,
+        before: sampleOf(f, seed.page),
+        held: f.world.heldCount("Da", isProbe),
+      }).problems,
+    ).toEqual(
+      expect.arrayContaining([
+        `before: the abandoned request's lease ${lease} is not in the record (retired, or never written): this is not an abandonment`,
+        "before: the owner's trace retired the abandoned lease",
+        "before: the proxy holds no response for rule probe (the abandoned request's answer is not held)",
+      ]),
+    );
+  });
+
+  test("other requests are still outstanding: the witness waits for them; abandoned regardless, the next document verifies them all (why it must wait)", async () => {
+    const { f, seed, issued } = await seedWithHeldRequests(3);
+    const witness = {
+      lease: issued[2] as string,
+      boot: seed.page.session.bootId,
+      held: "probe",
+    };
+    const before = judgeAbandonment({
+      expected: identityOf(seed),
+      witness,
+      document: seed.page.id,
+      before: sampleOf(f, seed.page),
+      held: f.world.heldCount("Da", isProbe),
+    });
+    expect(before.problems).toEqual([]);
+    expect(before.waiting).toHaveLength(2);
+    seed.page.destroy();
+    releaseProbe(f);
+    holdVerification(f);
+    const target = await bootTarget(f);
+    const captured = traceOf(f, target).find(
+      (e) => e.event === "cover.committed" && e.data?.klass === "verification",
+    );
+    expect(
+      [...((captured?.data?.unresolved as string[]) ?? [])].sort(),
+    ).toEqual([...issued].sort());
+  });
 });

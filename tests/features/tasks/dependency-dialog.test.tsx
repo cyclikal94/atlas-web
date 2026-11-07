@@ -9,7 +9,7 @@ import {
 import { axe } from "jest-axe";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { TasksResult } from "../../../src/features/tasks/api";
+import type { TasksApi, TasksResult } from "../../../src/features/tasks/api";
 import { DEPENDENCY_COPY } from "../../../src/features/tasks/detail/Dependencies";
 import { usePreview } from "../../../src/features/tasks/detail/usePreview";
 import { TasksEnvProvider } from "../../../src/features/tasks/env";
@@ -20,6 +20,9 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
+import { present } from "../../support/present";
+import { rootGraph } from "../../support/tasks/graphs";
+import { SLOW } from "../../support/tasks/journal";
 import {
   fakeApi,
   ME,
@@ -35,6 +38,10 @@ import {
  * evidence: the preview is the stub's.
  */
 installMatchMedia({ width: 1440 });
+// WEB-18 revision 5 (Review 6 F-R13; design assessment option B): a wait that never completes under a mutant costs about 5 s (`until` is
+// 20 settles: a 4 s timer floor plus CPU), the vitest default, so a catch raced the time-out. Suite level, timing only: nothing asserted
+// changes.
+vi.setConfig({ testTimeout: SLOW.timeout });
 afterEach(() => {
   cleanup();
   forgetTaskMemory();
@@ -73,6 +80,32 @@ const row = () =>
 const dialog = () =>
   document.querySelector("[data-dependency-dialog]") as HTMLElement | null;
 
+/**
+ * WEB-18 FIXTURE ADAPTATION (labelled for the reviewer): the editor's own depth-one graph read answered with the root alone (no direct
+ * prerequisite), on the cached occurrence version and with `strict()`'s rule; the dialog's full read stays unavailable (`uncertain`).
+ * Shared by `mount()` and by every case here that opens the editor through `mountTasks` itself (WEB-18 revision 1, review F-R1): without
+ * it the editor also reads "loading" for want of that read, which can hide what a case says it isolates.
+ */
+function rootAloneAtDepthOne(
+  root: SeededTask,
+  strict: () => boolean,
+): TasksApi["readDependencyGraph"] {
+  return async (_id, maxDepth) => {
+    if (maxDepth !== 1) return { ok: false, kind: "uncertain" };
+    const occurrence = root.rows.find((r) => r.id === root.occurrenceId);
+    return {
+      ok: true,
+      value: rootGraph({
+        root: root.occurrenceId,
+        task: root.taskId,
+        title: root.rows[0]?.label ?? "",
+        version: occurrence?.version ?? 1,
+        strict: strict(),
+      }),
+    };
+  };
+}
+
 async function mount(options: {
   root?: SeededTask;
   prerequisite?: SeededTask;
@@ -90,6 +123,17 @@ async function mount(options: {
     (await seededTask({ title: "Run the washing machine" }));
   const api = fakeApi({
     readDependencies: async () => options.preview(root, prerequisite),
+    /*
+     * WEB-18 FIXTURE ADAPTATION (labelled for the reviewer; no assertion of this file changed). Since D-18-7 the editor saves only on its
+     * own fresh depth-one graph read, so this helper answers that read with the root alone (no direct prerequisite), on the cached
+     * occurrence version and with the preview's strict rule: the server state these WEB-10c cases assume, in which the editor starts
+     * empty. The dialog's full read stays unavailable (`uncertain`), so these cases keep exercising the preview's ordered list (now the
+     * labelled fallback, D-18-9). The graph itself is qualified in the WEB-18 suites.
+     */
+    readDependencyGraph: rootAloneAtDepthOne(root, () => {
+      const shown = options.preview(root, prerequisite);
+      return shown.ok ? shown.value.strict : false;
+    }),
   });
   const t = await mountTasks({
     path: path(root),
@@ -109,11 +153,16 @@ async function mount(options: {
 describe("the detail's row (A8)", () => {
   test("nothing waited for: says so, and an editor may set what it waits for", async () => {
     await mount({ preview: (root) => answer(root, []) });
-    expect(row()).toHaveTextContent(DEPENDENCY_COPY.none);
+    expect(present(row(), "the dependency row")).toHaveTextContent(
+      DEPENDENCY_COPY.none,
+    );
     expect(
-      within(row() as HTMLElement).getByRole("button", {
-        name: DEPENDENCY_COPY.set,
-      }),
+      present(
+        within(present(row(), "the dependency row")).queryByRole("button", {
+          name: DEPENDENCY_COPY.set,
+        }),
+        "the 'Set' button",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -132,10 +181,10 @@ describe("the detail's row (A8)", () => {
           },
         ]),
     });
-    expect(row()).toHaveTextContent(
+    expect(present(row(), "the dependency row")).toHaveTextContent(
       DEPENDENCY_COPY.progress(1, 2, DEPENDENCY_COPY.notHere),
     );
-    expect(row()).not.toHaveTextContent(away);
+    expect(present(row(), "the dependency row")).not.toHaveTextContent(away);
   });
 
   test("offline: it can be checked when online, and nothing is read", async () => {
@@ -143,7 +192,9 @@ describe("the detail's row (A8)", () => {
       preview: (root) => answer(root, []),
       online: false,
     });
-    expect(row()).toHaveTextContent(DEPENDENCY_COPY.offline);
+    expect(present(row(), "the dependency row")).toHaveTextContent(
+      DEPENDENCY_COPY.offline,
+    );
     expect(api.calls.readDependencies).toBeUndefined();
   });
 
@@ -151,9 +202,11 @@ describe("the detail's row (A8)", () => {
     await mount({
       preview: (root, pre) => answer(root, [item(pre)], { unavailable: true }),
     });
-    expect(row()).toHaveTextContent(DEPENDENCY_COPY.unavailable);
+    expect(present(row(), "the dependency row")).toHaveTextContent(
+      DEPENDENCY_COPY.unavailable,
+    );
     expect(
-      within(row() as HTMLElement).queryByRole("button", {
+      within(present(row(), "the dependency row")).queryByRole("button", {
         name: DEPENDENCY_COPY.set,
       }),
     ).toBeNull();
@@ -171,21 +224,36 @@ describe("the dialog (A8, A9)", () => {
         dialog()?.dataset.dependencyDialog === "ready" &&
         (dialog()?.textContent ?? "").includes("Run the washing machine"),
     );
-    const list = document.querySelector(
-      "[data-dependency-list]",
-    ) as HTMLElement;
+    const list = present(
+      document.querySelector<HTMLElement>("[data-dependency-list]"),
+      "the list",
+    );
     expect(list.tagName).toBe("OL");
-    const items = within(list).getAllByRole("listitem");
+    const items = within(list).queryAllByRole("listitem");
     expect(items).toHaveLength(2);
-    expect(items[0]).toHaveTextContent("Run the washing machine");
-    expect(items[0]).toHaveTextContent(DEPENDENCY_COPY.toDo);
-    expect(items[1]).toHaveTextContent(DEPENDENCY_COPY.thisTask);
-    const modes = screen.getByRole("radiogroup", {
-      name: DEPENDENCY_COPY.modesName,
-    });
-    expect(within(modes).getAllByRole("radio")).toHaveLength(3);
+    expect(present(items[0], "the first item")).toHaveTextContent(
+      "Run the washing machine",
+    );
+    expect(present(items[0], "the first item")).toHaveTextContent(
+      DEPENDENCY_COPY.toDo,
+    );
+    expect(present(items[1], "the second item")).toHaveTextContent(
+      DEPENDENCY_COPY.thisTask,
+    );
+    const modes = present(
+      screen.queryByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+      "the completion modes",
+    );
+    expect(within(modes).queryAllByRole("radio")).toHaveLength(3);
     expect(
-      (await axe(dialog()?.closest("[role=dialog]") as HTMLElement)).violations,
+      (
+        await axe(
+          present(
+            dialog()?.closest<HTMLElement>("[role=dialog]"),
+            "the dialog",
+          ),
+        )
+      ).violations,
     ).toEqual([]);
     fireEvent.click(
       within(modes).getByRole("radio", { name: DEPENDENCY_COPY.completeAll }),
@@ -213,21 +281,30 @@ describe("the dialog (A8, A9)", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
-    const modes = screen.getByRole("radiogroup", {
-      name: DEPENDENCY_COPY.modesName,
-    });
+    const modes = present(
+      screen.queryByRole("radiogroup", { name: DEPENDENCY_COPY.modesName }),
+      "the completion modes",
+    );
     expect(
       within(modes)
-        .getAllByRole("radio")
+        .queryAllByRole("radio")
         .map((r) => r.textContent),
     ).toEqual([DEPENDENCY_COPY.wait]);
     expect(
-      document.querySelector("[data-mode-reason=advisory_override]"),
+      present(
+        document.querySelector("[data-mode-reason=advisory_override]"),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.strict("Hang the washing"));
     expect(
-      document.querySelector("[data-mode-reason=complete_prerequisites]"),
+      present(
+        document.querySelector("[data-mode-reason=complete_prerequisites]"),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.completeAllWhy.cannot_complete);
-    expect(dialog()).toHaveTextContent(DEPENDENCY_COPY.cantHere);
+    expect(present(dialog(), "the dialog")).toHaveTextContent(
+      DEPENDENCY_COPY.cantHere,
+    );
   });
 
   test("everything done: the primary act is Mark done (require_satisfied)", async () => {
@@ -252,28 +329,36 @@ describe("the dialog (A8, A9)", () => {
 });
 
 describe("the record card's gate", () => {
-  test("Mark done on a day still waiting opens the preview instead of a plain record; offline the plain record is queued", async () => {
-    const { t } = await mount({ preview: (r, pre) => answer(r, [item(pre)]) });
-    fireEvent.click(
-      within(
-        document.querySelector("[data-record-card]") as HTMLElement,
-      ).getByRole("button", { name: "Mark done" }),
-    );
-    await t.until(() => dialog() !== null);
-    expect(dialog()).not.toBeNull();
-    expect(t.drafts()).toEqual([]);
-    const offline = await mount({
-      preview: (r, pre) => answer(r, [item(pre)]),
-      online: false,
-    });
-    fireEvent.click(
-      within(
-        document.querySelectorAll("[data-record-card]")[1] as HTMLElement,
-      ).getByRole("button", { name: "Mark done" }),
-    );
-    await offline.t.until(() => offline.t.drafts().length === 1);
-    expect(offline.t.drafts().map((d) => d.kind)).toEqual(["record"]);
-  });
+  // WEB-18 maintenance merge of 2f42ac35 (7 November 2026): about 5 s on the merged tree under a loaded controller, the default limit; the
+  // suite's SLOW timeout (timing only, nothing asserted changes).
+  test(
+    "Mark done on a day still waiting opens the preview instead of a plain record; offline the plain record is queued",
+    SLOW,
+    async () => {
+      const { t } = await mount({
+        preview: (r, pre) => answer(r, [item(pre)]),
+      });
+      fireEvent.click(
+        within(
+          document.querySelector("[data-record-card]") as HTMLElement,
+        ).getByRole("button", { name: "Mark done" }),
+      );
+      await t.until(() => dialog() !== null);
+      expect(dialog()).not.toBeNull();
+      expect(t.drafts()).toEqual([]);
+      const offline = await mount({
+        preview: (r, pre) => answer(r, [item(pre)]),
+        online: false,
+      });
+      fireEvent.click(
+        within(
+          document.querySelectorAll("[data-record-card]")[1] as HTMLElement,
+        ).getByRole("button", { name: "Mark done" }),
+      );
+      await offline.t.until(() => offline.t.drafts().length === 1);
+      expect(offline.t.drafts().map((d) => d.kind)).toEqual(["record"]);
+    },
+  );
 
   test("MU-10C-32: an amount that would complete the day opens the preview; Wait keeps it typed; Start anyway sends it as the root's evidence and clears it", async () => {
     const root = await seededTask({
@@ -296,7 +381,9 @@ describe("the record card's gate", () => {
       }),
     );
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
-    expect(dialog()).toHaveTextContent(DEPENDENCY_COPY.evidenceKept);
+    expect(present(dialog(), "the dialog")).toHaveTextContent(
+      DEPENDENCY_COPY.evidenceKept,
+    );
     fireEvent.click(
       screen.getByRole("button", { name: DEPENDENCY_COPY.close }),
     );
@@ -341,23 +428,34 @@ describe("the editor (D-10c-7)", () => {
       preview: (r, pre) => answer(r, [item(pre)], { strict: true }),
     });
     fireEvent.click(
-      within(row() as HTMLElement).getByRole("button", {
+      within(present(row(), "the dependency row")).getByRole("button", {
         name: DEPENDENCY_COPY.set,
       }),
     );
     await t.until(
       () => document.querySelector("[data-dependency-editor]") !== null,
     );
-    const editor = document.querySelector(
-      "[data-dependency-editor]",
-    ) as HTMLElement;
+    const editor = present(
+      document.querySelector<HTMLElement>("[data-dependency-editor]"),
+      "the editor",
+    );
+    // WEB-18 FIXTURE ADAPTATION (labelled; the assertions below are unchanged): since D-18-7 the editor's start is built from its own
+    // depth-one read, so its start is judged once that read has answered (before it, the editor is "loading" and shows nothing built).
+    await t.until(
+      () => editor.getAttribute("data-dependency-editor") !== "loading",
+    );
+    expect(editor.getAttribute("data-dependency-editor")).toBe("open");
     expect(editor).toHaveTextContent(DEPENDENCY_COPY.editorEmpty);
     expect(document.body).toHaveTextContent(
       DEPENDENCY_COPY.editorLead("Hang the washing"),
     );
     expect(
-      (screen.getByLabelText(DEPENDENCY_COPY.strictLabel) as HTMLInputElement)
-        .checked,
+      present(
+        screen.queryByLabelText(
+          DEPENDENCY_COPY.strictLabel,
+        ) as HTMLInputElement | null,
+        "the strict choice",
+      ).checked,
     ).toBe(true);
     // The cached tasks are read when the editor opens.
     await t.until(() =>
@@ -381,13 +479,16 @@ describe("the editor (D-10c-7)", () => {
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.add }));
     await t.settle();
     expect(
-      document.querySelector(
-        `[data-editor-item="${prerequisite.occurrenceId}"]`,
+      present(
+        document.querySelector(
+          `[data-editor-item="${prerequisite.occurrenceId}"]`,
+        ),
+        "the added item",
       ),
     ).toHaveTextContent("Run the washing machine");
-    expect(document.querySelector("[data-editor-counter]")).toHaveTextContent(
-      DEPENDENCY_COPY.counter(1),
-    );
+    expect(
+      present(document.querySelector("[data-editor-counter]"), "the counter"),
+    ).toHaveTextContent(DEPENDENCY_COPY.counter(1));
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.save }));
     await t.until(() => t.drafts().length === 1);
     expect(t.bodies()[0]?.command.command).toEqual({
@@ -434,7 +535,10 @@ describe("conflicts (A11)", () => {
         document.querySelector("[data-completion-conflict=satisfied]") !== null,
     );
     expect(
-      document.querySelector("[data-completion-conflict]"),
+      present(
+        document.querySelector("[data-completion-conflict]"),
+        "the completion conflict",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.cause.satisfied);
     // The submitted operation is read from the queue (its durable body).
     await t.until(
@@ -492,7 +596,10 @@ describe("conflicts (A11)", () => {
       ],
     });
     await t.until(() => document.querySelector("[data-set-conflict]") !== null);
-    const block = document.querySelector("[data-set-conflict]") as HTMLElement;
+    const block = present(
+      document.querySelector<HTMLElement>("[data-set-conflict]"),
+      "the conflict notice",
+    );
     expect(block).toHaveTextContent(DEPENDENCY_COPY.setConflict);
     await t.until(
       () =>
@@ -582,7 +689,10 @@ describe("R4: one admission for a new and a replacing save", () => {
       document.querySelector(`[data-editor-item="${pre.occurrenceId}"]`),
     ).not.toBeNull();
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
     expect(document.body).toHaveTextContent(DEPENDENCY_COPY.editorUnavailable);
     expect(t.drafts().map((d) => d.local_id)).toEqual([
@@ -631,7 +741,10 @@ describe("R4: one admission for a new and a replacing save", () => {
     await keepEditing(t);
     expect(editor()).toBe("denied");
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
   });
 
@@ -642,11 +755,20 @@ describe("R4: one admission for a new and a replacing save", () => {
     const fresh = new Promise<void>((resolve) => {
       release = resolve;
     });
+    // WEB-18 revision 1 (review F-R1, MU-3042): the editor's own depth-one read answers as in `mount()`, so the outstanding PREVIEW
+    // re-read below is the only reason the editor is still "loading" (the premise this case exists to prove; asserted before release).
+    let depthOneAnswered = 0;
+    const depthOne = rootAloneAtDepthOne(root, () => false);
     const api = fakeApi({
       readDependencies: async () => {
         reads += 1;
         if (reads > 1) await fresh;
         return answer(root, [], { unavailable: reads > 1 });
+      },
+      readDependencyGraph: async (id, maxDepth) => {
+        const out = await depthOne(id, maxDepth);
+        if (maxDepth === 1) depthOneAnswered += 1;
+        return out;
       },
     });
     const t = await mountTasks({ path: path(root), rows: root.rows, api });
@@ -660,15 +782,25 @@ describe("R4: one admission for a new and a replacing save", () => {
     await t.settle();
     // The re-read is outstanding: the preview the editor was opened from (nothing private then) admits nothing.
     expect(reads, "the editor read the preview again").toBeGreaterThan(before);
+    expect(
+      depthOneAnswered,
+      "premise: the editor's own depth-one read has answered",
+    ).toBeGreaterThan(0);
     expect(editor()).toBe("loading");
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
     release();
     await t.until(() => editor() === "unavailable");
     expect(editor()).toBe("unavailable");
     expect(
-      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+      present(
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.save }),
+        "Save",
+      ),
     ).toBeDisabled();
   });
 });
@@ -777,7 +909,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         },
       } as never,
     });
-  const pane = () => within(dialog()?.closest("[role=dialog]") as HTMLElement);
+  const pane = () =>
+    within(
+      present(dialog()?.closest<HTMLElement>("[role=dialog]"), "the dialog"),
+    );
   const review = async (t: Awaited<ReturnType<typeof mount>>["t"]) => {
     await t.until(
       () =>
@@ -804,7 +939,7 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         name: DEPENDENCY_COPY.startAnyway,
       });
       if (!strict) {
-        expect(button).toBeEnabled();
+        expect(present(button, "the button")).toBeEnabled();
         fireEvent.click(button as HTMLElement);
         await t.until(() => t.drafts().some((d) => d.local_id !== local));
         expect(
@@ -820,7 +955,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         pane().queryByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
       ).toBeNull();
       expect(
-        pane().getByRole("radio", { name: DEPENDENCY_COPY.wait }),
+        present(
+          pane().queryByRole("radio", { name: DEPENDENCY_COPY.wait }),
+          "DEPENDENCY_COPY.wait",
+        ),
       ).toBeChecked();
       await t.settle();
       expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
@@ -847,7 +985,7 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         name: DEPENDENCY_COPY.completeAll,
       });
       if (why === "none") {
-        expect(button).toBeEnabled();
+        expect(present(button, "the button")).toBeEnabled();
         return;
       }
       expect(button).toBeNull();
@@ -869,7 +1007,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
     // Everything done: Mark done is offered.
     expect(
-      pane().getByRole("button", { name: DEPENDENCY_COPY.markDone }),
+      present(
+        pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+        "DEPENDENCY_COPY.markDone",
+      ),
     ).toBeEnabled();
     // It becomes unmet: no remembered plain completion slips through.
     done = false;
@@ -887,7 +1028,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
       pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
     );
     expect(
-      pane().getByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+      present(
+        pane().queryByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+        "DEPENDENCY_COPY.startAnyway",
+      ),
     ).toBeEnabled();
     // The rule becomes strict while it is open: the choice is Wait, and nothing can be sent.
     strict = true;
@@ -921,7 +1065,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     // "Review and send again" opens with the plain completion (the cause was "everything is done now").
     await review(t);
     expect(
-      pane().getByRole("button", { name: DEPENDENCY_COPY.markDone }),
+      present(
+        pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+        "DEPENDENCY_COPY.markDone",
+      ),
     ).toBeEnabled();
     done = false;
     t.rerender(tasksEnv(t.api, { online: false }));
@@ -939,7 +1086,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     ])
       expect(pane().queryByRole("button", { name })).toBeNull();
     expect(
-      pane().getByRole("radio", { name: DEPENDENCY_COPY.wait }),
+      present(
+        pane().queryByRole("radio", { name: DEPENDENCY_COPY.wait }),
+        "DEPENDENCY_COPY.wait",
+      ),
     ).toBeChecked();
     expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
       [local, "version_conflict"],
@@ -994,7 +1144,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
         expect(t.drafts()).toEqual([]);
         expect(dialog()).not.toBeNull();
         expect(
-          document.querySelector("[data-dependency-message]"),
+          present(
+            document.querySelector("[data-dependency-message]"),
+            "the message",
+          ),
         ).toHaveTextContent(DEPENDENCY_COPY.changedWhileSaving);
       } else {
         expect(t.drafts().map((d) => d.kind)).toEqual([
@@ -1035,9 +1188,10 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     fireEvent.click(
       pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
     );
-    const button = pane().getByRole("button", {
-      name: DEPENDENCY_COPY.startAnyway,
-    });
+    const button = present(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+      "'Start anyway'",
+    );
     expect(button).toBeDisabled();
     fireEvent.click(button);
     await t.settle();
@@ -1157,7 +1311,10 @@ describe("R15: the root's admission at every entry point", () => {
         goal: { kind: "numeric", minimum: "20", maximum: null, unit: "pages" },
       },
     });
-  const pane = () => within(dialog()?.closest("[role=dialog]") as HTMLElement);
+  const pane = () =>
+    within(
+      present(dialog()?.closest<HTMLElement>("[role=dialog]"), "the dialog"),
+    );
   const refused = (
     root: SeededTask,
     local: string,
@@ -1199,10 +1356,16 @@ describe("R15: the root's admission at every entry point", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
     await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
-    const done = pane().getByRole("button", { name: DEPENDENCY_COPY.markDone });
+    const done = present(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+      "'Mark done'",
+    );
     expect(done).toBeDisabled();
     expect(
-      document.querySelector('[data-mode-reason="require_satisfied"]'),
+      present(
+        document.querySelector('[data-mode-reason="require_satisfied"]'),
+        "the reason",
+      ),
     ).toHaveTextContent(DEPENDENCY_COPY.rootWhy);
     fireEvent.click(done);
     await t.settle();
@@ -1255,7 +1418,7 @@ describe("R15: the root's admission at every entry point", () => {
         ]);
         return;
       }
-      expect(button).toBeEnabled();
+      expect(present(button, "the button")).toBeEnabled();
       fireEvent.click(button as HTMLElement);
       await t.until(() => t.drafts().some((d) => d.local_id !== local));
       const queued = t.drafts().filter((d) => d.status === "queued");
@@ -1313,7 +1476,10 @@ describe("R15: the root's admission at every entry point", () => {
       if (changes) {
         expect(t.drafts()).toEqual([]);
         expect(
-          document.querySelector("[data-dependency-message]"),
+          present(
+            document.querySelector("[data-dependency-message]"),
+            "the message",
+          ),
         ).toHaveTextContent(DEPENDENCY_COPY.changedWhileSaving);
       } else
         expect(t.bodies().map((b) => b.command.command.mode)).toEqual([

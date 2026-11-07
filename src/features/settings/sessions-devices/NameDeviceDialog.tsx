@@ -3,7 +3,15 @@ import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
-import { type DeviceRow, type Result, useSession } from "../../../session";
+import { useRecoverableEditor } from "../../../lib/form-recovery/editor";
+import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
+import {
+  type DeviceRow,
+  type Result,
+  useIdentity,
+  useSession,
+} from "../../../session";
 import { isOnlineNow, useOnline } from "../../authentication/use-online";
 import {
   CANCEL,
@@ -29,7 +37,7 @@ import {
 } from "./label-copy";
 import { checkDeviceName, deviceDisplay, isolate } from "./labels";
 import { mayHaveChanged } from "./outcome";
-import { type Interaction, reconcileLists } from "./ownership";
+import { type Interaction, reconcileLists, scopeOf } from "./ownership";
 import { untilSent } from "./until-sent";
 
 type Phase =
@@ -54,7 +62,17 @@ type Phase =
  * Review R6 (revision 8): a submission owns only the draft it submitted. Every accepted edit moves `revision` on, and a submission
  * keeps the revision it was taken from. A completed save or removal closes the dialog only if the draft is still that one;
  * otherwise the newer text stays in the field, unsent, with its focus, and the person is told what the earlier request did.
+ *
+ * WEB-14a revision 39 (design assessment DA-DEVICE-NAME, C4, I10): the typed name is recoverable input of the displayed identity, per
+ * device (`deviceNameContext`): only its raw text (never a request, a result or an interaction), saved before an app-update reload and
+ * offered again by the devices list (`DevicesSection`), which opens this dialog on it once the device is listed with naming. The sync
+ * control keeps it for the visit (`keep`), Cancel/Close/Escape discard it. Save, Remove name and Enter are admitted at the gesture (none
+ * while an update reload is being prepared: the name's ticket), and an admitted request is waited for until its outcome. Restoring never
+ * sends anything; the interaction and revision rules above are unchanged.
  */
+export const deviceNameContext = (deviceId: string) =>
+  `device-name:${deviceId}`;
+
 export function NameDeviceDialog({
   device,
   interaction,
@@ -69,7 +87,8 @@ export function NameDeviceDialog({
   const announcer = useAnnouncer();
   const online = useOnline();
   const display = deviceDisplay(device);
-  const [value, setValue] = useState(display.named ? display.title : "");
+  const initial = display.named ? display.title : "";
+  const [value, setValue] = useState(initial);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const inflight = useRef(false);
   /** The draft's revision: moved on synchronously by every accepted edit, so an edit away and back is still a later draft. */
@@ -78,9 +97,30 @@ export function NameDeviceDialog({
   const formId = useId();
   const problemId = useId();
   const describedId = useId();
+  const touched = useRef(false);
+  const recovery = useRecoverableEditor<string>({
+    identity: scopeOf(useIdentity()) ?? "-",
+    context: deviceNameContext(device.id),
+    encode: (text) => text,
+    decode: (text) => text,
+    start: () => initial,
+    untouched: () => !touched.current,
+    restored: (text) => {
+      revision.current += 1;
+      setValue(text);
+    },
+    reset: (text) => {
+      touched.current = false;
+      revision.current += 1;
+      setValue(text);
+    },
+  });
 
   const send = async (name: string | null) => {
     if (inflight.current || !isOnlineNow() || !interaction.current()) return;
+    // Revision 39 (DA-DEVICE-NAME): admitted now, or nothing is sent.
+    const ticket = recovery.submitting();
+    if (ticket === null) return;
     inflight.current = true;
     const submitted = revision.current;
     setPhase({ kind: "busy" });
@@ -92,6 +132,9 @@ export function NameDeviceDialog({
       { isCurrent: interaction.current },
     ).catch(() => null);
     inflight.current = false;
+    // The name's ticket, whoever is still looking: only a confirmed change consumed what was sent (a later edit stays unfinished).
+    if (result?.ok && result.value !== "gone") void ticket.succeeded();
+    else ticket.failed();
     // First what the server may have changed (both lists show the name), whoever is still looking: the person may have closed the
     // dialog after the request was sent, and that does not undo it.
     if (mayHaveChanged(result)) reconcileLists(session, interaction.scope);
@@ -157,13 +200,15 @@ export function NameDeviceDialog({
 
   const busy = phase.kind === "busy";
   const gone = phase.kind === "message" && phase.gone === true;
-  const blocked = busy
-    ? "Saving…"
-    : !online
-      ? NAME_OFFLINE_REASON
-      : gone
-        ? NAME_GONE
-        : null;
+  const blocked = recovery.locked
+    ? UNAVAILABLE_WHILE_RELOADING
+    : busy
+      ? "Saving…"
+      : !online
+        ? NAME_OFFLINE_REASON
+        : gone
+          ? NAME_GONE
+          : null;
   const title = display.named
     ? renameTitle(isolate(display.title))
     : device.current
@@ -174,6 +219,7 @@ export function NameDeviceDialog({
     <Dialog
       open
       onClose={onClose}
+      onRetainDraft={() => recovery.keep(value)}
       title={title}
       footer={
         <div className="flex flex-wrap items-center gap-2">
@@ -212,6 +258,7 @@ export function NameDeviceDialog({
         ) : display.named && display.label ? (
           <p className="text-ink-2 [overflow-wrap:anywhere]">{display.label}</p>
         ) : null}
+        <RecoveryNotice recovery={recovery} firstFieldRef={field} />
         <Input
           ref={field}
           label={NAME_LABEL}
@@ -226,6 +273,8 @@ export function NameDeviceDialog({
               : describedId
           }
           onChange={(event) => {
+            if (!recovery.edit(event.target.value)) return;
+            touched.current = true;
             revision.current += 1;
             setValue(event.target.value);
             if (phase.kind === "invalid") setPhase({ kind: "idle" });

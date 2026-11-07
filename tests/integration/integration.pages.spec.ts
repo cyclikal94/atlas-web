@@ -1,9 +1,9 @@
 import type { Page } from "@playwright/test";
 import {
+  abandonHarnessDocument,
   bootHarness,
   expect,
   finishSignIn,
-  freshHarnessDocument,
   identityReadsAtProxy,
   liftedAt,
   proxy,
@@ -1803,7 +1803,19 @@ test.describe("I-14d (revision 11), premise controls (revision 33): the schedule
     const verification = await verificationRule();
     // The navigation of revision 11: the same page, a new document. The old document's request is abandoned before its owner could
     // retire it (frozen), as review 34's Chromium navigation abandoned the display reads.
-    await freshHarnessDocument(seed, a);
+    // WEB-14a revision 46 (review r45 F-R45-I14D): this navigation's premise is an INTENTIONAL abandonment, the opposite of the clean
+    // replacement (`freshHarnessDocument`, which requires every request lease retired and so could never begin here). The witness names
+    // the frozen request's lease, its owner's boot and the rule holding its answer; the helper checks them, and that the display reads
+    // retired, before navigating, and that the new document is a new boot still holding that lease, after.
+    const abandonment = await abandonHarnessDocument(seed, a, {
+      lease: orphan as string,
+      boot: seedBoot,
+      held: held.id,
+    });
+    await test.info().attach("i14d-abandonment-witness.json", {
+      body: JSON.stringify(abandonment, null, 2),
+      contentType: "application/json",
+    });
     const token = await markDocument(seed);
     await untilHeld(verification.id);
     const state = (await records(seed)).auth_state;

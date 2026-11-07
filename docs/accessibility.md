@@ -23,15 +23,27 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 
 - **Skip link** first in tab order, visible on focus, moving focus to `<main id="main" tabindex="-1">` without changing the URL fragment (which carries the sign-in grant).
 - **One primary navigation** exposed at a time (rail, icon rail or tab bar), with `aria-current="page"`, heavier weight and an accent bar on the active item: colour is never the only cue (finding F6).
-- **Route focus:** after an in-app navigation focus moves to the page heading, never to `<body>`. The initial load does not steal focus.
+- **Route focus:** after an in-app navigation focus moves to the page heading, never to `<body>`. The initial load does not steal focus. It is a fallback
+  (WEB-14a revision 19): focus placed after the navigation resolved and before the heading is focused (a field, an update prompt's action, a dialog) is kept.
 - **Navigation and status stay in reach on long pages.** The document scrolls (so keyboard scrolling, find in page, scroll restoration and the mobile browser toolbar behave natively) and the chrome does not scroll away with it: the rail is sticky and one viewport tall, and on mobile the header and the bottom tabs are sticky. A screen supplies ordinary long content in `<main>` and does nothing else. In a window too short for every destination the rail's navigation scrolls inside it while the status below stays put. Sticky bars cover part of the viewport, so `scroll-padding` on the root (`src/app/shell/chrome-insets.ts`, measured because the header can wrap) keeps focus, the skip link's target and route focus clear of them (WCAG 2.4.11, technique C43). Removing the padding makes the button keyboard test fail. `scroll-padding` alone is not enough for a text field in WebKit, which reveals the field's caret rather than the field: the caret is clear of a bar while the rest of a 44 px field and its 4 px focus ring can be behind it. So a focus that lands in `<main>` partly under a bar is revealed as a whole box through the same padded scrollport (`scrollIntoView`, nearest edge, no animation; it does nothing when the field and its ring are already clear). A box taller than the space between the bars is left to the browser. Removing that handler fails the WebKit text-field tests (`fixture.scroll.spec.ts`, "text fields"), and also most of the tap and multi-line cases on Chromium and Firefox.
-- **Dialogs:** title, description, the sync control **inside** the focus trap (the page behind is inert), a close control, Escape and the close icon discard, only the sync control retains the draft. Focus goes to the first field on open and returns to the opener on close. Tab and Shift+Tab, with or without Option or Alt, wrap inside the dialog (`src/components/ui/focus-loop.ts`), tested on every engine.
+- **Dialogs:** title, description, the sync control **inside** the focus trap (the page behind is inert), a close control, Escape and the close icon discard, only the sync control retains the draft. Focus goes to the first field on open and returns to the opener on close, unless something has taken focus since the dialog went (an update's
+  recovery action it was holding back, WEB-14a revision 20). Tab and Shift+Tab, with or without Option or Alt, wrap inside the dialog (`src/components/ui/focus-loop.ts`), tested on every engine.
 - **The sync/offline chip** is a real `<button>` whose accessible name states status and action ("2 waiting to send, Receiving updates: up to date. Open sync queue."). It contains its visible text. A separate announcer reports changes: polite on a change of phase or count, assertive **only** when the conflict count increases, never on first render, coalesced to one per frame.
 - **Tone is never colour alone:** every state has words and a dot.
 - **44px targets** for touch controls, 48px for the mobile tabs. The dialog Close control and the in-dialog sync control keep 44px at 320px wide beside long labels and large counts: Close does not shrink (`shrink-0`), the title never squeezes below its longest word, and the sync label wraps (`tests/e2e/fixture.shell.spec.ts`, "dialog header keeps a 44 x 44 Close target"). The title's width, and so that minimum, is capped at the header less 160 px: a word wider than that (a valid 64-character device name with no spaces) breaks inside the title instead of pushing the sync control and Close out of the dialog (`fixture.session-labels.spec.ts` L-7).
 - **Tooltips** on the icon rail show on hover **and** keyboard focus, are dismissible (Escape), hoverable and persistent (WCAG 1.4.13). Controls keep their own accessible names: labels do not depend on hover.
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
+
+- **The update banner (WEB-14a)** is a labelled region ("Update") at the top of the shell (and, signed out, of the neutral screen). A plain notice never takes
+  focus. With a recoverable form open, Q4's states do (revision 19, R26/R27; the table in `docs/pwa.md`): "Save and reload" when the prompt appears, "Retry
+  save" when a save fails, the restored form's first field after the reload, each once per presentation, and when the session gate, a dialog or a
+  form's hold refused it, or CSS hid the target or an ancestor, as soon as the target can take it (revisions 20 and 21); "Not now" returns focus to where the prompt took it
+  from (or the page heading). Its message is announced once through the announcer; in the neutral root, which has no protected tree, through the neutral root's own polite status region
+  (`NeutralLiveRegion` in `announcer.tsx`, kept mounted and empty while no account is displayed, so it exists before a message is written into it; neutral text
+  only, cleared by the level-0 gate; WEB-14a revision 1, R8, `production.pwa.spec.ts` P-P2 checks exactly one announcement and unmoved focus in three engines).
+  With a recoverable form open it is WEB-07's Q4 prompt, and a failed save is WEB-07's recovery banner, which announce themselves. "Not now" is a labelled icon button. axe passes in both themes
+  (`tests/pwa/update-banner.test.tsx`); a screen-reader pass of the update journey belongs to the Layer 2 checklist (WEB-08c, WEB-15).
 
 ### The sharing screens (WEB-12a)
 
@@ -58,6 +70,15 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - Disabled actions state their reason beside them (needs a connection, someone else owns this name, wait for this person or field to finish syncing, defaults still loading). Errors carry a copyable reference. Announcements (saved, not sent yet, renamed, unlinked) go through the announcer only; no live region is added.
 - The field editor and the unlink confirmation use the shared `Dialog` (focus trap, focus returned, in-dialog sync control), a full-bleed sheet below 768 px; the field editor's Type select keeps a 44 px target in WebKit (its native appearance is removed). Values are text, never colour alone; a checklist's done items are announced as "Done:".
 - Automated: jest-axe on every people screen (`tests/features/people/*`), and keyboard, viewport (390, 834, 1180, 1440 px, light and dark) and focus checks in the three engines (`tests/e2e/fixture.people.spec.ts`, E-P12/E-P13). Browser emulation only: no device, no screen reader (WEB-09d).
+
+### Recent changes on a person (WEB-19)
+
+- **Structure.** "Recent changes" is a `<section>` named by its `h3` (a region), after "Shared with" on the person detail. The events are one list (`role="list"`, an `<li>` each); each item is one sentence (who, what, the item's current name) followed by its tags ("Archived", "Merged profile") and a `<time datetime>`. Item names that open something are ordinary links (a current field this device holds, or a merged profile it holds); everything else is plain text, never colour alone.
+- **Keyboard map.** Tab moves through the links in the items, then "Show all changes" / "Show older changes", then "Show fewer"; Enter or Space presses them. Items take focus only programmatically (`tabindex="-1"`): they are not Tab stops. "Show all changes" and "Show older changes" move focus to the first item they add once it is shown; "Show fewer" removes itself, so focus moves to the control that shows more again. Every control is 44 px; nothing scrolls sideways at 360 px.
+- **Announcements**, through the announcer only (politely; no live region is added to the section, lint R6): "‹n› older changes shown." when a Show all/older step finishes, and "Couldn't load older changes." when it fails (the same words stay visible beside the controls, with "Try again"). "Loading older changes…" is visible text while a step is on its way, not announced. An announcement is withdrawn when the section goes away (another person, sign-out), never because the timeline refreshed.
+- **Busy, not rebuilt, on a refresh** (review 1, R-1). The timeline is read again on every synced change, receipt, reconnection, every 60 seconds while it is shown and when the tab becomes visible. While that re-read is on its way the section keeps the same list, controls and keyboard focus, marked `aria-busy="true"`; only an item about a field this device no longer holds is taken out at once (an access change). A press of Show all/older/fewer meanwhile is applied to that re-read. A failed re-read, a lost person (`404`), going offline or another identity replaces the list with its note at once, so focus on a control in it then returns to the page.
+- **States** are sentences: "Checking recent changes…" (`aria-busy`), the confirmed-empty "No changes recorded since …", "Recorded since …" (the server's coverage start), "Recent changes are shown when you're online." (nothing earlier is shown offline), "Couldn't load recent changes." with "Try again", the 500-event note, the merged-profile note with its link, and "You can no longer see this person's changes.".
+- Automated: jest-axe and the keyboard/refresh cases in `tests/features/people/activity-timeline.test.tsx` (S-AC14, R-1), and E-AC8 (keyboard only, 360 px, 44 px targets) and E-AC9 (keyboard focus across a held refresh) in the three engines (`tests/e2e/fixture.people-activity.spec.ts`). Browser emulation only: no screen reader or device (WEB-09d, WEB-15).
 
 ## What WEB-08b built in
 
@@ -106,6 +127,23 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
   not physical devices or a screen reader (WEB-09d, collected by WEB-15).
 
+## The dependency graph (WEB-18)
+
+- **Decorative map, real list** (TASK-04: "the diagram is decoration… the list is the real control"). The map is `aria-hidden` and holds nothing
+  focusable; a pointer pick on a box selects that day in the list and moves focus there. Everything the map shows is in the list.
+- **The list is an ARIA tree** (`role="tree"`, labelled "What this waits for", described by the keys line). Each day is a `treeitem` with
+  `aria-level`, `aria-setsize`, `aria-posinset`, `aria-selected` and, when it has items below, `aria-expanded`; child items sit in a
+  `role="group"`. A day is placed once; every other relationship is a reference item ("Needs “X · day” too") whose activation moves focus to
+  the day itself, opening the way to it. Keys: Up/Down, Right (open, then enter), Left (close, then go up), Home/End, Enter/Space (select);
+  one roving tab stop. A key held with Alt, Ctrl or Meta is left to the browser (history Back, word moves). Targets are at least 44 px high.
+- **States are words**, never colour alone (Done, Waiting, "Waiting on something you can't see", To do, "Not shown here"; "Needed directly" /
+  "Further back"); restricted and partial answers are said in text, and nothing hidden is counted.
+- **No live region of its own** (lint R6): a selection is announced through the announcer; "Checking again…" sets `aria-busy` on the section,
+  including while a stale or failed view is read again after "Try again".
+- Automated: jest-axe on the dialog (jsdom); axe with real layout in Chromium, Firefox and WebKit at 1440×900, 1180×820 and 390×844 in light and
+  dark, no horizontal overflow, keyboard traversal of the tree and focus return to the opener (`fixture.tasks-18.spec.ts` E-G1..E-G4). Browser
+  emulation, not physical devices or a screen reader (WEB-09d, collected by WEB-15).
+
 ## What WEB-08c built in (the account switcher's focus)
 
 - **Closing the switcher returns focus to an entry control that is still there.** From the rail's account control or Settings' "Switch account", focus returns to that control. On mobile the account control sits in the More sheet, which closes as the switcher opens (two sheets are never stacked), so the switcher returns focus to **More** instead (R10 of the review of 15 October 2026; the shell hands the sheet's own return target to the slot, `ShellSlotState.returnFocus`).
@@ -148,6 +186,7 @@ For each core journey (open the app, move between destinations, open Appearance 
 - [ ] Sync changes are announced once, at the right politeness, and a new conflict interrupts.
 - [ ] A locked or gated screen announces nothing about any account (WEB-08).
 - [ ] WEB-08b journeys: sign in with a wrong and then the right password; reach "Reconnect to keep going" and sign in again; open an invitation link, read the preview, create an account, and read the lost-response state; start single sign-on and return from the provider; open "Signing in", change the password and read the unconfirmed state; with "Signing in" open, switch the device offline and back, and read the reason beside each of Change password, Remove and Link single sign-on; open "Signing in" within a minute of signing in, leave it open for five minutes and note what a screen reader and keyboard focus do when Remove and Link become unavailable; the refusal on each form is announced once and focus lands on the right field.
+- [ ] WEB-19 Recent changes: with a screen reader, open a person with more than five changes, press "Show all changes" and "Show older changes" from the keyboard and hear the count once; leave focus on "Show older changes" while another device edits the person (or wait a minute) and confirm focus and the reading position stay; press "Show fewer" and land on "Show all changes".
 - [ ] Text scaling to 200% and 400% zoom reflows; forced colours and reduced motion behave.
 - [ ] On a long page, navigation and the sync status stay reachable while scrolling, and Tab never leaves the focused control, a text field included, or its focus ring under a bar. On real devices: the iOS Safari toolbar collapsing, the installed app's safe areas, a landscape phone, 400% zoom (the two mobile bars then take about half of a 256 px-tall viewport, which the tests do not measure), and a Windows or Linux browser with classic scrollbars (the icon rail hides its scrollbar; the fixture run used overlay scrollbars).
 

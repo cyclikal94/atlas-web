@@ -294,10 +294,12 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
     expect: /MU-10C-18/,
     patch: (t) =>
+      // Re-anchored by WEB-18 (D-18-7): the editor's start is built from its own graph read in `build`; the same fault (the start taken
+      // from the transitive preview) over the moved line.
       sub(
         t,
-        "        ? (submitted.prerequisites as string[])\n        : [],",
-        "        ? (submitted.prerequisites as string[])\n        : preview\n          ? prerequisitesOf(preview, row.id).map((i) => i.occurrence_id)\n          : [],",
+        "      list: keepList ? v.list : [...g.direct_prerequisites],",
+        "      list: keepList\n        ? v.list\n        : preview\n          ? prerequisitesOf(preview, row.id).map((i) => i.occurrence_id)\n          : [],",
       ),
   },
   {

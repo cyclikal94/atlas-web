@@ -51,6 +51,17 @@ export const QUEUED_KINDS = [
 ] as const;
 export type QueuedKind = (typeof QUEUED_KINDS)[number];
 
+/**
+ * WEB-18 (D-18-7): the queued kinds whose request is checked against the OCCURRENCE's version (it raises the occurrence's local record).
+ * While one of them is unsettled for a day, a read of the day's graph cannot reflect it, so the editor does not save on that read's
+ * version. Checked against the builders themselves (`commands-18.test.ts`).
+ */
+export const OCCURRENCE_VERSIONED_KINDS: ReadonlySet<string> = new Set([
+  "resolve",
+  "revise_occurrence",
+  "set_dependencies",
+]);
+
 const EMPTY_POLICY = { grants: [], exclude_accounts: [] };
 
 /** The defaults a command consumes, captured from the record as it is at the person's act (WEB-12a; DES 4610-4666). */
@@ -539,6 +550,11 @@ export interface SetDependenciesInput {
   prerequisites: readonly string[];
   strict: boolean;
   localId?: string;
+  /**
+   * WEB-18 (D-18-7): the occurrence version of the authoritative read the list was built from (the graph's root `version`). Present, the
+   * command is sent on it (`reviewedBase`), so a server that has moved on answers `conflict` and nothing is silently overwritten.
+   */
+  reviewedBase?: number;
 }
 
 /**
@@ -556,6 +572,9 @@ export function setDependencies(input: SetDependenciesInput): EnqueueRequest {
         basis: "resource",
         versionChecked: true,
         requiresEdit: true,
+        ...(input.reviewedBase === undefined
+          ? {}
+          : { reviewedBase: input.reviewedBase }),
       },
       ...prerequisites.map(
         (id): TargetSpec => ({

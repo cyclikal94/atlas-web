@@ -30,7 +30,7 @@ import {
 } from "./helpers";
 
 /**
- * WEB-10c against the RELEASED backend (`v0.29.0-rc.1`) on a disposable SQLite database behind the delaying proxy: the production session,
+ * WEB-10c against the RELEASED backend (the release named by `contract-pin.json`; `v0.29.0-rc.1` when written) on a disposable SQLite database behind the delaying proxy: the production session,
  * the production data controller and the task screens, with the FIXTURE leader standing in for WEB-09b's production leadership (the
  * WEB-10a harness). FOCUSED REAL-BACKEND EVIDENCE for a fixture-stage task: BE-Q1, BE-B6 and BE-CH1 have no completion record, so this
  * is NOT integration acceptance (`integration_passed` stays false). No PostgreSQL, HTTPS or device.
@@ -1291,7 +1291,11 @@ test.describe("I-10C-D1/D2: a chain set in the UI, previewed and completed (A8; 
       .getByRole("button", { name: "See what needs doing first" })
       .click();
     const dialog = page.getByRole("dialog");
-    await expect(dialog.locator("[data-dependency-list] li")).toHaveCount(2);
+    // WEB-18 ADAPTATION (labelled; same intent, the same two days): on the released backend the dialog now draws its tree from the
+    // dependency graph (D-18-1), so the preview's ordered list is only the fallback; the two days are the tree's two items.
+    await expect(
+      dialog.locator("[data-dependency-tree] [role=treeitem]"),
+    ).toHaveCount(2);
     await expect(
       dialog.getByRole("radio", { name: "Start anyway" }),
     ).toHaveCount(0);
@@ -2118,7 +2122,11 @@ test.describe("I-10C-TM5: the first Anyone timer and a completion each wait for 
       .getByRole("button", { name: "See what needs doing first" })
       .click();
     const dialog = page.getByRole("dialog");
-    await expect(dialog.locator("[data-dependency-list] li")).toHaveCount(2);
+    // WEB-18 ADAPTATION (labelled; same intent, the same two days): on the released backend the dialog now draws its tree from the
+    // dependency graph (D-18-1), so the preview's ordered list is only the fallback; the two days are the tree's two items.
+    await expect(
+      dialog.locator("[data-dependency-tree] [role=treeitem]"),
+    ).toHaveCount(2);
     await dialog
       .getByRole("radio", { name: "Tick the others off as well" })
       .click();

@@ -525,6 +525,12 @@ export interface Session {
   readonly recovery: Recovery;
   readonly wipe: Wipe;
   readonly compat: Store<ApiCompatibility>;
+  /**
+   * Ask the server's API version again (WEB-14a): at once if no check is in flight, otherwise exactly once more after the one in
+   * flight, so an answer asked for after an event is never replaced by one asked for before it. The app-update coordinator calls it
+   * after a newer client build is loaded; the session itself asks at every `online`, on a return to the page and on its paced timer.
+   */
+  recheckCompatibility(): void;
   /** Actions the neutral states offer. */
   readonly actions: NeutralActions;
   /** The persistence hold: orders a commit in an account's own database against every settlement of the session record. */

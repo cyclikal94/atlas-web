@@ -3,11 +3,13 @@ import { recogniseAtlasError } from "../../lib/api-client/problem";
 import { type Session, StampedRequestError } from "../../session";
 import {
   type AccountTimerPage,
+  type DependencyGraph,
   type DependencyPreview,
   type Enrolment,
   type OccurrencePage,
   type ProgressJournal,
   parseAccountTimerPage,
+  parseDependencyGraph,
   parseDependencyPreview,
   parseEnrolment,
   parseJournalPage,
@@ -145,6 +147,15 @@ export interface TasksApi {
   readDependencies(
     occurrenceId: string,
   ): Promise<TasksResult<DependencyPreview>>;
+  /**
+   * WEB-18: `GET /occurrences/{id}/dependency-graph`, the visible upstream graph of one day for display and for the editor's authoritative
+   * direct list. `maxDepth` absent: the server's default (200, the whole bounded graph); `1`: the editor's cheaper read. The answer is
+   * validated against the request it answers (its root and effective `max_depth`).
+   */
+  readDependencyGraph(
+    occurrenceId: string,
+    maxDepth?: number,
+  ): Promise<TasksResult<DependencyGraph>>;
   /** My sessions of one occurrence, 50 a page, in id order. */
   readTimers(
     occurrenceId: string,
@@ -169,6 +180,9 @@ export interface TasksApi {
   /** `POST /task-access-commands` (enrolment, rota consent, turn order), one attempt per body. `enrol` is a call of it. */
   access(command: AccessCommand, key: string): Promise<TasksResult<TaskResult>>;
 }
+
+/** The effective `max_depth` of a graph read that names none (the endpoint's default). */
+export const GRAPH_DEFAULT_DEPTH = 200;
 
 /** The size of a timer-session page this slice asks for (the endpoint's default). */
 export const TIMER_PAGE = 50;
@@ -446,6 +460,19 @@ export function createTasksApi(
         "/occurrences/{id}/dependencies",
         { path: { id: occurrenceId } },
         parseDependencyPreview,
+      ),
+    readDependencyGraph: (occurrenceId, maxDepth) =>
+      get(
+        "/occurrences/{id}/dependency-graph",
+        {
+          path: { id: occurrenceId },
+          query: maxDepth === undefined ? {} : { max_depth: maxDepth },
+        },
+        (body) =>
+          parseDependencyGraph(body, {
+            rootId: occurrenceId,
+            maxDepth: maxDepth ?? GRAPH_DEFAULT_DEPTH,
+          }),
       ),
     readTimers: (occurrenceId, after) =>
       get(

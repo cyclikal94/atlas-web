@@ -28,6 +28,7 @@ export function runIntegration(options: {
     evidence: string;
     env: Record<string, string | undefined>;
     postgres: boolean;
+    app?: string;
     layer: string;
   };
   deps: {

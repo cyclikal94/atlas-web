@@ -1,12 +1,15 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useId, useReducer, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
 import { useSharingDefaults } from "../../../data";
+import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
+import { completeTicket, usePeopleRecovery } from "../form-recovery";
 import {
   admit,
   completeSession,
@@ -18,17 +21,19 @@ import {
   settle,
   useEditingSession,
 } from "../lifetime";
-import { useMemoryRevision } from "../memory";
+import { type PeopleMemory, useMemoryRevision } from "../memory";
 import { personDefaultsLabel } from "../model/audience";
 import { createPersonRequest } from "../model/commands";
 import {
   applicablePerson,
+  type NewPersonAction,
   type NewPersonState,
   NOTE_LABEL,
   newPersonForm,
   type PersonSharing,
   reduceNewPerson,
 } from "../model/person-form";
+import { personCodec } from "../model/recovery";
 import { Choices, FieldError, useOutboxSave } from "../parts";
 
 /**
@@ -42,11 +47,35 @@ import { Choices, FieldError, useOutboxSave } from "../parts";
  * create; a retry of the same input is the same request (the same person, note and local ids), so a save that was written but whose
  * answer was lost is recognised, never made twice.
  */
-const RETAINED = "new-person";
+export const RETAINED = "new-person";
 
 interface RetainedPerson {
   session: string;
   form: NewPersonState;
+}
+
+/**
+ * WEB-14a (F-INT-PEOPLE-Q4): page memory keeps input of the new person's form (edited, or a save of it running). Its recoverable model
+ * (`form-recovery.ts`, `people-new:dialog`) takes nothing left by an update into it then: the copy is offered instead.
+ */
+export function holdsNewPerson(memory: PeopleMemory): boolean {
+  const kept = memory.drafts.get(RETAINED) as RetainedPerson | undefined;
+  if (kept === undefined) return false;
+  return kept.form.revision > 0 || isPending(memory, kept.session);
+}
+
+/** A copy the page before an update left, kept as a new editing session for the form to open on (never submitted). */
+export function parkNewPerson(
+  memory: PeopleMemory,
+  form: NewPersonState,
+  newId: () => string,
+): string {
+  const session = newId();
+  memory.drafts.set(RETAINED, {
+    session,
+    form: { ...form, revision: 1 },
+  } satisfies RetainedPerson);
+  return session;
 }
 
 export function NewPersonDialog({
@@ -71,15 +100,43 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
     () => env.memory.drafts.get(RETAINED) as RetainedPerson | undefined,
   );
   const [session] = useState(() => sessionOf(retained) ?? env.newId());
-  const [state, dispatch] = useReducer(
-    reduceNewPerson,
-    retained?.form ?? newPersonForm(),
+  const [state, setState] = useState<NewPersonState>(
+    () => retained?.form ?? newPersonForm(),
   );
   const restored = useRef(retained !== undefined);
   const saving = isPending(env.memory, session);
+  // WEB-14a (F-INT-PEOPLE-Q4): the input as last given (the model has it in the same step).
+  const input = useRef(state);
+  const take = (next: NewPersonState) => {
+    input.current = next;
+    setState(next);
+  };
+  const recovery = usePeopleRecovery<NewPersonState>({
+    memory: env.memory,
+    key: RETAINED,
+    session,
+    codec: personCodec,
+    start: newPersonForm,
+    value: () => input.current,
+    holds: () => holdsNewPerson(env.memory),
+    untouched: () =>
+      input.current.revision === 0 && !isPending(env.memory, session),
+    busy: () => isPending(env.memory, session),
+    // A copy restored, or "Discard instead": the session's input from now on (kept in page memory by the effect below).
+    restored: (form) => take({ ...form, revision: input.current.revision + 1 }),
+    reset: (form) => take({ ...form, revision: input.current.revision + 1 }),
+  });
+  /** The person's change: given to the recoverable model first, and not taken while an update reload is being prepared. */
+  const dispatch = (action: NewPersonAction) => {
+    const next = reduceNewPerson(input.current, action);
+    if (!recovery.edit(next)) return;
+    take(next);
+  };
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [refusal, setRefusal] = useState<string | null>(null);
   const stateRef = useRef(state);
+  // The form's first field: focused when B restores the form and after "Discard instead" (WEB-14a revision 51, F-R51-1).
+  const nameRef = useRef<HTMLInputElement>(null);
   stateRef.current = state;
   const nameError = useId();
   const noteError = useId();
@@ -117,7 +174,9 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
 
   const submit = async () => {
     if (!owns()) return;
-    const result = applicablePerson(state);
+    // The input as the recoverable model has it (what its ticket below records), read in the same step.
+    const now = input.current;
+    const result = applicablePerson(now);
     if (!result.ok) {
       setProblems(
         Object.fromEntries(
@@ -133,9 +192,30 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
     // Admitted once per session, before anything is awaited: a remounted or reopened form of the same session admits nothing more.
     const admission = admit(memory, [session], env.newId);
     if (admission === null) return;
+    // WEB-14a (F-INT-PEOPLE-Q4): the recoverable model's ticket, in the same step (none while an update reload is prepared: nothing is
+    // sent then). Only a durable success (queued) covers what it sent; anything else keeps the input for the update to save.
+    const kept = recovery.submitting();
+    if (kept === null) {
+      settle(admission);
+      return;
+    }
+    let durable = false;
+    try {
+      durable = await send(memory, admission, result, now.revision);
+    } finally {
+      completeTicket(kept, durable);
+    }
+  };
+
+  /** One admitted save of the session; true when it was queued. */
+  const send = async (
+    memory: PeopleMemory,
+    admission: NonNullable<ReturnType<typeof admit>>,
+    result: Extract<ReturnType<typeof applicablePerson>, { ok: true }>,
+    ticket: number,
+  ): Promise<boolean> => {
     setProblems({});
     setRefusal(null);
-    const ticket = state.revision;
     const record = defaults.record;
     const { personId, request } = preparedFor(
       memory,
@@ -175,7 +255,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       // Everything typed stays (a refused save is not saved), told to the form showing this session now.
       if (outcome.message !== null)
         reportSession(memory, RETAINED, session, { refusal: outcome.message });
-      return;
+      return false;
     }
     const reviewing = result.sharing === "defaults" && record === null;
     announcer.announce(
@@ -192,15 +272,18 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
       (kept) => (kept as RetainedPerson).form.revision,
       personId,
     );
+    return true;
   };
 
   const disabledReason = !env.writable
     ? copy.READ_ONLY_COMPAT
-    : defaultsUnknown
-      ? copy.DEFAULTS_LOADING_REASON
-      : saving
-        ? copy.SAVING
-        : null;
+    : recovery.locked
+      ? UNAVAILABLE_WHILE_RELOADING
+      : defaultsUnknown
+        ? copy.DEFAULTS_LOADING_REASON
+        : saving
+          ? copy.SAVING
+          : null;
 
   return (
     <Dialog
@@ -253,7 +336,8 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
         }}
       >
         <fieldset disabled={saving} className="flex flex-col gap-4">
-          {restored.current ? (
+          <RecoveryNotice recovery={recovery} firstFieldRef={nameRef} />
+          {restored.current && recovery.view.restored === null ? (
             <p className="text-[12.5px] text-ink-2">{copy.RESTORED_DRAFT}</p>
           ) : null}
           {refusal ? (
@@ -266,6 +350,7 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
           ) : null}
           <div className="flex flex-col gap-1.5">
             <Input
+              ref={nameRef}
               label={copy.NAME}
               value={state.name}
               maxLength={600}

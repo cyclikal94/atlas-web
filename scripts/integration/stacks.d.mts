@@ -17,6 +17,7 @@ export interface SkipContext {
   env: Record<string, string | undefined>;
   oidc: boolean;
   postgres: boolean;
+  app?: string;
 }
 export const DEFAULT_STACKS: Stack[];
 export const SEPARATE: Array<{

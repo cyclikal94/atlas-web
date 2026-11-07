@@ -1,4 +1,8 @@
-import type { DependencyItem, DependencyPreview } from "./contract";
+import type {
+  DependencyGraph,
+  DependencyItem,
+  DependencyPreview,
+} from "./contract";
 
 /**
  * WF-TASK-04 (CM-354, 423, 424; TASK-14/14a; WEB-10c D-10c-6/7, escalations E-1/E-2). PURE.
@@ -169,15 +173,104 @@ export function validateList(
   return null;
 }
 
-/** Whether the editor may open: online, a fresh preview read, nothing private (else it would erase edges the person cannot see). */
+/** WEB-18: what the editor's own fresh depth-one graph read says of the day (its root). */
+export interface EditorRootFacts {
+  can_edit: boolean;
+  restricted_prerequisites: boolean | null;
+}
+
+export type EditorBlock =
+  | "offline"
+  | "denied"
+  | "loading"
+  | "unavailable"
+  | "restricted"
+  | "pending"
+  | "changed"
+  | null;
+
+/**
+ * Whether the editor may save: online, a fresh preview read with nothing private (else it would erase edges the person cannot see), and
+ * (WEB-18, D-18-6/7) its own fresh depth-one graph read (`root`; null while not read; absent where a caller does not consult it) saying
+ * the person may edit the day and the day has no hidden prerequisite, no other unsettled change of the day's version (`pending`), and the
+ * list it was built from still the current one (`changed`).
+ */
 export function editorBlock(input: {
   online: boolean;
   canEdit: boolean;
   preview: DependencyPreview | null;
-}): "offline" | "denied" | "loading" | "unavailable" | null {
+  root?: EditorRootFacts | null;
+  pending?: boolean;
+  changed?: boolean;
+}): EditorBlock {
   if (!input.canEdit) return "denied";
   if (!input.online) return "offline";
   if (input.preview === null) return "loading";
   if (input.preview.unavailable) return "unavailable";
+  if (input.root === undefined) return null;
+  if (input.root === null) return "loading";
+  if (!input.root.can_edit) return "denied";
+  if (input.root.restricted_prerequisites === true) return "restricted";
+  if (input.pending === true) return "pending";
+  if (input.changed === true) return "changed";
   return null;
+}
+
+/** The base an edit was built from (D-18-7): the root's version and direct list of the graph read it was seeded from. */
+export interface EditorBase {
+  version: number;
+  list: string[];
+}
+
+/** The base of a graph answer: its root's version and its direct list (as a set: order carries no meaning). */
+export function baseOf(graph: DependencyGraph): EditorBase {
+  const root = graph.nodes[0];
+  return {
+    version: root?.version ?? 0,
+    list: [...graph.direct_prerequisites].sort(),
+  };
+}
+
+/** Whether `graph` still says what `base` says: the same root version and the same direct list. */
+export function baseMatches(base: EditorBase, graph: DependencyGraph): boolean {
+  const now = baseOf(graph);
+  return (
+    now.version === base.version &&
+    now.list.length === base.list.length &&
+    now.list.every((id, i) => id === base.list[i])
+  );
+}
+
+/** The draft statuses that settle a draft (the data layer's terminal set). */
+const SETTLED: ReadonlySet<string> = new Set([
+  "acknowledged",
+  "rejected",
+  "superseded",
+]);
+
+/**
+ * WEB-18 (D-18-7, E-14): whether another unsettled draft of `occurrenceId` is checked against its version (`versioned`: the kinds whose
+ * builder does so, `OCCURRENCE_VERSIONED_KINDS`), so a graph read cannot reflect what it will leave and a save on that read's version
+ * would be based on a version this device is about to move. `except`: the draft being replaced ("Keep editing").
+ */
+export function pendingVersioned(
+  drafts: readonly {
+    local_id: string;
+    kind: string;
+    status: string;
+    /** The draft's command (`commandOf`), or null when it has none readable. */
+    command: Readonly<Record<string, unknown>> | null;
+  }[],
+  occurrenceId: string,
+  versioned: ReadonlySet<string>,
+  except: string | null,
+): boolean {
+  return drafts.some(
+    (draft) =>
+      draft.local_id !== except &&
+      !SETTLED.has(draft.status) &&
+      versioned.has(draft.kind) &&
+      (draft.command?.occurrence_id === occurrenceId ||
+        draft.command?.id === occurrenceId),
+  );
 }

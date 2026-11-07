@@ -115,7 +115,7 @@ export function playwrightLister({ root, browsers, dir, env }) {
 const exitFor = (signal) => (signal === "SIGINT" ? 130 : 143);
 
 export async function runIntegration({ options, deps }) {
-  const { browsers, stacks, narrowed, evidence, env, postgres, layer } =
+  const { browsers, stacks, narrowed, evidence, env, postgres, app, layer } =
     options;
   // The default suite's whole manifest (closure check) and whether this run is only a named subset of it (`--stacks`).
   const manifest = options.manifest ?? stacks;
@@ -364,7 +364,7 @@ export async function runIntegration({ options, deps }) {
               startedAt,
               finishedAt,
               project: `integration-${entry.browser}`,
-              context: { env, oidc: entry._stack.oidc, postgres },
+              context: { env, oidc: entry._stack.oidc, postgres, app },
               refusals: entry.throttle.refusals_429,
               deliberateThrottle: entry._deliberate,
             });

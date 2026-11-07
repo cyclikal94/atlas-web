@@ -17,6 +17,7 @@ import {
 import {
   type BrowserComposition,
   DataProvider,
+  useFormRecoveryPort,
   useStatusInputs,
 } from "../../src/data/ui/react";
 import { sessionDouble } from "../helpers/session-double";
@@ -118,6 +119,107 @@ describe("the provider on a page with a production leader", () => {
     out.inputs = useStatusInputs();
     return null;
   }
+
+  test("a shared page runtime keeps the form recovery port after schema supersession without creating another runtime", async () => {
+    const { pageWorld, ACCOUNT } = await import("../support/data/page-world");
+    const { DataRuntime } = await import(
+      "../../src/data/engine/account-service"
+    );
+    const { getPageRegistry } = await import("../../src/data/store/registry");
+    const { unrevokedHold } = await import("../../src/session");
+    const w = await pageWorld();
+    const runtime = new DataRuntime({
+      identity: w.identity,
+      persistence: { hold: async () => unrevokedHold() },
+      registry: w.page.registry,
+      open: (account, options) => w.page.open(account, options),
+    });
+    const recoveryPage = w.env.page("shared-recovery");
+    recoveryPage.identity.account = ACCOUNT;
+    const opened = await recoveryPage.open(ACCOUNT);
+    if (opened.kind !== "opened") throw new Error("recovery setup failed");
+    const registry = getPageRegistry();
+    vi.spyOn(registry, "latch").mockImplementation((account) =>
+      w.page.registry.latch(account),
+    );
+    vi.spyOn(registry, "onLatch").mockImplementation((listener) =>
+      w.page.registry.onLatch(listener),
+    );
+    const recoveryStore = vi.fn((account: string, incarnation: string) =>
+      account === ACCOUNT && incarnation === opened.store.incarnationId
+        ? opened.store
+        : null,
+    );
+    const host = createPageDataHost();
+    host.setRuntime({
+      runtime,
+      channel: { post: () => undefined, subscribe: () => () => undefined },
+      recoveryStore,
+    });
+    markLeaderStarted();
+    const loadBrowser = vi.fn(async (): Promise<BrowserComposition> => {
+      throw new Error("must use the shared runtime");
+    });
+    let port: ReturnType<typeof useFormRecoveryPort> = null;
+    const recoveryPort = () => {
+      if (port === null) throw new Error("no recovery port");
+      return port;
+    };
+    function RecoveryProbe() {
+      port = useFormRecoveryPort();
+      return null;
+    }
+    const view = render(
+      <DataProvider
+        session={sessionDouble({}, { identity: w.identity })}
+        host={host}
+        loadBrowser={loadBrowser}
+      >
+        <RecoveryProbe />
+      </DataProvider>,
+    );
+    const settle = async () => {
+      await act(async () => {
+        for (let i = 0; i < 20; i++) await w.env.settle();
+      });
+    };
+    try {
+      await settle();
+      expect(port).not.toBeNull();
+      const save = (title: string) =>
+        w.env.run(
+          recoveryPort().save({
+            formContext: "shared-runtime-form",
+            tabInstanceId: "tab",
+            values: { title },
+            savedAt: new Date().toISOString(),
+          }),
+        );
+      expect(await save("before upgrade")).toBe("saved");
+      expect(recoveryStore).not.toHaveBeenCalled();
+      act(() =>
+        w.page.registry.closeAll(ACCOUNT, { latch: "upgrade_pending" }),
+      );
+      await settle();
+      expect(runtime.serviceFor(ACCOUNT)).toBeNull();
+      expect(port).not.toBeNull();
+      expect(await save("after upgrade")).toBe("saved");
+      expect(recoveryStore).toHaveBeenCalledWith(
+        ACCOUNT,
+        opened.store.incarnationId,
+      );
+      expect(
+        (await w.env.run(recoveryPort().list("shared-runtime-form"))).map(
+          (copy) => copy.values.title,
+        ),
+      ).toEqual(["after upgrade"]);
+      expect(loadBrowser).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      runtime.dispose();
+      opened.store.close();
+    }
+  });
 
   test("it waits for and uses the PAGE's runtime, never builds or disposes one, and follows the page's leadership", async () => {
     markLeaderStarted();

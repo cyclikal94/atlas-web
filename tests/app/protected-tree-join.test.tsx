@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createProtectedTree } from "../../src/app/protected-tree";
@@ -86,13 +87,22 @@ describe("notices about a sign-in that finished while an account displays", () =
     );
     const notices = screen.getByRole("region", { name: "Notices" });
     fireEvent.click(notices.querySelector("button") as HTMLElement);
-    // The dismissed notice is gone. (The same words are also announced into the polite live region one animation frame after the
-    // notice appears; that announcement is not the notice, so the check is of the notice itself, not of the text anywhere.)
+    // ADAPTED (WEB-14a revision 7; diagnosed in .agtx/evidence/WEB-14a/revision-7/diag-notice). Was
+    // `expect(screen.queryByText(NEUTRAL_COPY["1c.superseded"].message)).toBeNull()`: page-wide, it also finds the announcer's polite live
+    // region, which receives the same text on the next animation frame, so it failed whenever that frame ran before the dismissal (a slower
+    // run). The intent, "the notice is dismissed", is asserted on the notice itself and on the Notices region as it is NOW (it goes when it
+    // holds no notice); the live region is not the notice.
     expect(notice).not.toBeInTheDocument();
+    const remaining = screen.queryByRole("region", { name: "Notices" });
+    expect(
+      remaining === null ||
+        within(remaining).queryByText(NEUTRAL_COPY["1c.superseded"].message) ===
+          null,
+    ).toBe(true);
     expect(
       document.querySelector('[data-notice="feedback-superseded"]'),
     ).toBeNull();
-    expect(screen.queryByRole("region", { name: "Notices" })).toBeNull();
+    expect(remaining).toBeNull();
   });
 
   /**

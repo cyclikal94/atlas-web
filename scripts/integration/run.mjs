@@ -2,7 +2,7 @@
 // Part C (plan 14): run the integration specs against the RELEASED backend, on a disposable SQLite database, behind the delaying
 // proxy, with the fixture-only session harness page served by `vite preview --mode fixture`.
 //
-//   node scripts/integration/run.mjs [--serve] [--postgres] [--oidc on|off] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [--stacks <names>] [-- <playwright args>]
+//   node scripts/integration/run.mjs [--serve] [--postgres] [--oidc on|off] [--evidence <dir>] [--browsers chromium,firefox,webkit] [--grep <pattern>] [--stacks <names>] [--app <dir>] [-- <playwright args>]
 //
 //   default   for each browser: start a FRESH stack, run Playwright's `integration-<browser>` project, stop everything; exit non-zero if any failed.
 //             With no --grep the project runs in separate stacks per browser (scripts/integration/stacks.mjs): the suite exceeds what one
@@ -93,6 +93,8 @@ const serve = flag("--serve");
 const postgres = flag("--postgres");
 const browsers = value("--browsers", "chromium").split(",");
 const grep = value("--grep", "");
+// I-U2 serves the worker-enabled fixture build; ordinary stacks keep dist-fixture.
+const app = value("--app", "");
 const passthrough = args.includes("--")
   ? args.slice(args.indexOf("--") + 1)
   : [];
@@ -597,6 +599,7 @@ async function stackRun(browser, stack) {
       "--port",
       String(previewPort),
       "--strictPort",
+      ...(app ? ["--outDir", app] : []),
     ],
     {
       cwd: root,
@@ -632,6 +635,7 @@ async function stackRun(browser, stack) {
     ATLAS_INTEGRATION_STATE_DIR: state,
     // WEB-12b: whether this stack's backend has its directory enabled (I-SH17b runs only where it is not).
     ATLAS_INTEGRATION_DIRECTORY: directoryModeOf(stack),
+    ATLAS_INTEGRATION_APP: app,
     // The browser artefacts (traces, test-results) of this invocation stay with its evidence, in a fresh run directory each time.
     ATLAS_EVIDENCE_DIR: join(evidence, "browser-evidence"),
   };
@@ -718,6 +722,7 @@ const status = serve
         evidence,
         env: process.env,
         postgres,
+        app,
         layer,
       },
       deps: {

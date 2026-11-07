@@ -5,7 +5,9 @@
 //
 // Rules are matched by method, path (exact string or /regex/) and ORDINAL (the nth matching request since the rule was added,
 // 1-based; absent = every match). Actions:
-//   hold                 forward now, deliver the response only after POST /release/<id> (the backend has already committed)
+//   hold                 forward now, deliver the response only after POST /release/<id> (the backend has already committed); with
+//                        `set`/`delete` (as rewrite_json) the held JSON body is rewritten when it is delivered (a delayed answer of
+//                        another version, WEB-14a revision 1)
 //   hold_request         do NOT forward until POST /release/<id>
 //   buffer_request       read the WHOLE request now, hold it, and forward it on POST /release/<id> EVEN IF THE CLIENT HAS GONE (it
 //                        models a gateway or queue that has accepted a request and delivers it late). `hold_request` cannot: it keeps
@@ -36,6 +38,22 @@
 // API answer (`crates/server/src/lib.rs`). Without it an injected 410 is heuristically cacheable, and the browser answered every later
 // identical `GET /sync?cursor=…` from its HTTP cache without reaching the proxy or the backend (review 14's I-N5 loop).
 import { createServer, request as httpRequest } from "node:http";
+
+/** The `set`/`delete` rewrite of a JSON body (undefined, so the original is delivered, when the body is not JSON). */
+function rewritten(rule, body) {
+  let json;
+  try {
+    json = JSON.parse(body.toString("utf8"));
+  } catch {
+    return undefined;
+  }
+  for (const [k, v] of Object.entries(rule.set ?? {})) json[k] = v;
+  for (const k of rule.delete ?? []) delete json[k];
+  return {
+    body: Buffer.from(JSON.stringify(json)),
+    contentType: "application/json",
+  };
+}
 
 // `observe` (WEB-08c revision 14, R17; the sibling WEB-14a revision 15 has the same hook): told of every request that reached the
 // BACKEND, with the backend's own status (before any rule rewrites it; null when the upstream connection failed), so the runner
@@ -174,7 +192,13 @@ export function createProxy({
               }
               case "hold": {
                 const list = held.get(rule.id) ?? [];
-                list.push({ deliver: () => deliver(), entry });
+                const rewrite =
+                  rule.set !== undefined || rule.delete !== undefined;
+                list.push({
+                  deliver: () =>
+                    deliver(rewrite ? rewritten(rule, body) : undefined),
+                  entry,
+                });
                 held.set(rule.id, list);
                 entry.events.push({ t: Date.now() - entry.at, event: "held" });
                 if (correlation)
@@ -227,21 +251,8 @@ export function createProxy({
                   body: Buffer.from(JSON.stringify(rule.json ?? {})),
                   contentType: "application/json",
                 });
-              case "rewrite_json": {
-                let json;
-                try {
-                  json = JSON.parse(body.toString("utf8"));
-                } catch {
-                  return deliver();
-                }
-                for (const [k, v] of Object.entries(rule.set ?? {}))
-                  json[k] = v;
-                for (const k of rule.delete ?? []) delete json[k];
-                return deliver({
-                  body: Buffer.from(JSON.stringify(json)),
-                  contentType: "application/json",
-                });
-              }
+              case "rewrite_json":
+                return deliver(rewritten(rule, body));
               default:
                 return deliver();
             }

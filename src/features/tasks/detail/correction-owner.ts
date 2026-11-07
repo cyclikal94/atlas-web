@@ -1,3 +1,8 @@
+import {
+  createRecoverableModel,
+  type ModelTicket,
+  type RecoverableModel,
+} from "../../../lib/form-recovery/model";
 import type { CorrectionState } from "../model/correction";
 import { onTaskVisitEnded, type TaskVisit } from "../visit";
 
@@ -32,11 +37,15 @@ export interface CorrectionTicket {
   readonly key: string;
   readonly session: number;
   readonly revision: number;
+  /** Revision 37 (R40): the recoverable model's ticket for what this save sent. */
+  readonly recovery?: ModelTicket;
 }
 
 export type CorrectionEvent =
   | { kind: "consumed"; session: number }
-  | { kind: "settled"; session: number };
+  | { kind: "settled"; session: number }
+  /** Revision 37 (R40): a copy left by the page before an update was restored into the session. */
+  | { kind: "restored"; session: number };
 
 interface Held extends CorrectionEntry {
   holders: number;
@@ -52,8 +61,125 @@ let sessions = 0;
 // A visit that ends drops every session it owns that no dialog holds (one still held is dropped when its dialog lets go).
 onTaskVisitEnded((visit) => {
   for (const [key, held] of [...entries])
-    if (held.owner === visit && held.holders === 0) entries.delete(key);
+    if (held.owner === visit && held.holders === 0) drop(key);
 });
+
+/**
+ * APP-UPDATE RECOVERY (WEB-14a revision 37; R40; design assessment C1-C3), as for the task editors (`kept-input.ts`): a correction session
+ * has a RECOVERABLE MODEL (`lib/form-recovery/model.ts`) under `occurrence-correction:<occurrence>`, the session's state as its versioned
+ * text (`model/recovery.ts`, precision and labels included). Its edits, saves, the person's discard and a departure that drops it reach the
+ * model in the same step; while an update reload is prepared an edit or a save is refused. After the reload the detail screen looks for the
+ * copy left for the day it shows (`linkCorrection`): restored, it is a retained session the dialog resumes, never submitted.
+ */
+interface Linked {
+  readonly identity: string;
+  readonly model: RecoverableModel;
+  readonly encode: (state: CorrectionState) => string;
+  decode: (text: string) => CorrectionState | null;
+  owner: () => TaskVisit | null;
+}
+const models = new Map<string, Linked>();
+
+function drop(key: string): void {
+  if (!entries.delete(key)) return;
+  void models.get(key)?.model.end();
+}
+
+function retireOtherIdentities(identity: string): void {
+  for (const [key, linked] of [...models])
+    if (linked.identity !== identity) {
+      linked.model.retire();
+      models.delete(key);
+    }
+}
+
+/**
+ * Revision 37 (R40): the correction model of `key` (made once; a later caller brings the current decoder, which reads a copy against the
+ * occurrence as this device has it now, and the visit a restored session belongs to).
+ */
+export function linkCorrection(
+  key: string,
+  identity: string,
+  context: string,
+  codec: {
+    encode(state: CorrectionState): string;
+    decode(text: string): CorrectionState | null;
+  },
+  start: () => CorrectionState,
+  owner: () => TaskVisit | null,
+): RecoverableModel {
+  retireOtherIdentities(identity);
+  const known = models.get(key);
+  if (known !== undefined) {
+    known.decode = codec.decode;
+    known.owner = owner;
+    return known.model;
+  }
+  const linked: Linked = {
+    identity,
+    encode: codec.encode,
+    decode: codec.decode,
+    owner,
+    model: createRecoverableModel({
+      formContext: context,
+      start: codec.encode(start()),
+      restore: (text, chosen) => restoreCorrection(key, text, chosen),
+      untouched: () => {
+        const held = entries.get(key);
+        return (
+          held === undefined ||
+          (held.revision === 0 && held.submitting === null)
+        );
+      },
+    }),
+  };
+  models.set(key, linked);
+  const entry = entries.get(key);
+  if (entry !== undefined) {
+    linked.model.begin(codec.encode(start()));
+    if (entry.revision > 0) linked.model.edit(codec.encode(entry.state));
+  }
+  return linked.model;
+}
+
+/**
+ * Revision 37 (R40): a copy's text restored into the session of `key` while it is untouched, or as a retained session of the detail's visit.
+ * Revision 38 (R40-B): the person's choice of a copy (`chosen`) replaces the session's state, typed or restored, unless a save of it is
+ * pending (the model has checked that nothing changed it since the choice). Never submits.
+ */
+function restoreCorrection(
+  key: string,
+  text: string,
+  chosen: boolean,
+): boolean {
+  const linked = models.get(key);
+  if (linked === undefined) return false;
+  const state = linked.decode(text);
+  if (state === null) return false;
+  const held = entries.get(key);
+  if (held === undefined) {
+    // The detail's visit (null: a dialog outside any router, kept as such a dialog's session is).
+    const owner = linked.owner();
+    if (owner?.ended()) return false;
+    sessions += 1;
+    entries.set(key, {
+      session: sessions,
+      revision: 1,
+      state,
+      retained: true,
+      submitting: null,
+      holders: 0,
+      releasing: false,
+      owner,
+    });
+    return true;
+  }
+  if (held.submitting !== null || (!chosen && held.revision !== 0))
+    return false;
+  entries.set(key, { ...held, state, revision: held.revision + 1 });
+  publish(key, { kind: "restored", session: held.session });
+  return true;
+}
 
 export const correctionKey = (identity: string, occurrenceId: string) =>
   `${identity}\u0000${occurrenceId}`;
@@ -88,6 +214,7 @@ export function openCorrection(
 ): CorrectionEntry {
   for (const other of [...entries.keys()])
     if (!other.startsWith(`${identity}\u0000`)) entries.delete(other);
+  retireOtherIdentities(identity);
   const held = entries.get(key);
   if (
     held !== undefined &&
@@ -112,6 +239,9 @@ export function openCorrection(
     owner,
   };
   entries.set(key, created);
+  // Revision 37 (R40): a new session starts its model afresh.
+  const linked = models.get(key);
+  if (linked !== undefined) linked.model.begin(linked.encode(created.state));
   return created;
 }
 
@@ -146,7 +276,7 @@ function dropReleasing(key: string, session: number): void {
       now.releasing &&
       !now.retained
     )
-      entries.delete(key);
+      drop(key);
   }, 0);
 }
 
@@ -157,7 +287,7 @@ function dropReleasing(key: string, session: number): void {
 export function disownCorrection(key: string): void {
   const held = entries.get(key);
   if (held === undefined) return;
-  if (held.holders === 0) entries.delete(key);
+  if (held.holders === 0) drop(key);
   else entries.set(key, { ...held, retained: false, owner: null });
 }
 
@@ -177,14 +307,19 @@ export function adoptCorrection(
   entries.set(key, { ...held, owner });
 }
 
+/** An edit of the session. Revision 37 (R40): false, and nothing changes, while an update reload is being prepared. */
 export function editCorrection(
   key: string,
   session: number,
   state: CorrectionState,
-): void {
+): boolean {
   const held = entries.get(key);
-  if (held === undefined || held.session !== session) return;
+  if (held === undefined || held.session !== session) return true;
+  const linked = models.get(key);
+  if (linked !== undefined && !linked.model.edit(linked.encode(state)))
+    return false;
   entries.set(key, { ...held, state, revision: held.revision + 1 });
+  return true;
 }
 
 /** The in-dialog sync control keeps the session for the next dialog of this day. */
@@ -195,9 +330,24 @@ export function retainCorrection(key: string, session: number): void {
 }
 
 /** Cancel, Escape, the close icon: the session ends (a save already made stays queued). */
-export function discardCorrection(key: string, session: number): void {
+/** Revision 37 (R40): "Discard instead": the session shows `state` again (no edit; the model has discarded its copies). */
+export function resetCorrection(
+  key: string,
+  session: number,
+  state: CorrectionState,
+): void {
   const held = entries.get(key);
-  if (held !== undefined && held.session === session) entries.delete(key);
+  if (held === undefined || held.session !== session) return;
+  entries.set(key, { ...held, state });
+}
+
+/** The person's discard (Cancel, Escape, the close icon). Revision 37 (R40): refused while an update reload is being prepared. */
+export function discardCorrection(key: string, session: number): boolean {
+  const held = entries.get(key);
+  if (held === undefined || held.session !== session) return true;
+  if (models.get(key)?.model.frozen()) return false;
+  drop(key);
+  return true;
 }
 
 /** A save begins: the ticket names exactly the session and revision submitted. */
@@ -207,8 +357,16 @@ export function submitCorrection(
 ): CorrectionTicket | null {
   const held = entries.get(key);
   if (held === undefined || held.session !== session) return null;
+  // Revision 37 (R40): its model's ticket, taken in the same step (none while an update reload is prepared: nothing is sent then).
+  const recovery = models.get(key)?.model.submitting();
+  if (recovery === null) return null;
   entries.set(key, { ...held, submitting: held.revision });
-  return { key, session, revision: held.revision };
+  return {
+    key,
+    session,
+    revision: held.revision,
+    ...(recovery ? { recovery } : {}),
+  };
 }
 
 /**
@@ -219,6 +377,9 @@ export function completeCorrection(
   ticket: CorrectionTicket,
   saved: boolean,
 ): "consumed" | "kept" | "gone" {
+  // Revision 37 (R40): the model acknowledges exactly what the save sent; a failure covers nothing.
+  if (saved) void ticket.recovery?.succeeded();
+  else ticket.recovery?.failed();
   const held = entries.get(ticket.key);
   if (held === undefined || held.session !== ticket.session) return "gone";
   if (saved && held.revision === ticket.revision) {
@@ -250,4 +411,6 @@ export function subscribeCorrection(
 /** For tests and identity changes: forget every editing session (numbers are still never reused). */
 export function forgetCorrectionSessions(): void {
   entries.clear();
+  for (const linked of models.values()) linked.model.retire();
+  models.clear();
 }

@@ -13,6 +13,7 @@ import { authFeedback } from "../../../src/features/authentication/feedback";
 import { MESSAGE_TEXT } from "../../../src/features/authentication/outcome-copy";
 import { SignInSurface } from "../../../src/features/authentication/SignInSurface";
 import { signInRequest } from "../../../src/features/authentication/sign-in-request";
+import { forgetRecoverableEditors } from "../../../src/lib/form-recovery/editor";
 import { type AttemptOutcome, SessionProvider } from "../../../src/session";
 import { attemptsDouble, sessionDouble } from "../../helpers/session-double";
 
@@ -29,6 +30,9 @@ afterEach(() => {
   setOnline(true);
   authFeedback.clearOnBegin();
   signInRequest.clear();
+  // WEB-14a revision 40 (R40-GATE): the sign-in form's unfinished username is page memory of its journey (it outlives the form, as
+  // `signInRequest` does); each case is a fresh page.
+  forgetRecoverableEditors();
 });
 
 const refusal = (code: string, stage: "exchange" | "activation" = "exchange") =>

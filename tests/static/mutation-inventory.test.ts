@@ -158,8 +158,10 @@ describe("completion is judged by membership: every selected mutant exactly once
 
 describe("the runner checks the inventory before anything runs, in every mode (no vitest is started here)", () => {
   const runner = (args: string[]) => {
-    const out = mkdtempSync(join(tmpdir(), "atlas-inventory-"));
-    made.push(out);
+    const parent = mkdtempSync(join(tmpdir(), "atlas-inventory-"));
+    made.push(parent);
+    // The supervised WEB-14a runner claims a fresh child; it must never reuse an existing evidence directory.
+    const out = join(parent, "run");
     return spawnSync(
       process.execPath,
       ["scripts/run-data-mutants.mjs", ...args, "--out", out],
@@ -175,10 +177,9 @@ describe("the runner checks the inventory before anything runs, in every mode (n
 
   test("an unknown --only id fails before any patch is applied (it used to select nothing and pass)", () => {
     const run = runner(["--check", "--only", "MU-2223,MU-99999"]);
-    // WEB-08d's strict command-line validation reports invalid input as exit 2 before any output/patch/child is created.
-    expect(run.status).toBe(2);
+    expect(run.status).toBe(1);
     expect(run.stderr).toContain(
-      "run-data-mutants: --only names ids not in the catalogue: MU-99999",
+      "INVENTORY --only names MU-99999, which is not a unit mutant",
     );
     expect(run.stdout).not.toContain("patches apply");
   });

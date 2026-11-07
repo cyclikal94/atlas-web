@@ -8,7 +8,7 @@ import {
   useDataEnv,
   useDraftWithCommand,
 } from "../../../data";
-import { ResourcePolicyEditor } from "../../sharing";
+import { PolicyEditorRecoveryHost, ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
 import { CatchUpNotice } from "../catchup/CatchUpNotice";
 import * as copy from "../copy";
@@ -25,7 +25,11 @@ import { STREAK_COPY } from "../streak/StreakPage";
 import { pillTone } from "../today/TodayRow";
 import type { RowModel } from "../view";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
-import { CORRECTION_COPY, CorrectionDialog } from "./CorrectionDialog";
+import {
+  CORRECTION_COPY,
+  CorrectionDialog,
+  CorrectionRecoveryHost,
+} from "./CorrectionDialog";
 import { DayWork } from "./DayWork";
 import { EntryHistory } from "./EntryHistory";
 import { RotaPanel } from "./Rota";
@@ -429,6 +433,14 @@ export function TaskDetail({
               definition={row.data.definition}
             />
           ) : null}
+          {row.streamPresent && view.synced && sharing === null ? (
+            // Revision 37 (WEB-14a R40): a sharing draft left by the page before an update reopens its editor.
+            <PolicyEditorRecoveryHost
+              identity={env.identity}
+              resourceId={row.progressId}
+              onOpen={setSharing}
+            />
+          ) : null}
           {row.streamPresent && view.synced ? (
             <span>
               <Button
@@ -444,6 +456,15 @@ export function TaskDetail({
             actions={actions}
             writable={env.writable}
           />
+          {correcting === null ? (
+            // Revision 37 (WEB-14a R40): a correction left by the page before an update is restored and its dialog opened again.
+            <CorrectionRecoveryHost
+              key={`correction-recovery:${row.id}`}
+              row={row}
+              identity={env.identity}
+              onRestored={setCorrecting}
+            />
+          ) : null}
           {correcting === row.id ? (
             <CorrectionDialog
               key={`correction:${row.id}`}

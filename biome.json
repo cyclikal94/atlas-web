@@ -11,6 +11,7 @@
       "!playwright-report",
       "!test-results",
       "!dist-fixture",
+      "!dist-pwa",
       "!tests/.mutants",
       "!.agents",
       "!.agtx",

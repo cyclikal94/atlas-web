@@ -179,6 +179,7 @@ describe("a refresh running when the screen opens (S1, S2, S3)", () => {
     await waitFor(() => expect(row().dataset.observation).toBe("busy"));
     await elapse(w, OBSERVE_POLL_MS);
     await waitFor(() => expect(row().dataset.observation).toBe("unconfirmed"));
+    expect(observed()).not.toBeNull();
     expect(observed()).toHaveTextContent(copy.OBSERVED_UNCONFIRMED);
     expect(row()).not.toHaveTextContent(copy.REFRESHING);
     expect(refreshButton()).toBeEnabled();

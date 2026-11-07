@@ -1,15 +1,17 @@
 import type {
+  DiscardResult,
   FormRecoveryPort,
   RecoverySnapshot,
 } from "../../lib/form-recovery/port";
 import type { AccountService } from "../engine/account-service";
 import type { QuotaGuard, QuotaReservation } from "../engine/quota-guard";
 import { digestOf } from "../model/canonical";
-import type { FormRecoveryRow } from "../model/types";
+import type { FormRecoveryMeta, FormRecoveryRow } from "../model/types";
 import {
   claimFormWriter,
   type FormClaimResult,
   type FormWriteResult,
+  listFormRecovery,
   loadFormRecovery,
   saveFormRecovery,
 } from "../plans/form-recovery";
@@ -52,9 +54,18 @@ import {
  * Values arrive already filtered by WEB-07's guard; the port does not widen its allow-list. A failure of the write is
  * `"failed"`, never a throw.
  */
+/**
+ * What a recovery write goes through: the displayed account's live service, or (WEB-14a revision 1, R7) the recovery connection of the
+ * account whose database another tab's newer build upgraded (`store/recovery-store.ts`), with the incarnation this page last had open.
+ */
+export type FormRecoveryTarget = Pick<
+  AccountService,
+  "store" | "incarnationId"
+>;
+
 export interface FormRecoveryPortDeps {
-  /** The displayed account's service, or null when there is none (then nothing can be saved). */
-  service(): AccountService | null;
+  /** The displayed account's service (or its recovery connection), or null when there is none (then nothing can be saved). */
+  service(): FormRecoveryTarget | null;
   quota?: QuotaGuard;
   now(): string;
 }
@@ -74,6 +85,9 @@ interface Writer {
 
 /** Per store handle, then per [form, tab]. A WeakMap: the state lives exactly as long as the page's handle to the account does. */
 const writers = new WeakMap<object, Map<string, Writer>>();
+
+/** Why a read was refused: no store open (a read of nothing is not an empty answer). */
+const NO_STORE = "no recovery store open";
 
 /** How many times one copy is admitted when the hold it was admitted under ends before the write begins (the outbox's bound, R28). */
 const ADMISSION_ROUNDS = 3;
@@ -101,20 +115,31 @@ export function recoveryWriteBytes(row: FormRecoveryRow): number {
   return RECOVERY_ALLOWANCE_BYTES + UNIT_BYTES * (measured.length + keyed);
 }
 
-/** What the caller's snapshot says, copied when `save` is called: nothing the caller does to its object afterwards is part of the capture. */
+/**
+ * What the caller's snapshot says, copied when `save` is called: nothing the caller does to its object afterwards is part of the capture.
+ * WEB-14a revision 8: with what the form's code writes besides the texts (`meta`: the capture's identity, R16; control state, R17; an update
+ * hand-off's lineage, R16), copied deeply now and stored exactly as given.
+ */
 interface Captured {
   formContext: string;
   tabInstanceId: string;
   values: Record<string, string>;
   savedAt: string;
+  meta: FormRecoveryMeta | undefined;
 }
 const capture = (snapshot: RecoverySnapshot): Captured | null => {
   try {
+    const { controls, capture: id, lineage } = snapshot;
     return {
       formContext: snapshot.formContext,
       tabInstanceId: snapshot.tabInstanceId,
       values: { ...snapshot.values },
       savedAt: snapshot.savedAt,
+      // A copy with none of them is stored exactly as before revision 8.
+      meta:
+        id !== undefined || controls || lineage
+          ? structuredClone({ capture: id, controls, lineage })
+          : undefined,
     };
   } catch {
     // A getter that throws, a revoked proxy: the capture is not made.
@@ -122,13 +147,29 @@ const capture = (snapshot: RecoverySnapshot): Captured | null => {
   }
 };
 
+/** Revision 8: what a capture holds as content: its texts, and its control state when it has any (a row without digests as before). */
+const contentOf = ({ values, meta }: Captured): unknown =>
+  meta?.controls ? { values, controls: meta.controls } : values;
+
+/** A row as the copy a reader is given; revision 8: with what the form's code wrote besides the texts (`meta`), as stored. */
+const snapshotOf = (row: FormRecoveryRow): RecoverySnapshot => ({
+  ...row.meta,
+  formContext: row.form_context,
+  tabInstanceId: row.tab_instance_id,
+  values: { ...row.fields },
+  savedAt: row.saved_at,
+});
+
 export function createFormRecoveryPort(
   deps: FormRecoveryPortDeps,
 ): FormRecoveryPort {
   // Per (incarnation, form, tab): the tail of the writes this instance already requested, so they run one at a time in call order.
   const tails = new Map<string, Promise<unknown>>();
-  const keyOf = (service: AccountService, form: string, tab: string): string =>
-    JSON.stringify([service.incarnationId, form, tab]);
+  const keyOf = (
+    service: FormRecoveryTarget,
+    form: string,
+    tab: string,
+  ): string => JSON.stringify([service.incarnationId, form, tab]);
 
   /** Runs `job` after every earlier job of the same key; a job that fails does not stop the ones behind it. */
   const serialised = <T>(id: string, job: () => Promise<T>): Promise<T> => {
@@ -143,7 +184,7 @@ export function createFormRecoveryPort(
   };
 
   const writerFor = (
-    service: AccountService,
+    service: FormRecoveryTarget,
     form: string,
     tab: string,
   ): Writer => {
@@ -168,7 +209,7 @@ export function createFormRecoveryPort(
    * first call and shared by every later one, so the transaction is created before anything is awaited and a later page context's
    * claim is ordered after it).
    */
-  const begin = (service: AccountService, form: string, tab: string) => {
+  const begin = (service: FormRecoveryTarget, form: string, tab: string) => {
     const writer = writerFor(service, form, tab);
     writer.seq += 1;
     if (writer.claim === null) {
@@ -198,13 +239,18 @@ export function createFormRecoveryPort(
   };
 
   const write = (
-    service: AccountService,
+    service: FormRecoveryTarget,
     row: FormRecoveryRow,
-    options: { leaseLive?: () => boolean; mayCreate?: boolean } = {},
+    options: {
+      leaseLive?: () => boolean;
+      mayCreate?: boolean;
+      expect?: string;
+    } = {},
   ): Promise<FormWriteResult> =>
     service.store.run(saveFormRecovery, {
       incarnationId: service.incarnationId,
       row,
+      ...(options.expect === undefined ? {} : { expect: options.expect }),
       ...(options.leaseLive === undefined
         ? {}
         : { leaseLive: options.leaseLive }),
@@ -213,7 +259,25 @@ export function createFormRecoveryPort(
         : { mayCreate: options.mayCreate }),
     });
 
+  /** The pinned ports of this one, one per store handle, so the writes of one handle keep running one at a time in call order. */
+  const pinned = new WeakMap<object, FormRecoveryPort>();
+
   return {
+    pin() {
+      const target = deps.service();
+      if (!target) return null;
+      let port = pinned.get(target.store);
+      if (!port) {
+        port = createFormRecoveryPort({ ...deps, service: () => target });
+        pinned.set(target.store, port);
+      }
+      return {
+        account: target.store.account,
+        scope: JSON.stringify([target.store.account, target.incarnationId]),
+        port,
+      };
+    },
+
     async save(snapshot: RecoverySnapshot) {
       const service = deps.service();
       if (!service) return "failed";
@@ -238,7 +302,8 @@ export function createFormRecoveryPort(
             redacted: [],
             saved_at: captured.savedAt,
             terminal: false,
-            content_digest: digestOf(captured.values),
+            content_digest: digestOf(contentOf(captured)),
+            ...(captured.meta && { meta: captured.meta }),
           };
           bytes = recoveryWriteBytes({
             ...row,
@@ -295,54 +360,75 @@ export function createFormRecoveryPort(
       });
     },
 
+    // Reads (WEB-14a revision 7, R13): null and [] are only ever what a read FOUND. No open store, or a read that fails (a closed or
+    // replaced handle, an aborted transaction, another incarnation), rejects: it says nothing about whether a copy exists.
     async load(formContext, tabInstanceId) {
       const service = deps.service();
-      if (!service) return null;
-      try {
-        const row = await service.store.run(loadFormRecovery, {
-          incarnationId: service.incarnationId,
-          formContext,
-          tabInstanceId,
-        });
-        return row
-          ? {
-              formContext: row.form_context,
-              tabInstanceId: row.tab_instance_id,
-              values: { ...row.fields },
-              savedAt: row.saved_at,
-            }
-          : null;
-      } catch {
-        return null;
-      }
+      if (!service) throw new Error(NO_STORE);
+      const row = await service.store.run(loadFormRecovery, {
+        incarnationId: service.incarnationId,
+        formContext,
+        tabInstanceId,
+      });
+      return row ? snapshotOf(row) : null;
     },
 
-    async discard(formContext, tabInstanceId) {
+    async list(formContext) {
       const service = deps.service();
-      if (!service) return;
+      if (!service) throw new Error(NO_STORE);
+      const rows = await service.store.run(listFormRecovery, {
+        incarnationId: service.incarnationId,
+        formContext,
+      });
+      return rows.map(snapshotOf);
+    },
+
+    async discard(formContext, tabInstanceId, expected) {
+      const service = deps.service();
+      // No open store: nothing can be written, so nothing this page knows of is gone (WEB-14a revision 1, R6: never claimed discarded).
+      if (!service) return "failed";
       const id = keyOf(service, formContext, tabInstanceId);
+      /** The terminal row of this form and tab: its fields cleared, kept (never hard-deleted), at the order given. */
+      const terminal = (seq: number, gen?: number): FormRecoveryRow => ({
+        form_context: formContext,
+        tab_instance_id: tabInstanceId,
+        fields: {},
+        redacted: [],
+        saved_at: deps.now(),
+        capture_seq: seq,
+        ...(gen !== undefined && { writer_gen: gen }),
+        terminal: true,
+        content_digest: digestOf({}),
+      });
+      // Revision 8 (R16): removing a capture another page wrote (a copy restored, an update hand-off's predecessor) is decided in ONE
+      // transaction that compares the capture before it changes anything: no claim of the row's writer first, and nothing at all when the
+      // row holds another capture. Removed, already resolved, or replaced by its own page since: that capture cannot come back.
+      if (expected !== undefined)
+        return serialised(id, async (): Promise<DiscardResult> => {
+          try {
+            const result = await write(service, terminal(0), {
+              expect: expected,
+            });
+            if (result.kind === "refused") return "refused";
+            return result.kind === "no_generation" ? "failed" : "discarded";
+          } catch {
+            return "failed";
+          }
+        });
       const { seq, claim, writer } = begin(service, formContext, tabInstanceId);
-      await serialised(id, async () => {
+      return serialised(id, async (): Promise<DiscardResult> => {
         let reservation: QuotaReservation | undefined;
         let written = false;
         let created = false;
         try {
           const claimed = await claim;
-          if (claimed.kind !== "claimed") return;
+          // `refused`: closing is set, and the database is about to be deleted with every copy in it. `no_generation`: nothing written.
+          if (claimed.kind !== "claimed")
+            return claimed.kind === "refused" ? "refused" : "failed";
           // A terminal write is admitted at `>=` in the order of captures, so it overtakes every capture asked for before it and
           // none asked for after it: a late older capture cannot bring the discarded text back, and text typed after the discard
           // is not erased. The fields are cleared and the row is kept (a hard delete could not be ordered against a late write).
-          const row: FormRecoveryRow = {
-            form_context: formContext,
-            tab_instance_id: tabInstanceId,
-            fields: {},
-            redacted: [],
-            saved_at: deps.now(),
-            capture_seq: seq,
-            writer_gen: claimed.gen,
-            terminal: true,
-            content_digest: digestOf({}),
-          };
+          const row = terminal(seq, claimed.gen);
           // With a row this replaces what is there with less, and needs no room. With none it would CREATE one, which is growth like any
           // other (R33, revision 18): the transaction says which it is when it runs (`absent`), and the row is then admitted first.
           let result = await write(service, row, { mayCreate: false });
@@ -352,7 +438,9 @@ export function createFormRecoveryPort(
               "input",
               recoveryWriteBytes(row),
             );
-            if (reservation?.verdict === "refuse") return;
+            // No row, and none may be created: there is no copy of this form and tab to restore, and the writer refuses (from memory, below)
+            // every capture asked for before this discard. Nothing can come back.
+            if (reservation?.verdict === "refuse") return "discarded";
             const held = reservation;
             result = await write(
               service,
@@ -361,8 +449,21 @@ export function createFormRecoveryPort(
             );
           }
           written = result.kind === "saved";
+          if (result.kind === "refused") return "refused";
+          // `superseded`: a capture asked for AFTER this discard is already durable (newer text the person typed); this discard did what it
+          // was asked (nothing from before it can be restored). `unchanged` cannot answer a terminal write. A terminal row that could not be
+          // CREATED (no row was there) leaves nothing to restore either.
+          if (
+            result.kind === "saved" ||
+            result.kind === "superseded" ||
+            created
+          )
+            return "discarded";
+          return "failed";
         } catch {
-          // `discard` has no result in the contract; the copy stays and is shown again, which is the safe direction.
+          // With a row there, the copy may still be there and be shown again: the caller must not say it was discarded. With none (the
+          // creation of the terminal row failed), nothing can be restored, and the writer refuses every earlier capture from memory.
+          return created ? "discarded" : "failed";
         } finally {
           reservation?.settle(written ? "written" : "not_written");
           // No row was there to order against and none was written: what this capture was asked after is refused from memory.

@@ -59,38 +59,45 @@ export function createProtectedSurface(
 
   const root = () => getProtectedRoot(doc);
 
-  /**
-   * Focus generation: a newer mount, a level-0 gate or an unmount cancels a pending heading focus. WEB-08c revision 3 (R8, HF-13): the
-   * level-0 gate did not advance it, and a deferred attempt focused the heading even when focus had already been moved inside the tree,
-   * so a heading attempt still waiting from the mount could run AFTER a lift had returned focus to the person's control and take it
-   * (the original assertion then read focus key `null`). A restoring lift always follows the gate, which cancels the attempt; a deferred
-   * attempt also leaves alone any focus already inside the tree.
-   */
+  /** Focus generation: a newer mount, lift, gate or unmount cancels a pending focus. */
   let focusToken = 0;
+  /**
+   * The heading is a FALLBACK (revision 19, R27): it never overrides focus that something in the tree has already placed (a restored
+   * form's first field, an update action, a dialog, the person), whether that happened before this mount's attempt or while it waited for
+   * the router to render the heading. Every attempt checks that first, and a focus into the tree meanwhile ends the wait even if the focused
+   * control has gone since.
+   */
   const focusHeading = () => {
     const token = ++focusToken;
-    const attempt = (framesLeft: number, deferred: boolean) => {
-      if (token !== focusToken || !mounted) return;
+    const tree = root();
+    let claimed = false;
+    const claim = () => {
+      claimed = true;
+    };
+    tree.addEventListener("focusin", claim);
+    const attempt = (framesLeft: number) => {
       const active = doc.activeElement;
-      const moved =
-        active instanceof HTMLElement &&
-        active !== doc.body &&
-        root().contains(active);
-      // A DEFERRED attempt never takes focus the person (or a restoration) has already moved somewhere inside the tree: the heading
-      // is the default target only while nothing in the tree has been chosen.
-      if (deferred && moved) return;
-      const heading = root().querySelector<HTMLElement>("h1");
-      if (heading) {
-        if (!heading.hasAttribute("tabindex")) heading.tabIndex = -1;
-        heading.focus();
+      if (
+        token !== focusToken ||
+        !mounted ||
+        claimed ||
+        (active !== doc.body && tree.contains(active)) ||
+        framesLeft < 0
+      ) {
+        tree.removeEventListener("focusin", claim);
         return;
       }
-      // The router renders its route after the synchronous commit: wait for the heading (bounded), unless the person
-      // has already moved focus somewhere inside the tree.
-      if (framesLeft > 0 && !moved)
-        win.requestAnimationFrame(() => attempt(framesLeft - 1, true));
+      const heading = tree.querySelector<HTMLElement>("h1");
+      if (!heading) {
+        // The router renders its route after the synchronous commit: wait for the heading (bounded).
+        win.requestAnimationFrame(() => attempt(framesLeft - 1));
+        return;
+      }
+      tree.removeEventListener("focusin", claim);
+      if (!heading.hasAttribute("tabindex")) heading.tabIndex = -1;
+      heading.focus();
     };
-    attempt(120, false);
+    attempt(120);
   };
 
   return {
@@ -99,12 +106,12 @@ export function createProtectedSurface(
       applyGate(protectedRoot);
       setNeutralTitle(doc);
       deps.liveRegions.clearAll();
+      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).
+      focusToken += 1;
       // Focus leaves the protected tree, so an open tooltip or menu that closes on blur does.
       const active = doc.activeElement;
       if (active instanceof HTMLElement && protectedRoot.contains(active))
         active.blur();
-      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).
-      focusToken += 1;
       // The modal dialog is opened LAST so it is the topmost modal dialog.
       deps.gateDialog.open();
       deps.gateDialog.focusHeading();
@@ -160,8 +167,11 @@ export function createProtectedSurface(
                 element.getAttribute("data-focus-key") === position.focusKey,
             ) ?? null)
           : null;
-        if (target) target.focus();
-        else focusHeading();
+        if (target) {
+          // The person's own place wins over a heading focus still pending from an earlier mount (revision 19, R27).
+          focusToken += 1;
+          target.focus();
+        } else focusHeading();
         win.scrollTo(position.scrollX, position.scrollY);
       } else {
         focusHeading();
