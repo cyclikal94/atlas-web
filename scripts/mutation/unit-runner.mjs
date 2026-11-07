@@ -30,6 +30,14 @@
 // incomplete evidence (`supervisedRun`), and an interruption (`interrupt`, an AbortSignal whose reason is the signal's name) latches
 // the stop, ends every running child with that signal and still writes the account.
 //
+// Mutation-runner time limit (7 November 2026, Kieran's decision MUTATION-RUNNER-TIMEOUT-20261107): every test of every child this
+// runner starts, each unmutated control and each mutant alike, runs under ONE fixed per-test limit, `MUTANT_TEST_TIMEOUT_MS` (20 s),
+// in place of Vitest's 5 s default, so a test made slow by controller load is judged by its assertions rather than ending as a time-out
+// (`crash_only` or `tainted`). It is carried in each request (`testTimeoutMs`) and applied by the supervised child as Vitest's
+// `testTimeout`, which is only the DEFAULT: a test's or suite's own explicit timeout (for example `SLOW`, or `vi.setConfig`) is kept as
+// written, larger or smaller. Ordinary runs (`pnpm test`) never pass through this runner and keep Vitest's limits. Nothing in the
+// verdict changed: a time-out is still never an assertion, so a test that hangs ends `crash_only` or `tainted`, after 20 s.
+//
 // Kept from the earlier runner: patched copies, never the tree; one unmutated control per distinct set of tests; the catalogue's
 // `expect` rule; an earlier revision's mutant (no `expect`) that is not cleanly caught is LISTED (crash_only_legacy, tainted_legacy),
 // never counted as caught, and does not fail the run.
@@ -50,6 +58,16 @@ const supervisor = join(
   dirname(new URL(import.meta.url).pathname),
   "vitest-supervised.mjs",
 );
+
+/**
+ * The per-test time limit of every control and mutant run (Vitest's `testTimeout`; its own default is 5,000 ms). Fixed, never derived
+ * from a measured baseline: a control and its mutants must be judged under the same limit, and the same mutant under the same limit on
+ * every run and host, whatever the load was when its control ran. A test's own explicit timeout still takes precedence.
+ */
+export const MUTANT_TEST_TIMEOUT_MS = 20_000;
+
+/** Whether `ms` can be a per-test limit (a positive whole number of milliseconds; Vitest reads 0 as no limit, which is refused). */
+export const isTestTimeout = (ms) => Number.isSafeInteger(ms) && ms > 0;
 
 /** Claim `outDir` for this invocation only; an existing path is refused, never reused or merged. */
 export function claimOutput(outDir) {
@@ -179,6 +197,7 @@ function spawnChild(argv, { cwd, env, children }) {
  * One supervised Vitest child over `files`, judged from its complete evidence. Revision 30: `progress.stage` names how far it got
  * (`request`, `launch`, `started`, `complete`, `evidence`), and `halt(error)` is called synchronously at the failure, before it propagates.
  * Revision 41: a run that did not include every one of `files` as a test module is incomplete; `children` (a Set) holds the live child.
+ * `testTimeoutMs` (the mutation-runner time limit) is the per-test limit the request asks the supervised child to apply.
  */
 export async function supervisedRun({
   root,
@@ -188,6 +207,7 @@ export async function supervisedRun({
   label,
   env = {},
   closeTimeoutMs,
+  testTimeoutMs,
   testNamePattern,
   onLaunch,
   progress = {},
@@ -213,6 +233,7 @@ export async function supervisedRun({
       json: join(dir, "report.json"),
       envelope: join(dir, "envelope.json"),
       ...(closeTimeoutMs ? { closeTimeoutMs } : {}),
+      ...(testTimeoutMs !== undefined ? { testTimeoutMs } : {}),
       ...(testNamePattern ? { testNamePattern } : {}),
     };
     const requestPath = join(dir, "request.json");
@@ -281,7 +302,8 @@ export function failsRun(verdict, mutant) {
  * Run `mutants` (each `{ id, title, file, patch, tests, expect? }`). `config` is the Vitest config path, `expectedCount` the catalogue
  * size (null to skip the count check). Returns `{ code, summary, results }` and writes `unit-results.json` into `outDir`. `interrupt`
  * (revision 41) is an AbortSignal: its abort latches `interrupted by <reason>`, ends the running children with that signal (SIGKILL
- * after 10 s) and the run still joins them and writes its account.
+ * after 10 s) and the run still joins them and writes its account. `testTimeoutMs` (default `MUTANT_TEST_TIMEOUT_MS`) is the per-test
+ * limit of EVERY control and mutant child, recorded in the summary (`test_timeout_ms`); a value that is not a limit is refused (exit 2).
  */
 export async function runUnitMutants({
   root,
@@ -293,10 +315,17 @@ export async function runUnitMutants({
   expectedCount = null,
   extraSummary = {},
   closeTimeoutMs,
+  testTimeoutMs = MUTANT_TEST_TIMEOUT_MS,
   log = console.log,
   onRecord,
   interrupt,
 }) {
+  if (!isTestTimeout(testTimeoutMs)) {
+    console.error(
+      `refusing a per-test time limit that is not a positive whole number of milliseconds: ${describeError(testTimeoutMs)}`,
+    );
+    return { code: 2, summary: null, results: [] };
+  }
   const claim = claimOutput(outDir);
   if (!claim.ok) {
     console.error(claim.reason);
@@ -401,6 +430,7 @@ export async function runUnitMutants({
         dir: join(work, label),
         label,
         closeTimeoutMs,
+        testTimeoutMs,
         testNamePattern: pattern(selection),
         onLaunch,
         progress,
@@ -544,6 +574,7 @@ export async function runUnitMutants({
         label: mutant.id,
         env: { ATLAS_MUTANT_DIR: dir },
         closeTimeoutMs,
+        testTimeoutMs,
         testNamePattern: pattern(mutant.selection),
         onLaunch,
         progress,
@@ -626,6 +657,7 @@ export async function runUnitMutants({
     layer:
       "L1a/L1b (vitest, patched copies, unmutated control per test set; supervised evidence, clean catches, failure latch)",
     selected: patches.length,
+    test_timeout_ms: testTimeoutMs,
     unit_mutants_run: results.length,
     patch_failures: unapplied.map((p) => ({ id: p.mutant.id, error: p.error })),
     caught: results.filter((r) => r.caught && !tainted(r)).length,

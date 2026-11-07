@@ -1261,6 +1261,16 @@ proxy injects (`rewrite_status` for a bare status, `replace_response` for an Atl
 The guards are shown to fail on their removal by a mutation catalogue run on **copies** of the source (`pnpm test:data-mutants`: 982 unit mutants (WEB-09b review cycle 1; 966 at WEB-09b's first candidate; 932 at revision 38; 914 at revision 37, 903 at revision 36, 888 at revision 35, 884 at revision 34, 875 at revision 33, 857 at revision 32), each with an unmutated control,
 the count asserted; `pnpm test:engine-mutants`: 151 mutants through a real engine (WEB-09b review cycle 1; 141 at revision 38; 140 at revision 37, 137 at revision 36, 136 at revision 35, 134 at revision 34, 132 at revision 33, 123 at revision 32)). A mutant is **caught** only by an `AssertionError` (a crash, a timeout or a suite that does not load is classified and is not evidence), and every mutant added since revision 12 carries an `expect` pattern: the test written for the defect must be among the failures (in every engine, for a real-engine mutant). An earlier mutant caught by crashes alone is reported in the results (`crash_only_legacy`), never counted as an assertion catch. It never uses `tests/.mutants`, which regenerates from the current source.
 
+**The unit runner's per-test time limit** (7 November 2026, Kieran's decision MUTATION-RUNNER-TIMEOUT-20261107). Every child of `pnpm test:data-mutants`, each
+unmutated control and each mutant alike, runs every test under **20 s** (`MUTANT_TEST_TIMEOUT_MS` in `scripts/mutation/unit-runner.mjs`) instead of Vitest's 5 s
+default, so a test that a loaded controller (load averages of 30 to 100) makes slow on a mutated path is judged by its assertions instead of ending `crash_only` or
+`tainted` by a time-out. The limit is fixed (never derived from a measured run), carried in each child's request (`testTimeoutMs`), applied as Vitest's
+`testTimeout`, recorded for every project (`origin.projects[].testTimeout`, a project that resolves to another limit is refused) and for every test
+(`witness.tests[].timeout`) in its envelope, and in the account (`test_timeout_ms`). It is a default only: a test's or suite's own explicit timeout (for example a
+file's `SLOW`) is kept as written, larger or smaller. A time-out is still never an assertion, so a test that hangs ends `crash_only` or `tainted`, at 20 s.
+Ordinary runs (`pnpm test`, `vitest.config.ts`) and the real-engine runner keep their limits. Tests: `scripts/validation/unit-runner-time-limit.test.mjs` (the
+real supervised child over a fixture) and `scripts/validation/unit-runner.test.mjs`.
+
 ## Seams
 
 * **WEB-09b** supplies (since 10 October 2026) `start(ownership)` for the engine and the dispatcher through the production leader, the first snapshot, the recovery job behind
