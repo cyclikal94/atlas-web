@@ -1,13 +1,19 @@
-import { useId } from "react";
+import { useId, useRef } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { Invitation } from "../api";
 import * as base from "../copy";
 import { DirectoryLookup } from "../DirectoryLookup";
 import { Banner, formatWhen } from "../parts";
 import * as copy from "./copy";
+import {
+  completeTicket,
+  inviteRecovery,
+  useHouseholdRecovery,
+} from "./form-recovery";
 import { householdOf, listOf } from "./memory";
 import {
   daysLeft,
@@ -44,6 +50,10 @@ import {
  * A read it needs that FAILED with nothing landed (For you, Sent by you and, opened for a household, the household list its Invite
  * section needs) is shown as that failure with its request id and Try again, never as "Loading…" or a silently missing section (review 1
  * F-R1-1).
+ *
+ * M-1 (WEB-12b merge of 2f42ac35; WEB-14a's Q4, `form-recovery.ts`): the Invite section's username is recoverable around an app update
+ * (`household-invite:<id>`, the context WEB-14a gave the row form this section replaced), including an account chosen in the directory
+ * lookup (given to the model like a keystroke). The lookup's queries are presentation and are not recovered.
  */
 export function InvitationsDialog({
   ctx,
@@ -70,6 +80,7 @@ export function InvitationsDialog({
     householdId === null ? null : formContext.invite(householdId);
   const username = draftKey === null ? "" : (memory.drafts.get(draftKey) ?? "");
   const blocked = blockedReason(memory);
+  const usernameRef = useRef<HTMLInputElement>(null);
   const title =
     household === null
       ? copy.INVITATIONS_TITLE
@@ -79,13 +90,30 @@ export function InvitationsDialog({
     (listOf(memory) ?? []).filter((h) => h.role === "manager").map((h) => h.id),
   );
   const atCapacity = (membershipCount(memory) ?? 0) >= 32;
+  const recovery = useHouseholdRecovery({
+    memory,
+    key: draftKey,
+    // The Invite section's field is on screen (bound, and so looking, only then: the household list read, you its manager, no lookup).
+    shown: draftKey !== null && household !== null && manager && !lookupOpen,
+    codec: inviteRecovery(householdId ?? ""),
+    start: () => "",
+    value: () => (draftKey === null ? "" : (memory.drafts.get(draftKey) ?? "")),
+    restored: (value) => {
+      if (draftKey !== null) memory.recovered(draftKey, value);
+    },
+    reset: () => {
+      if (draftKey !== null) memory.recovered(draftKey, null);
+    },
+  });
 
   const lookup =
     lookupOpen && household !== null && manager ? (
       <DirectoryLookup
         purpose={copy.INVITE_HEADING(household.name)}
         onChoose={(entry) => {
-          if (draftKey !== null) memory.draft(draftKey, entry.username);
+          // M-1: the account chosen is the person's input, given to the model first (refused while an update reload is prepared).
+          if (draftKey !== null && (recovery?.edit(entry.username) ?? true))
+            memory.draft(draftKey, entry.username);
           memory.draft(lookupKey, null);
         }}
         onBack={() => memory.draft(lookupKey, null)}
@@ -212,27 +240,41 @@ export function InvitationsDialog({
                       event.preventDefault();
                       const name = username.trim();
                       if (blocked !== null || name === "") return;
+                      // M-1: the ticket first (none while an update reload is prepared: nothing is looked up or sent).
+                      const ticket = recovery?.submitting() ?? null;
+                      if (ticket === null) return;
                       void invite(
                         ctx,
                         household,
                         name,
                         `invite:${household.id}`,
                       ).then((ok) => {
-                        if (ok) memory.draft(draftKey, null);
+                        // I7: cleared only while the field still holds what this invitation sent.
+                        const unchanged = ticket.current();
+                        completeTicket(ticket, ok);
+                        if (ok && unchanged) memory.draft(draftKey, null);
                       });
                     }}
                   >
                     <div className="min-w-0 flex-1">
+                      {recovery !== null ? (
+                        <RecoveryNotice
+                          recovery={recovery}
+                          firstFieldRef={usernameRef}
+                        />
+                      ) : null}
                       <Input
+                        ref={usernameRef}
                         label={copy.USERNAME_LABEL}
                         surface="panel"
                         value={username}
                         autoCapitalize="none"
                         autoComplete="off"
                         spellCheck={false}
-                        onChange={(event) =>
-                          memory.draft(draftKey, event.target.value)
-                        }
+                        onChange={(event) => {
+                          if (recovery?.edit(event.target.value) ?? true)
+                            memory.draft(draftKey, event.target.value);
+                        }}
                       />
                     </div>
                     {blocked !== null ? (

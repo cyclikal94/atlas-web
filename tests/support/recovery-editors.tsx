@@ -5,6 +5,7 @@ import { ProtectedProviders } from "../../src/app/providers";
 import { ShellEnvProvider } from "../../src/app/shell/env";
 import { SyncStatusProvider } from "../../src/components/ui/sync-status";
 import { DataEnvProvider } from "../../src/data/ui/react";
+import { forgetHouseholdsMemory } from "../../src/features/sharing/households/memory";
 import { forgetAllCorrections } from "../../src/features/tasks/detail/CorrectionDialog";
 import { forgetKeptFixes } from "../../src/features/tasks/detail/EntryHistory";
 import { type TasksEnv, TasksEnvProvider } from "../../src/features/tasks/env";
@@ -63,6 +64,8 @@ export function forgetRecoveryWorld(): void {
   forgetAllCorrections();
   forgetKeptFixes();
   forgetRecoverableEditors();
+  // WEB-12b merge correction M-1: the households page memory and its recovery models (`households/form-recovery.ts`).
+  forgetHouseholdsMemory();
   for (const handle of handoffHandles(pageFormRegistry))
     void handle.discard?.();
   current = new MemoryRecoveryAdapter();

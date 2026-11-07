@@ -16,6 +16,7 @@ import {
   parseInvitations,
   parseTemplateScope,
 } from "../../src/features/sharing/api";
+import { parseSentPage } from "../../src/features/sharing/households/model";
 import { parseDependencyGraph } from "../../src/features/tasks/model/contract";
 import {
   API,
@@ -84,14 +85,19 @@ describe("revision 57 (C-H4, Q-H3): the seeded worlds' canned reads are what the
     );
   });
 
-  test("the sharing screens, with and without a managed household: templates, memberships and invitations parse", () => {
+  test("the sharing screens, with and without a managed household: templates, memberships, invitations and the sent walk parse", () => {
     for (const households of [
       [],
       [managedHousehold("66666666-6666-4666-8666-666666666660", "R52 House")],
     ]) {
       const reads = sharingReads(households);
       expect(Object.keys(reads).sort()).toEqual(
-        ["/defaults/templates", "/households", "/invitations"]
+        [
+          "/defaults/templates",
+          "/households",
+          "/invitations",
+          "/invitations/sent",
+        ]
           .map((path) => `${API}${path}`)
           .sort(),
       );
@@ -102,6 +108,11 @@ describe("revision 57 (C-H4, Q-H3): the seeded worlds' canned reads are what the
         households.length,
       );
       expect(parseInvitations(reads[`${API}/invitations`])).toEqual([]);
+      // WEB-12b (M-1): the household screens' sent walk, by WEB-12b's own parser.
+      expect(parseSentPage(reads[`${API}/invitations/sent`])).toEqual({
+        items: [],
+        next_after: null,
+      });
     }
   });
 

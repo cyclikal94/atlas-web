@@ -1,7 +1,7 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 3084;
+export const EXPECTED_UNIT = 3096;
 export const EXPECTED_ENGINE = 337;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
@@ -109,3 +109,5 @@ export const EXPECTED_ENGINE = 337;
 // WEB-12b maintenance merge of accepted main 480f508 (7 November 2026): main 480f508 (3047 unit, 331 engine) plus WEB-12b (37 unit,
 // 6 engine) = 3084 unit, 337 engine, counted from the merged catalogue; no ID overlaps (MU-6201..MU-6238 and MU-6301..MU-6306 against
 // MU-3801..MU-3821, MU-4001..MU-4024, MU-6101..MU-6154 and MU-7001..MU-7103).
+// WEB-12b merge correction M-1 (Kieran, 6 November 2026, "Fix in the second merge"; the household dialogs' app-update recovery): +12 unit
+// (MU-6239..MU-6248, MU-6250, MU-6251; MU-6249 not catalogued, reason in `catalogue-web12b.mjs`) = 3096 unit, 337 engine.

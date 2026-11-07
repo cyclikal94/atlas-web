@@ -8,6 +8,11 @@ import {
 } from "../api";
 import type { Attempt } from "../model/submission";
 import type { HouseholdApi } from "./api";
+import {
+  dropped,
+  forgetHouseholdRecovery,
+  retireHouseholdRecoveryExcept,
+} from "./form-recovery";
 import type {
   AccountInvitationSummary,
   IssuedInvitation,
@@ -26,6 +31,10 @@ import type {
  *  - `browseRefused`: the server's directory is disabled (`GET /directory` answered `403`), asked once per page lifetime;
  *  - the single OPERATION owner (DA-H1) and the unresolved attempt (R8, Decision H), with the identity that made it;
  *  - the last problem of each surface, the form drafts, and a signup link issued and not yet dismissed.
+ *
+ * The three typed drafts (New household, Rename, an invitation's username) are also followed by app-update recovery models (WEB-12b merge
+ * correction M-1, `form-recovery.ts`): page memory stays their authority; a draft it drops ends its model's session, and another identity's
+ * models leave the page's registry with its memory.
  *
  * Nothing is written to storage, the URL or history: a reload forgets it (Decision H, D-12b-2), and so does any other identity. Memory for
  * one identity is dropped the moment another identity asks for its own; a continuation that finishes after that writes into a memory
@@ -96,6 +105,8 @@ export class HouseholdsMemory {
   unresolved: Unresolved | null = null;
   readonly problems = new Map<string, Problem>();
   readonly drafts = new Map<string, string>();
+  /** M-1: the household version a RESTORED rename was composed against, by draft key (its Save is guarded by it, never an overwrite). */
+  readonly bases = new Map<string, number>();
   /** A signup link just issued, by household, until Done or the dialog is dismissed (never storage, the URL or the announcer). */
   readonly issued = new Map<string, IssuedInvitation & { link: string }>();
   /** Signup invitations that may have been created by an issuance whose answer was lost, by household (SHARE-7). */
@@ -128,8 +139,27 @@ export class HouseholdsMemory {
     this.touch();
   }
   draft(key: string, value: string | null): void {
+    if (value === null) {
+      this.drafts.delete(key);
+      this.bases.delete(key);
+      // M-1: the draft is gone from page memory, so its recovery session ends (its copies are discarded).
+      dropped(this.identity, key);
+    } else this.drafts.set(key, value);
+    this.touch();
+  }
+  /**
+   * M-1: the recovery model's own write, never the person's edit and never the end of its session: a restored copy (with the version a
+   * rename was composed against), or "Discard instead"'s reset to what the form shows untouched (`null`).
+   */
+  recovered(
+    key: string,
+    value: string | null,
+    base: number | null = null,
+  ): void {
     if (value === null) this.drafts.delete(key);
     else this.drafts.set(key, value);
+    if (base === null) this.bases.delete(key);
+    else this.bases.set(key, base);
     this.touch();
   }
 }
@@ -140,6 +170,8 @@ let current: HouseholdsMemory | null = null;
 export function householdsMemory(identity: string): HouseholdsMemory {
   if (current === null || current.identity !== identity) {
     const previous = current;
+    // M-1: the previous identity's recovery models leave the page's registry with its memory (F-INT-PEOPLE-Q4's rule).
+    retireHouseholdRecoveryExcept(identity);
     current = new HouseholdsMemory(identity);
     previous?.touch();
   }
@@ -153,6 +185,7 @@ export const isCurrentHouseholds = (memory: HouseholdsMemory): boolean =>
 export function forgetHouseholdsMemory(): void {
   const previous = current;
   current = null;
+  forgetHouseholdRecovery();
   previous?.touch();
 }
 

@@ -8,6 +8,14 @@
 //  - MU-6222 (an accept sent with the household's version instead of the invitation's): a pending invitation for you is never for a
 //    household you are already in (the server refuses a second one: `conflict`), so the page never knows a household version for it;
 //    the command builder's own counter is MU-6201's, over the same line.
+//
+// WEB-12b maintenance merge of accepted main 2f42ac35, correction M-1: +13 unit (MU-6239..MU-6251) over `households/form-recovery.ts` and the
+// three household dialogs (WEB-14a's app-update recovery, ported from the deleted `HouseholdsMinimal`): +12 unit (MU-6239..MU-6248,
+// MU-6250, MU-6251). Not catalogued, with the reason:
+//  - MU-6249 (the look's automatic restore over a name typed before it answered, the owner's untouched guards removed): the guards in
+//    `form-recovery.ts` are defence in depth. WEB-14a's model itself offers instead of restoring once the session's input changed after
+//    the look began (DA-1), and page memory's draft is given to the model before any look, so no schedule observes their loss (an
+//    equivalent mutant: run once, survived, `onto-2f42ac35/evidence/checks/m1-mutants-run-2-MU-6249-equivalent.log`).
 import { sub } from "./data-catalogue.mjs";
 
 const D = "src/features/sharing/households";
@@ -16,6 +24,9 @@ const PAGE = "tests/features/sharing/households-page.test.tsx";
 const INVITATIONS = "tests/features/sharing/households-invitations.test.tsx";
 const SIGNUP = "tests/features/sharing/households-signup.test.tsx";
 const LEGACY = "tests/features/sharing/sharing-page.test.tsx";
+// WEB-12b maintenance merge of 2f42ac35, correction M-1 (WEB-14a's app-update recovery of the household dialogs).
+const RECOVERY = "tests/features/sharing/households-recovery.test.tsx";
+const OWNER_DISCARD = "tests/features/recovery-owner-discard.test.tsx";
 
 export const UNIT_WEB12B = [
   {
@@ -525,6 +536,171 @@ export const UNIT_WEB12B = [
         t,
         "    memory.draft(formContext.rename(target), null);\n",
         "    undefined;\n",
+      ),
+  },
+  // ---- WEB-12b maintenance merge of 2f42ac35, correction M-1 (Kieran, 6 November 2026): the household dialogs' app-update recovery ----
+  {
+    id: "MU-6239",
+    title:
+      "WEB-12b M-1: New household declares no recovery (its dialog is no registered form: an update offers a plain Reload and loses the name)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY],
+    expect: /M-1 New household: registered while open/,
+    patch: (t) => sub(t, "    shown: true,\n", "    shown: false,\n"),
+  },
+  {
+    id: "MU-6240",
+    title:
+      "WEB-12b M-1: New household's typing is not given to the model (never dirty, never saved; taken while an update reload is prepared)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY],
+    expect:
+      /M-1 New household: registered while open|M-1 while an update reload/,
+    patch: (t) =>
+      sub(
+        t,
+        "            if (recovery.edit(event.target.value))\n              memory.draft(key, event.target.value);\n",
+        "            memory.draft(key, event.target.value);\n",
+      ),
+  },
+  {
+    id: "MU-6241",
+    title:
+      "WEB-12b M-1: Create sends while an update reload is being prepared (the model's refused ticket is ignored)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY],
+    expect: /M-1 while an update reload is being prepared/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const ticket = recovery.submitting();\n    if (ticket === null) return;\n    void run(ctx, cmd.create(id, trimmed), {\n",
+        '    const ticket = recovery.submitting() ?? { current: () => true, succeeded: async () => "discarded", failed: () => undefined };\n    void run(ctx, cmd.create(id, trimmed), {\n',
+      ),
+  },
+  {
+    id: "MU-6242",
+    title:
+      "WEB-12b M-1 (WEB-14a I7): a successful create clears the name even when a newer name was typed while it was on its way",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY, OWNER_DISCARD],
+    expect: /M-1 I7: a create answered|I7: a create answered after newer input/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (unchanged) memory.draft(key, null);\n        ctx.go(householdPath(id));\n",
+        "        memory.draft(key, null);\n        ctx.go(householdPath(id));\n",
+      ),
+  },
+  {
+    id: "MU-6243",
+    title:
+      "WEB-12b M-1: a restored rename is saved under the household's version of now (a household renamed since is silently overwritten)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY],
+    expect: /M-1 Rename: a restored rename is saved under the version/,
+    patch: (t) =>
+      sub(
+        t,
+        "            base === undefined ? household : { ...household, version: base };\n",
+        "            household;\n",
+      ),
+  },
+  {
+    id: "MU-6244",
+    title:
+      "WEB-12b M-1: after a restored rename's conflict the old version is kept (every later Save conflicts again)",
+    file: `${D}/NameDialogs.tsx`,
+    tests: [RECOVERY],
+    expect: /M-1 Rename: a restored rename is saved under the version/,
+    patch: (t) =>
+      sub(
+        t,
+        "              memory.bases.delete(key);\n",
+        "              undefined;\n",
+      ),
+  },
+  {
+    id: "MU-6245",
+    title:
+      "WEB-12b M-1: an invitation's typed username is not given to the model (never dirty, never saved by an update)",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [RECOVERY],
+    expect: /M-1 Invite: the username typed/,
+    patch: (t) =>
+      sub(
+        t,
+        "                          if (recovery?.edit(event.target.value) ?? true)\n",
+        "                          if (true)\n",
+      ),
+  },
+  {
+    id: "MU-6246",
+    title:
+      "WEB-12b M-1: an account chosen in the directory lookup bypasses the model (the invitation's input is not saved by an update)",
+    file: `${D}/InvitationsDialog.tsx`,
+    tests: [RECOVERY],
+    expect: /M-1 Invite: an account chosen in the directory lookup/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (draftKey !== null && (recovery?.edit(entry.username) ?? true))\n",
+        "          if (draftKey !== null)\n",
+      ),
+  },
+  {
+    id: "MU-6247",
+    title:
+      "WEB-12b M-1: a draft page memory drops (Rename's Escape) keeps its recovery session: its copy stays and an update saves it again",
+    file: `${D}/form-recovery.ts`,
+    tests: [RECOVERY],
+    expect: /M-1 Rename: Escape/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (linked === undefined || !linked.active) return;\n",
+        '  if (linked === undefined || !linked.active || key !== "") return;\n',
+      ),
+  },
+  {
+    id: "MU-6248",
+    title:
+      "WEB-12b M-1 (F-INT-PEOPLE-Q4's rule): another identity's page memory leaves the previous identity's household models in the registry",
+    file: `${D}/memory.ts`,
+    tests: [RECOVERY],
+    expect: /M-1 another identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "    retireHouseholdRecoveryExcept(identity);\n    current = new HouseholdsMemory(identity);\n",
+        "    current = new HouseholdsMemory(identity);\n",
+      ),
+  },
+  {
+    id: "MU-6250",
+    title:
+      "WEB-12b M-1: Rename looks before its form is shown (after the update's reload the copy is only offered, never restored)",
+    file: `${D}/form-recovery.ts`,
+    tests: [RECOVERY],
+    expect: /M-1 Rename: the accepted update saves the name/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (linked !== null && shown) linked.model.bind(port);\n",
+        "    if (linked !== null) linked.model.bind(port);\n",
+      ),
+  },
+  {
+    id: "MU-6251",
+    title:
+      "WEB-12b M-1: the household codecs accept any text (a name over 300 characters is restored)",
+    file: `${D}/form-recovery.ts`,
+    tests: [RECOVERY],
+    expect: /M-1 a copy this build cannot read/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return valid({ [field]: parsed.text });\n",
+        "      return parsed.text;\n",
       ),
   },
 ];

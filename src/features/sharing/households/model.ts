@@ -318,9 +318,10 @@ export const byName = (a: SnapshotHousehold, b: SnapshotHousehold): number =>
 
 // ---- form recovery readiness (Q4; D-12b-15) ----------------------------------------------------------------------------------------
 /**
- * The three household forms' recovery contexts (WEB-14a supplies the app-update capture). Values only: a name or a username, never a
- * token (a signup link is a credential and is never a recovery value). Restoring NEVER submits: the restored value is shown in its form,
- * and sending stays the person's act. A value that is not a valid input restores nothing. They are also the page memory's draft keys.
+ * The three household forms' page-memory draft keys (D-12b-15). Their app-update recovery (WEB-12b merge correction M-1,
+ * `form-recovery.ts`) uses WEB-14a's own contexts and the validators below: values only, a name or a username, never a token (a signup
+ * link is a credential and is never a recovery value). Restoring NEVER submits: the restored value is shown in its form, and sending stays
+ * the person's act. A value that is not a valid input restores nothing.
  */
 export const formContext = {
   create: (): string => "households:new",

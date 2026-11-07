@@ -147,7 +147,8 @@ export const managedHousehold = (
 
 /**
  * The sharing screens' reads for an account with `households` and no invitations: the personal layer of the field defaults (no template
- * set), the memberships and the invitations. The defaults snapshot itself is a server default.
+ * set), the memberships, the invitations and (WEB-12b, merge correction M-1) the walk of invitations you sent, which the household detail
+ * and a household's Invitations dialog read (one empty page). The defaults snapshot itself is a server default.
  */
 export function sharingReads(
   households: readonly SeededHousehold[] = [],
@@ -163,6 +164,7 @@ export function sharingReads(
     },
     [`${API}/households`]: [...households],
     [`${API}/invitations`]: [],
+    [`${API}/invitations/sent`]: { items: [], next_after: null },
   };
 }
 

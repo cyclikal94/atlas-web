@@ -58,9 +58,13 @@ const SITES: Record<string, Site[]> = {
       },
     },
   ],
-  "src/features/sharing/HouseholdsMinimal.tsx": [
-    { firstFieldRef: "draft.field", kind: "ref" },
-    { firstFieldRef: "draft.field", kind: "ref" },
+  // WEB-12b merge correction M-1: HouseholdsMinimal's two inline forms are WEB-12b's dialogs (New household and Rename; an invitation).
+  "src/features/sharing/households/InvitationsDialog.tsx": [
+    { firstFieldRef: "usernameRef", kind: "ref" },
+  ],
+  "src/features/sharing/households/NameDialogs.tsx": [
+    { firstFieldRef: "nameRef", kind: "ref" },
+    { firstFieldRef: "nameRef", kind: "ref" },
   ],
   "src/features/sharing/ResourcePolicyEditor.tsx": [
     {
@@ -258,12 +262,12 @@ const readRepo = (path: string): string | null => {
 describe("revision 57 (C-F3, Q-F7): every RecoveryNotice site is registered with its focus target's kind", () => {
   const files = sources(join(ROOT, "src"));
 
-  test("the registry and the source agree: 21 sites, their targets, kinds and named focus tests", () => {
+  test("the registry and the source agree: 22 sites, their targets, kinds and named focus tests", () => {
     expect(audit(files, SITES, readRepo)).toEqual([]);
-    expect(Object.values(SITES).flat()).toHaveLength(21);
+    expect(Object.values(SITES).flat()).toHaveLength(22);
   });
 
-  test("a 22nd site, unregistered, fails", () => {
+  test("a 23rd site, unregistered, fails", () => {
     const extra = {
       ...files,
       "src/features/new/Editor.tsx":

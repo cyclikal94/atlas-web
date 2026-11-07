@@ -11,8 +11,7 @@ import {
   ADD_CONTEXT,
   AddSourceDialog,
 } from "../../src/features/calendars/AddSourceDialog";
-import * as sharingCopy from "../../src/features/sharing/copy";
-import { HouseholdsMinimal } from "../../src/features/sharing/HouseholdsMinimal";
+import * as householdsCopy from "../../src/features/sharing/households/copy";
 import type { TaskActions } from "../../src/features/tasks/actions";
 import {
   CORRECTION_COPY,
@@ -24,7 +23,7 @@ import {
 } from "../../src/features/tasks/detail/RecordCard";
 import { RESTORE_COPY } from "../../src/lib/form-recovery/RecoveryNotice";
 import { installMatchMedia } from "../helpers/match-media";
-import { HOME, household, ME as SHARING_ME } from "../support/data/sharing";
+import { ME as SHARING_ME } from "../support/data/sharing";
 import { stubEnv } from "../support/data/ui-env";
 import {
   forgetRecoveryWorld,
@@ -36,8 +35,13 @@ import {
   store,
   withRecovery,
 } from "../support/recovery-editors";
-import { fakeSharingApi, ok } from "../support/sharing/fake-api";
-import { mountSharing } from "../support/sharing/mount";
+import { ok } from "../support/sharing/fake-api";
+import { fakeHouseholdApi } from "../support/sharing/fake-households";
+import {
+  HOME_ID,
+  homeOf,
+  mountHouseholds,
+} from "../support/sharing/households";
 import { ME } from "../support/tasks/world";
 
 /**
@@ -223,11 +227,10 @@ describe("Q3: the other saved copy chosen after the automatic restore, in the re
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  test("a household invite (component-state editor): the older copy chosen after the person typed replaces it; nothing is sent", async () => {
-    const api = fakeSharingApi();
+  test("a household invite (WEB-12b's Invitations dialog; M-1, page-memory owner): the older copy chosen after the person typed replaces it; nothing is sent", async () => {
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([
-      household({
-        id: HOME,
+      homeOf({
         members: [{ account_id: SHARING_ME, username: "me", role: "manager" }],
       }),
     ]);
@@ -235,18 +238,20 @@ describe("Q3: the other saved copy chosen after the automatic restore, in the re
       ["older-tab", "older-user", "2026-10-25T10:00:00.000Z"],
       ["newer-tab", "newer-user", "2026-10-25T11:00:00.000Z"],
     ] as const)
-      await left(`household-invite:${HOME}`, JSON.stringify({ v: 1, text }), {
-        tab,
-        savedAt,
-      });
-    mountSharing(<HouseholdsMinimal />, {
+      await left(
+        `household-invite:${HOME_ID}`,
+        JSON.stringify({ v: 1, text }),
+        {
+          tab,
+          savedAt,
+        },
+      );
+    mountHouseholds(`/sharing/households/${HOME_ID}/invitations`, {
       env: withRecovery(stubEnv()),
       api,
     });
     const invitee = () =>
-      screen.getByLabelText(
-        sharingCopy.INVITE_LABEL("Home"),
-      ) as HTMLInputElement;
+      screen.getByLabelText(householdsCopy.USERNAME_LABEL) as HTMLInputElement;
     await waitFor(() => expect(invitee().value).toBe("newer-user"));
     // The person types, then chooses the older copy: the choice is the later act (it needs no untouched input).
     fireEvent.change(invitee(), { target: { value: "typed-user" } });
@@ -256,6 +261,7 @@ describe("Q3: the other saved copy chosen after the automatic restore, in the re
       }),
     );
     await waitFor(() => expect(invitee().value).toBe("older-user"));
-    expect(api.sent).toEqual([]);
+    expect(api.sentCommands).toEqual([]);
+    expect(api.count("lookup")).toBe(0);
   });
 });

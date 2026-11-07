@@ -454,46 +454,71 @@ test.describe("R40: the production new-task editor across an accepted update", (
 });
 
 /**
- * WEB-14a revision 52 (Review52 F-R52-1; design assessment Q13, bounded): every form of a page saves under the page's ONE recovery
- * identifier, so a tab whose household screen had two forms typed into leaves two copies with one id when another tab's update asks it to
- * save (the peer flush) and it then closes. A later page of the household screen observes that one closed owner from both forms at once:
- * both are restored (an exclusive probe hid the second). Control: while the tab is still open, a third tab restores and offers neither.
- * Native composition over the generation server's canned reads (GET only); never released-backend acceptance.
+ * WEB-12b's household dialogs (maintenance merge of 2f42ac35, correction M-1). WEB-12b replaced the household screen's two inline forms
+ * (`HouseholdsMinimal`) with route-addressed dialogs whose drafts live in the households page memory: New household (`/sharing/new`) and a
+ * household's Invitations (`/sharing/households/<id>/invitations`), each recoverable through `households/form-recovery.ts`. In-app
+ * navigation keeps the page and its memory; a page navigation is a new page.
  */
-test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-screen forms", () => {
+const NEW_HOUSEHOLD = "/sharing/new";
+const invitationsOf = (house: { id: string }) =>
+  `/sharing/households/${house.id}/invitations`;
+const householdName = (page: Page) =>
+  page.getByRole("textbox", { name: "Household name", exact: true });
+const householdInvitee = (page: Page) =>
+  page.getByRole("textbox", { name: "Their username", exact: true });
+/** In-app navigation (history and popstate): the page and its households memory stay. */
+async function navigateInApp(page: Page, path: string): Promise<void> {
+  await page.evaluate((to) => {
+    history.pushState(null, "", to);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
+}
+/**
+ * The household dialogs are modal: while one is open the page behind it, the update banner included, is inert. A person who wants the
+ * update closes the dialog first (WEB-14a's other dialogs leave by their sync control), and WEB-12b keeps the draft in page memory when a
+ * dialog closes, so the form stays the page's dirty form and the update saves it.
+ */
+const closeInvitations = (page: Page) =>
+  page.getByRole("dialog", { name: /^Invitations/ }).press("Escape");
+/** New household's Cancel: the dialog closes and its name stays in page memory (WEB-12b's rule), still the page's dirty form. */
+const cancelNewHousehold = (page: Page) =>
+  page
+    .getByRole("dialog", { name: "New household" })
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+
+/**
+ * WEB-14a revision 52 (Review52 F-R52-1; design assessment Q13, bounded), over WEB-12b's dialogs (M-1): every form of a page saves under
+ * the page's ONE recovery identifier, so a tab that had both household forms typed into (a name kept after Cancel, an invitation open)
+ * leaves two copies with one id when another tab's update asks it to save (the peer flush) and it then closes. A later page observes that
+ * one closed owner from each dialog as it opens: each copy is restored, passively (an exclusive probe made each look a momentary owner).
+ * The old screen showed both forms at once, so their looks overlapped at the lock manager; the dialogs look one after the other, so this
+ * case records the probes and does not hold them (the overlap is carried by the two defaults layers, `recovery-owner-discard.test.tsx`,
+ * and `tests/lib/recovery-observation.test.tsx`). Control: while the tab is still open, a third tab restores neither. Native composition
+ * over the generation server's canned reads (GET only); never released-backend acceptance.
+ */
+test.describe("revision 52 (F-R52-1), WEB-12b's dialogs (M-1): one closed tab's copies of two household forms", () => {
   const HOUSE = managedHousehold(
     "66666666-6666-4666-8666-666666666660",
     "R52 House",
   );
-  const createName = (page: Page) =>
-    page.getByRole("textbox", { name: "Household name", exact: true });
-  const invitee = (page: Page) =>
-    page.getByRole("textbox", {
-      name: `Invite to “${HOUSE.name}” by exact username`,
-      exact: true,
-    });
 
-  test("peer-flushed by another tab's update, then closed: a new household screen restores BOTH forms, focuses the first, sends nothing; while it was open a third tab restored neither", async ({
+  test("peer-flushed by another tab's update, then closed: New household and the household's Invitations each restore the closed tab's copy when opened, by a passive observation; nothing is sent; while it was open a third tab restored neither", async ({
     context,
     generations,
   }) => {
-    // TEST INJECTION (revision 52, design assessment Q1/Q13): in every page, a passive ownership probe (an `ifAvailable` request for a
-    // recovery identifier's lock) keeps its lock until the page's SECOND probe of that same identifier has been answered (bounded at 2 s,
-    // counted), so the two forms' looks really overlap at the lock manager, as they can by timing alone. It changes no answer the browser
-    // gives: a probe the lock manager refuses is still refused. `__r52Probes` records each probe's mode and whether it was granted.
+    // Records each passive ownership probe (an `ifAvailable` request for a recovery identifier's lock): its mode and whether it was
+    // granted. It changes no answer and holds nothing.
     await context.addInitScript(() => {
       // about:blank (before a navigation) is no secure context: it has no lock manager to wrap.
       if (typeof LockManager === "undefined") return;
       const scope = window as unknown as {
         __r52Probes: Array<{ name: string; mode: string; granted: boolean }>;
-        __r52ProbeTimeouts: number;
       };
       scope.__r52Probes = [];
-      scope.__r52ProbeTimeouts = 0;
       const request = LockManager.prototype.request as (
         ...args: unknown[]
       ) => Promise<unknown>;
-      const open = new Map<string, Array<() => void>>();
       LockManager.prototype.request = function (
         this: LockManager,
         ...args: unknown[]
@@ -515,38 +540,17 @@ test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-s
             mode: options.mode ?? "exclusive",
             granted: lock !== null,
           });
-          const answer = callback(lock);
-          const waiting = open.get(name);
-          if (waiting) {
-            open.delete(name);
-            for (const release of waiting) release();
-            return answer;
-          }
-          return new Promise((resolve) => {
-            let done = false;
-            const release = () => {
-              if (done) return;
-              done = true;
-              resolve(answer);
-            };
-            open.set(name, [release]);
-            setTimeout(() => {
-              if (done) return;
-              scope.__r52ProbeTimeouts += 1;
-              if (open.get(name)?.includes(release)) open.delete(name);
-              release();
-            }, 2_000);
-          });
+          return callback(lock);
         });
       } as LockManager["request"];
     });
-    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once; byte for byte the set this spec held inline).
+    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once).
     await generations.reads(sharingReads([HOUSE]));
     await seedAccount(context, generations, "acct-a", "s1", {
       validCache: "pwa-r52-households",
     });
     const writer = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
     await workerActive(writer);
@@ -555,9 +559,14 @@ test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-s
       route: "/tasks",
       form: false,
     });
-    await expect(invitee(writer)).toBeVisible();
-    await createName(writer).fill("R52 created household");
-    await invitee(writer).fill("r52-invitee");
+    await expect(householdName(writer)).toBeVisible();
+    await householdName(writer).fill("R52 created household");
+    await cancelNewHousehold(writer);
+    await navigateInApp(writer, invitationsOf(HOUSE));
+    await expect(householdInvitee(writer)).toBeVisible();
+    await householdInvitee(writer).fill("r52-invitee");
+    await closeInvitations(writer);
+    await expect(writer.getByRole("dialog")).toHaveCount(0);
     await quiet(writer);
     await generations.serve("fixture-b");
     await checkForUpdate(acting);
@@ -575,58 +584,53 @@ test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-s
     await actingReload.loaded();
     await displayed(acting);
     expect(await build(acting)).toBe("b");
-    // The writer saved both forms under its own identifier (the peer flush), did not reload and still shows them.
+    // The writer saved both forms under its own identifier (the peer flush: two drafts kept in page memory, no dialog open) and did not
+    // reload.
     await expect(
       updateRegion(writer).getByText("Atlas updated in another tab."),
     ).toBeVisible();
     expect(await marked(writer)).toBe(true);
-    await expect(createName(writer)).toHaveValue("R52 created household");
-    await expect(invitee(writer)).toHaveValue("r52-invitee");
 
-    // CONTROL (live owner): a third tab's household screen restores and offers neither while the writer is open.
+    // CONTROL (live owner): a third tab's New household restores nothing while the writer is open.
     const third = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
-    await expect(invitee(third)).toBeVisible();
+    await expect(householdName(third)).toBeVisible();
     await quiet(third);
-    await expect(createName(third)).toHaveValue("");
-    await expect(invitee(third)).toHaveValue("");
-    await expect(third.locator("[data-recovery-state]")).toHaveCount(0);
+    await expect(householdName(third)).toHaveValue("");
+    await expect(third.locator('[data-recovery-state="restored"]')).toHaveCount(
+      0,
+    );
     await third.close();
 
     await writer.close();
-    await navigate(acting, `${generations.url}/sharing`);
+    await navigate(acting, `${generations.url}${NEW_HOUSEHOLD}`);
     await displayed(acting);
     await expect(
-      createName(acting),
-      "the first of the closed tab's two copies is restored",
+      householdName(acting),
+      "the closed tab's household name is restored",
     ).toHaveValue("R52 created household");
     await expect(
-      invitee(acting),
-      "the second copy, saved under the same closed tab's id, is restored too",
+      householdName(acting),
+      "D2: the restored field has focus",
+    ).toBeFocused();
+    await navigateInApp(acting, invitationsOf(HOUSE));
+    await expect(
+      householdInvitee(acting),
+      "the second copy, saved under the same closed tab's id, is restored when its dialog opens",
     ).toHaveValue("r52-invitee");
     await expect(
-      acting.locator('[data-recovery-state="restored"]'),
-    ).toHaveCount(2);
-    const createFirst = await createName(acting).evaluate(
-      (create, invite) =>
-        (create.compareDocumentPosition(invite as Node) &
-          Node.DOCUMENT_POSITION_FOLLOWING) !==
-        0,
-      await invitee(acting).elementHandle(),
-    );
-    await expect(
-      createFirst ? createName(acting) : invitee(acting),
-      "D2: the restored form first in the page has focus",
+      householdInvitee(acting),
+      "the restored invitation field has focus",
     ).toBeFocused();
-    // The two forms' probes of the closed writer really overlapped, as passive (shared) observations both granted.
+    // Each dialog observed the closed writer passively (shared), and both observations were granted.
     const probes = (await acting.evaluate(
       () => (window as unknown as { __r52Probes: unknown[] }).__r52Probes,
     )) as Array<{ name: string; mode: string; granted: boolean }>;
     expect(
       probes.length,
-      "both forms observed the closed writer",
+      "both dialogs observed the closed writer",
     ).toBeGreaterThanOrEqual(2);
     expect(probes.slice(0, 2)).toEqual([
       expect.objectContaining({ mode: "shared", granted: true }),
@@ -639,13 +643,14 @@ test.describe("revision 52 (F-R52-1): one closed tab's copies of two household-s
 
 /**
  * WEB-14a revision 53 (Kieran, 3 November 2026: /Users/kieran/atlas/atlas-orchestrator/approval/web14a-r53-decisions-20261103.json,
- * hand-off delivery/handoffs/web14a-r53-decisions-20261103.md; decisions D-R53-1 and D-R53-2). The production household screen, two
- * closed tabs' copies, and a stand-in for an OLDER BUILD's exclusive ownership probe: a same-origin page holding one closed tab's
- * recovery-identifier lock exclusively (as that build's `ifAvailable` probe held it) while a current page looks. The overlap is ordered
- * deliberately (held across the look, then released): characterisation of the omission and its explicit recovery, not a natural frequency
- * or a frozen/bfcache result.
+ * hand-off delivery/handoffs/web14a-r53-decisions-20261103.md; decisions D-R53-1 and D-R53-2), over WEB-12b's household dialogs (M-1):
+ * two closed tabs' copies, and a stand-in for an OLDER BUILD's exclusive ownership probe, a same-origin page holding one closed tab's
+ * recovery-identifier lock exclusively (as that build's `ifAvailable` probe held it) while a current page looks. Each dialog looks when it
+ * opens, so the old screen's two forms are New household and then the household's Invitations, in one page (in-app navigation). The
+ * overlap is ordered deliberately (held across the looks, then released): characterisation of the omission and its explicit recovery, not
+ * a natural frequency or a frozen/bfcache result.
  */
-test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copies again, and focus after an explicit choice", () => {
+test.describe("revision 53 (D-R53-1/D-R53-2), WEB-12b's dialogs (M-1): withheld copies, Check saved copies again, and focus after an explicit choice", () => {
   const HOUSE = managedHousehold(
     "66666666-6666-4666-8666-666666666653",
     "R53 House",
@@ -653,14 +658,7 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
   const CHECK = "Check saved copies again";
   const WITHHELD =
     "A saved copy of this form may still be open in another tab.";
-  const createName = (page: Page) =>
-    page.getByRole("textbox", { name: "Household name", exact: true });
-  const invitee = (page: Page) =>
-    page.getByRole("textbox", {
-      name: `Invite to “${HOUSE.name}” by exact username`,
-      exact: true,
-    });
-  const formOf = (page: Page, field: ReturnType<typeof createName>) =>
+  const formOf = (page: Page, field: ReturnType<typeof householdName>) =>
     page.locator("form").filter({ has: field });
 
   /** The account's household recovery rows (ordinary copies), read on a page of their own. */
@@ -687,35 +685,39 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
     }
   }
 
-  test("a copy withheld under an older build's probe is said; while held a check withholds it still; after release each form's explicit check OFFERS its copy (never restores it); choosing another copy while the banner stays focuses the form's first field; nothing sent", async ({
+  test("a copy withheld under an older build's probe is said; while held a check withholds it still; after release each dialog's explicit check OFFERS its copy (never restores it); choosing another copy while the banner stays focuses the field; nothing sent", async ({
     context,
     generations,
   }) => {
-    // The sharing screens' reads (`pwa-reads.ts`, revision 57 C-H3: built once; byte for byte the set this spec held inline).
     await generations.reads(sharingReads([HOUSE]));
     await seedAccount(context, generations, "acct-a", "s1", {
       validCache: "pwa-r53-households",
     });
-    // Two writer tabs: W1 types a household name; W2 a different name AND an invitation.
+    // Two writer tabs: W1 types a household name; W2 a different name (kept after Cancel) AND an invitation.
     const w1 = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
     await workerActive(w1);
     await reloadQuietly(w1);
     const w2 = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
     const acting = await openApp(context, generations, {
       route: "/tasks",
       form: false,
     });
-    await expect(invitee(w1)).toBeVisible();
-    await expect(invitee(w2)).toBeVisible();
-    await createName(w1).fill("R53 first writer");
-    await createName(w2).fill("R53 second writer");
-    await invitee(w2).fill("r53-invitee");
+    await expect(householdName(w1)).toBeVisible();
+    await expect(householdName(w2)).toBeVisible();
+    await householdName(w1).fill("R53 first writer");
+    await cancelNewHousehold(w1);
+    await householdName(w2).fill("R53 second writer");
+    await cancelNewHousehold(w2);
+    await navigateInApp(w2, invitationsOf(HOUSE));
+    await expect(householdInvitee(w2)).toBeVisible();
+    await householdInvitee(w2).fill("r53-invitee");
+    await closeInvitations(w2);
     await quiet(w1);
     await quiet(w2);
     await generations.serve("fixture-b");
@@ -732,7 +734,7 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
     await actingReload.loaded();
     await displayed(acting);
     expect(await build(acting)).toBe("b");
-    // Both writers were peer-flushed: each saved its forms under its own identifier and still shows them.
+    // Both writers were peer-flushed: each saved its forms under its own identifier.
     for (const writer of [w1, w2])
       await expect(
         updateRegion(writer).getByText("Atlas updated in another tab."),
@@ -748,7 +750,7 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
       "both writers saved a household name",
     ).toHaveLength(2);
 
-    // W2 closes; an older build's exclusive probe of W2's identifier is held across the next look (granted once W2's lock is released).
+    // W2 closes; an older build's exclusive probe of W2's identifier is held across the next looks (granted once W2's lock is released).
     await w2.close();
     const old = await context.newPage();
     await navigate(old, `${generations.url}/__data`);
@@ -766,25 +768,27 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
       `atlas-recovery-tab-${w2Id}`,
     );
     await w1.close();
-    await navigate(acting, `${generations.url}/sharing`);
+    await navigate(acting, `${generations.url}${NEW_HOUSEHOLD}`);
     await displayed(acting);
-    const create = formOf(acting, createName(acting));
-    const invite = formOf(acting, invitee(acting));
-    // OMITTED-ONE (create): W1's copy (no probe holds it) is restored; W2's is withheld. OMITTED-ALL (invite): W2's only copy is withheld.
-    await expect(createName(acting)).toHaveValue("R53 first writer");
+    const create = formOf(acting, householdName(acting));
+    // OMITTED-ONE (New household): W1's copy (no probe holds it) is restored; W2's is withheld.
+    await expect(householdName(acting)).toHaveValue("R53 first writer");
     await expect(
       create.locator('[data-recovery-state="restored"]'),
     ).toHaveCount(1);
     await expect(
-      createName(acting),
-      "D2: the restored form has focus",
+      householdName(acting),
+      "D2: the restored field has focus",
     ).toBeFocused();
     await expect(create.getByText(WITHHELD)).toBeVisible();
     await expect(
       create.getByRole("button", { name: /^Restore the copy saved/ }),
     ).toHaveCount(0);
+    // OMITTED-ALL (the invitation, its own dialog and look): W2's only copy is withheld.
+    await navigateInApp(acting, invitationsOf(HOUSE));
+    const invite = formOf(acting, householdInvitee(acting));
     await expect(invite.getByText(WITHHELD)).toBeVisible();
-    await expect(invitee(acting)).toHaveValue("");
+    await expect(householdInvitee(acting)).toHaveValue("");
     await expect(invite.locator("[data-recovery-state]")).toHaveCount(0);
     // While the probe still holds the lock, an explicit check stays conservative.
     await invite.getByRole("button", { name: CHECK }).click();
@@ -792,9 +796,9 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
     await expect(
       invite.getByRole("button", { name: /^Restore the copy saved/ }),
     ).toHaveCount(0);
-    await expect(invitee(acting)).toHaveValue("");
+    await expect(householdInvitee(acting)).toHaveValue("");
 
-    // The old probe ends. The person checks again, form by form: offered, never restored.
+    // The old probe ends. The person checks again, dialog by dialog: offered, never restored.
     await old.evaluate(() =>
       (window as unknown as { __r53Release: () => void }).__r53Release(),
     );
@@ -814,35 +818,42 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
       )
       .toBe(true);
     await old.close();
-    await create.getByRole("button", { name: CHECK }).click();
-    const offered = create.getByRole("button", {
-      name: /^Restore the copy saved/,
-    });
-    await expect(offered, "W2's household name is offered").toHaveCount(1);
-    await expect(createName(acting), "the check restored nothing").toHaveValue(
-      "R53 first writer",
-    );
     await invite.getByRole("button", { name: CHECK }).click();
     await expect(
       invite.getByRole("button", { name: /^Restore the copy saved/ }),
       "W2's invitation is offered",
     ).toHaveCount(1);
-    await expect(invitee(acting)).toHaveValue("");
+    await expect(householdInvitee(acting)).toHaveValue("");
     await expect(
       invite.locator('[data-recovery-state="restored"]'),
     ).toHaveCount(0);
+    // Back in New household (the page's model, resumed: its look's answer stands, nothing looks again by itself).
+    await navigateInApp(acting, NEW_HOUSEHOLD);
+    await expect(create.getByText(WITHHELD)).toBeVisible();
+    await create.getByRole("button", { name: CHECK }).click();
+    const offered = create.getByRole("button", {
+      name: /^Restore the copy saved/,
+    });
+    await expect(offered, "W2's household name is offered").toHaveCount(1);
+    await expect(
+      householdName(acting),
+      "the check restored nothing",
+    ).toHaveValue("R53 first writer");
 
-    // D-R53-2: focus is elsewhere (the invitation field); choosing W2's household name while the create banner stays shown focuses the
-    // create form's first field once it is applied, never the removed button.
-    await invitee(acting).focus();
+    // D-R53-2: focus is elsewhere (the dialog's Cancel); choosing W2's household name while the restored banner stays shown focuses the
+    // field once it is applied, never the removed button.
+    await acting
+      .getByRole("dialog", { name: "New household" })
+      .getByRole("button", { name: "Cancel", exact: true })
+      .focus();
     await offered.click();
-    await expect(createName(acting)).toHaveValue("R53 second writer");
+    await expect(householdName(acting)).toHaveValue("R53 second writer");
     await expect(
       create.locator('[data-recovery-state="restored"]'),
     ).toHaveCount(1);
     await expect(
-      createName(acting),
-      "the chosen copy's form takes focus at its first field",
+      householdName(acting),
+      "the chosen copy's form takes focus at its field",
     ).toBeFocused();
     await expect(
       create.getByRole("button", { name: /^Restore the copy saved/ }),
@@ -853,35 +864,26 @@ test.describe("revision 53 (D-R53-1/D-R53-2): withheld copies, Check saved copie
 });
 
 /**
- * WEB-14a revision 55 (Review 54, F-R54-1 and F-R54-2; design assessment of 5 November 2026, native counterparts N-1 and N-3). The
- * production household screen in the real protected tree, data layer, recovery identity and worker; fixture backend reads only (FIXTURE
- * evidence of frontend composition, never released-backend acceptance).
+ * WEB-14a revision 55 (Review 54, F-R54-2; design assessment of 5 November 2026, native counterpart N-3), over WEB-12b's New household
+ * dialog (M-1): the writer tab's next page restores its claimed update hand-off; the person chooses another tab's copy, so the hand-off goes
+ * back to the offered copies; "Check saved copies again" then keeps the hand-off offered, and restoring it brings the pre-update input.
+ * Deliberately ordered (tabs closed in order): characterisation of the corrected rule, not a natural frequency result. FIXTURE evidence of
+ * frontend composition, never released-backend acceptance.
  *
- *  - F-R54-1: the create form restores automatically (the arrival's grant) while the households read is HELD at the generation server, so
- *    the invitation form, EARLIER in the page, mounts and restores later. An applied choice of the other household-name copy keeps focus
- *    against that late restore; the control without a choice shows D2 (the earlier form takes the automatic grant). The hold is the
- *    server's, so every engine (WebKit's controlled pages included) sees it.
- *  - F-R54-2: the writer tab's next page restores its claimed update hand-off; the person chooses another tab's copy, so the hand-off goes
- *    back to the offered copies; "Check saved copies again" then keeps the hand-off offered, and restoring it brings the pre-update input.
- * Deliberately ordered (a held read, tabs closed in order): characterisation of the corrected rules, not a natural frequency result.
+ * F-R54-1 (N-1) needed the old household screen's composition: the create form and the invitation form EARLIER in one page, the latter
+ * restoring late. WEB-12b shows them in separate route-addressed dialogs, so no product page composes them; F-R54-1 stays carried by
+ * `tests/lib/recovery-discard-focus.test.tsx` ("revision 55 (F-R54-1)") and `tests/pwa/update-focus.test.tsx` (T-F8).
  */
-test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a late earlier restore; a check keeps this page's claimed hand-off", () => {
+test.describe("revision 55 (F-R54-2), WEB-12b's New household (M-1): a check keeps this page's claimed hand-off", () => {
   const HOUSE = managedHousehold(
     "66666666-6666-4666-8666-666666666655",
     "R55 House",
   );
-  const HOUSEHOLDS = "/api/experimental/v1/households";
   const CHECK = "Check saved copies again";
   const WITHHELD =
     "A saved copy of this form may still be open in another tab.";
   const OFFERED = /^Restore the copy saved/;
-  const createName = (page: Page) =>
-    page.getByRole("textbox", { name: "Household name", exact: true });
-  const invitee = (page: Page) =>
-    page.getByRole("textbox", {
-      name: `Invite to “${HOUSE.name}” by exact username`,
-      exact: true,
-    });
+  const createName = householdName;
   const formOf = (page: Page, field: ReturnType<typeof createName>) =>
     page.locator("form").filter({ has: field });
   /** The account's update hand-off rows, read on a page of their own (as revision 53's household rows). */
@@ -909,14 +911,6 @@ test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a lat
       await page.close();
     }
   }
-  /** Two rendering turns of the page: what a restore's commit and its focus effect do has been done. */
-  const settledFrames = (page: Page) =>
-    page.evaluate(
-      () =>
-        new Promise<void>((done) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => done())),
-        ),
-    );
   async function world(
     context: BrowserContext,
     generations: Generations,
@@ -928,117 +922,6 @@ test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a lat
       validCache: cache,
     });
   }
-  /** Peers of `acting` are flushed by its accepted update (each saves its forms under its own identifier); `acting` then shows build b. */
-  async function updateFrom(acting: Page, generations: Generations) {
-    await generations.serve("fixture-b");
-    await checkForUpdate(acting);
-    await expect(
-      updateRegion(acting).getByRole("button", { name: "Reload", exact: true }),
-    ).toBeVisible();
-    await quiet(acting);
-    const reload = await armReload(acting);
-    await updateRegion(acting)
-      .getByRole("button", { name: "Reload", exact: true })
-      .click();
-    await reload.loaded();
-    await displayed(acting);
-    expect(await build(acting)).toBe("b");
-  }
-
-  for (const choice of [true, false])
-    test(`F-R54-1 ${choice ? "an applied choice in the form that holds the automatic grant keeps focus when the invitation form (earlier in the page) restores late" : "CONTROL (D2): with no choice the invitation form's late restore takes the automatic grant"}; nothing sent`, async ({
-      context,
-      generations,
-    }) => {
-      await world(context, generations, `pwa-r55-focus-${choice}`);
-      const w1 = await openApp(context, generations, {
-        route: "/sharing",
-        form: false,
-      });
-      await workerActive(w1);
-      await reloadQuietly(w1);
-      const w2 = await openApp(context, generations, {
-        route: "/sharing",
-        form: false,
-      });
-      const acting = await openApp(context, generations, {
-        route: "/tasks",
-        form: false,
-      });
-      await expect(invitee(w1)).toBeVisible();
-      await expect(invitee(w2)).toBeVisible();
-      await createName(w1).fill("R55 first name");
-      await createName(w2).fill("R55 second name");
-      await invitee(w2).fill("r55-invitee");
-      await quiet(w1);
-      await quiet(w2);
-      await updateFrom(acting, generations);
-      for (const writer of [w1, w2])
-        await expect(
-          updateRegion(writer).getByText("Atlas updated in another tab."),
-        ).toBeVisible();
-      await w1.close();
-      await w2.close();
-      // The households read is held: the create form restores now, the invitation form (earlier in the page) only once it is answered.
-      expect(await generations.holdRead(HOUSEHOLDS, true)).toBe(0);
-      await navigate(acting, `${generations.url}/sharing`);
-      await displayed(acting);
-      const create = formOf(acting, createName(acting));
-      await expect(
-        create.locator('[data-recovery-state="restored"]'),
-      ).toHaveCount(1);
-      await expect(createName(acting), "D2: the only restore").toBeFocused();
-      await expect(
-        invitee(acting),
-        "the invitation form is not there yet",
-      ).toHaveCount(0);
-      const shown = await createName(acting).inputValue();
-      const other =
-        shown === "R55 first name" ? "R55 second name" : "R55 first name";
-      expect(["R55 first name", "R55 second name"]).toContain(shown);
-      if (choice) {
-        const offered = create.getByRole("button", { name: OFFERED });
-        await expect(offered).toHaveCount(1);
-        await offered.focus();
-        await acting.keyboard.press("Enter");
-        await expect(createName(acting)).toHaveValue(other);
-        await expect(
-          create.locator('[data-recovery-state="restored"]'),
-          "the banner stays shown",
-        ).toHaveCount(1);
-        await expect(
-          createName(acting),
-          "the applied choice focuses the create form's first field",
-        ).toBeFocused();
-      }
-      expect(
-        await generations.holdRead(HOUSEHOLDS, false),
-        "the held households read is answered",
-      ).toBeGreaterThan(0);
-      await expect(
-        invitee(acting),
-        "the invitation form restores late",
-      ).toHaveValue("r55-invitee");
-      await expect(
-        formOf(acting, invitee(acting)).locator(
-          '[data-recovery-state="restored"]',
-        ),
-      ).toHaveCount(1);
-      if (choice) {
-        await settledFrames(acting);
-        await expect(
-          createName(acting),
-          "F-R54-1: the late automatic restore does not take the person's applied choice",
-        ).toBeFocused();
-        await expect(createName(acting)).toHaveValue(other);
-      } else
-        await expect(
-          invitee(acting),
-          "D2: the earlier form's late restore takes the automatic grant",
-        ).toBeFocused();
-      expect(await writes(generations), "nothing is submitted").toEqual([]);
-    });
-
   test("F-R54-2: the next page restores its claimed hand-off; another tab's copy chosen puts the hand-off back on offer; 'Check saved copies again' keeps it offered and restorable; nothing sent", async ({
     context,
     generations,
@@ -1046,17 +929,17 @@ test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a lat
     await world(context, generations, "pwa-r55-handoff");
     // L (live, stays open), G (closes later) and W (the writer) all type a household name.
     const live = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
     await workerActive(live);
     await reloadQuietly(live);
     const gone = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
     const writer = await openApp(context, generations, {
-      route: "/sharing",
+      route: NEW_HOUSEHOLD,
       form: false,
     });
     for (const [page, text] of [
@@ -1066,9 +949,11 @@ test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a lat
     ] as const) {
       await expect(createName(page)).toBeVisible();
       await createName(page).fill(text);
+      await cancelNewHousehold(page);
       await quiet(page);
     }
-    // The writer accepts the update with its form dirty: "Save and reload" saves it and leaves the update hand-off to its next page.
+    // The writer accepts the update with its form dirty (the name kept after Cancel): "Save and reload" saves it and leaves the update
+    // hand-off to its next page.
     await generations.serve("fixture-b");
     await checkForUpdate(writer);
     const save = updateRegion(writer).getByRole("button", {
@@ -1085,6 +970,8 @@ test.describe("revision 55 (F-R54-1/F-R54-2): a choice keeps focus against a lat
       await expect(
         updateRegion(peer).getByText("Atlas updated in another tab."),
       ).toBeVisible();
+    // The next page opens where the writer was (Households); New household, opened again, looks and restores the claimed hand-off.
+    await navigateInApp(writer, NEW_HOUSEHOLD);
     const create = formOf(writer, createName(writer));
     await expect(
       createName(writer),

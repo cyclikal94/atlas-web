@@ -369,7 +369,7 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   found, or still withheld). The wording is PROPOSED, not accepted. Coverage: `tests/lib/recovery-check-again.test.tsx` (both adapters,
   an older build's exclusive probe modelled exactly, omitted-all/omitted-one, live owner, repeats, late reads, guards, hand-offs),
   `tests/lib/recovery-claimed-handoff-offer.test.tsx` (revision 55: this page's claimed hand-off in every offer look, both adapters),
-  `tests/features/recovery-check-again.test.tsx` (the household screen) and the native household journey in
+  `tests/features/recovery-check-again.test.tsx` (the household dialogs, since WEB-12b's merge) and the native household journey in
   `tests/e2e/fixture.pwa-editors.spec.ts` (Chromium, Firefox, WebKit).
 - **What this does not cover.** Only the app-update reload is guarded. The sync-recovery "Reload" action (`SyncBlocked`, through the session's
   own reload) and browser reload/close are outside the update coordinator; they are not claimed protected (design assessment, 10 October
@@ -397,13 +397,17 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
   editor `dependency-editor:<occurrence>:<new|replaced set>` and the turn order `rota-order:<task>`), the occurrence correction
   (`occurrence-correction:<id>`),
   the entry history's fix drafts (`entry-fix:<progress>`), the calendar Add, Link (label and timezone only) and Manage (settings edited)
-  forms, the households' create and invite forms, the sharing policy editor (`sharing-policy:<id>`, with the version it was composed
-  against) and each defaults layer form (`sharing-defaults:<layer>:<household|personal>:<kind>`). Component-state editors use
-  `editor.ts` (`useRecoverableEditor`).
+  forms, the household dialogs (since the maintenance merge of WEB-12b: New household `household-create`, Rename
+  `household-rename:<id>` with the version it was composed against, and a household's Invitations `household-invite:<id>`), the sharing
+  policy editor (`sharing-policy:<id>`, with the version it was composed against) and each defaults layer form
+  (`sharing-defaults:<layer>:<household|personal>:<kind>`). Component-state editors use `editor.ts` (`useRecoverableEditor`); the People
+  forms and the household dialogs, whose drafts live in their feature's page memory, have their own owners (`people/form-recovery.ts`,
+  `sharing/households/form-recovery.ts`).
 - **Restore hosts.** A dialog or stage that is not open after a reload cannot look: the screen that opens it does (`useKeptRecovery` for
   the new task's preset stage, `CorrectionRecoveryHost` and `PolicyEditorRecoveryHost` on the task detail, `DependencyEditorRecoveryHost`
   in the day's work, the conflict block of a refused `set_dependencies` and the rota panel, `useRecoveryHost` on the calendar screen and
-  its rows). A copy found is held for the editor (never submitted) and the editor is opened on it.
+  its rows). A copy found is held for the editor (never submitted) and the editor is opened on it. A route-addressed dialog needs no host:
+  the update's reload keeps the URL, so the dialog mounts again and looks itself (the defaults layers, the household dialogs).
 - **Departure, discard and submission.** A departure that drops an owner's input (the visit's end, Cancel, another day) discards its
   copies (`end`), so it never returns after a later reload; a session kept for a visit to the sync screens stays dirty and listed. A save
   takes the model's ticket in the same step as the feature's own ticket; only a durable success covers what it sent, an uncertain or
@@ -454,6 +458,38 @@ or a remove), else of the people who could be added, read in those two sections 
 focus (D1). Before, it was the first enabled button of the dialog's body, which also holds the notice: focus landed on the restored banner's
 own "Discard instead" in every engine, and one Enter discarded the restored order. The dependency editor's is its Task select (a ref): its
 first field proper, always shown and enabled, never a chosen day's Remove.
+
+**WEB-12b's household dialogs (maintenance merge correction M-1, 6 November 2026; Kieran's decision "Fix in the second merge").** WEB-12b
+replaced `HouseholdsMinimal`, whose inline create and invitation forms revision 37 had made recoverable, with route-addressed dialogs whose
+drafts live in the households PAGE memory (they outlive a dialog's close and a `403` remount, never a reload). `households/form-recovery.ts`
+follows the People forms' owner (`people/form-recovery.ts`): page memory stays the authority and one recoverable model follows each draft
+key, for the displayed identity only.
+
+- **New household** keeps the name (`household-create`, `{ v: 1, text }`: WEB-14a's own context and text, so a copy saved by the old
+  inline form is restored into the dialog), **Rename** the name and the household version it was composed against
+  (`household-rename:<id>`, `{ v: 1, text, base }`), and **a household's Invitations** the username (`household-invite:<id>`), whether
+  typed or chosen in the directory lookup (the lookup's queries are presentation; the signup link is a credential: neither is kept).
+- Each model is registered while its field is shown and while a draft kept after Cancel is dirty, so an update saves it either way; it is
+  frozen while an update reload is prepared (typing is refused, Create, Save and Invite send nothing), and bound, so looking, only once its
+  field is shown (Rename and the invitation wait for the household list). After the reload the same route's dialog restores the copy into
+  an untouched field, never submitted; a dialog opened again later offers what other tabs left (an offer look).
+- A submission takes the model's ticket with the values it sends; only a durable success covers what it sent, and the draft is cleared
+  only while it is still what was sent (I7). An uncertain answer covers nothing (Decision H: the unresolved attempt itself is page memory
+  only and never part of a copy; a restored name is a new operation, and New household's same-name check still asks first). A restored
+  rename is saved under its base, so a household renamed since meets the server's conflict ("changed elsewhere") and is read again; the
+  next Save is against the version read then.
+- When page memory drops a draft (a success, a Try again that completed the form, Rename's Escape) its session follows: with the dialog
+  shown the copies are discarded and the field shows its start; with none, the session ends. When another identity's memory is asked for,
+  the previous identity's household models leave the registry.
+- The household dialogs are modal, so while one is open the update banner behind it is inert: a person closes the dialog first (the draft
+  stays), or another tab's update asks the page to save (the peer flush).
+
+Fixture evidence: `tests/features/sharing/households-recovery.test.tsx` (the production coordinator's accepted update, its save and its one
+reload, per dialog; mutants MU-6239..MU-6251), the household cases of `tests/features/recovery-owner-discard.test.tsx`,
+`recovery-owner-contract.test.tsx` and `recovery-check-again.test.tsx` (ported from `HouseholdsMinimal`), and the native household cases of
+`tests/e2e/fixture.pwa-editors.spec.ts` (revisions 52, 53 and 55 over the dialogs). The old screen's composition of several household
+forms on one page is gone: F-R52-1's overlapping looks, F-R52-2's three restored invitations and F-R54-1's late earlier restore are carried
+by the defaults layers and the library suites (`tests/lib/recovery-observation.test.tsx`, `recovery-discard-focus.test.tsx`).
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 
@@ -647,7 +683,7 @@ first field on mount, and `RecoveryBanner`'s revision-19 "Discard instead" contr
   field; otherwise its request ends, so focus the person moved is never taken by a later restore and nothing goes back and forth.
   Revision 52 (Review52 F-R52-2): the comparison is with the CURRENT grant, the restore that most recently took focus (and the element
   focus actually landed on), never the first restore that once did; a successful pre-emption replaces it. So any number of restored forms,
-  in any order, settle on the first in the page (three household invitations restored C, B, A end on A). Focus moved elsewhere, including
+  in any order, settle on the first in the page (three restored forms released C, B, A end on A; `recovery-discard-focus.test.tsx`). Focus moved elsewhere, including
   onto an earlier, superseded restored field, is never taken. When the current grant's owner withdraws its restore (its copy discarded, or
   it unmounted) with focus nowhere or where the arbiter put it, the grant ends; with focus moved elsewhere by anyone else, it stays until
   the next navigation, so a later restore still takes nothing. When the granted field itself is replaced and focus is nowhere, a later
