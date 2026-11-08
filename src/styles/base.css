@@ -149,6 +149,20 @@
     background: var(--background);
     animation: atlas-veil 280ms ease-out both;
   }
+  /* A popover under the cell that opened it: it keeps its own placement (absolute) and rises in under a veil of its own colour. */
+  .atlas-popover {
+    animation: atlas-rise 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .atlas-popover::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    border-radius: inherit;
+    background: var(--popover);
+    animation: atlas-veil 220ms ease-out both;
+  }
   /* Rows revealed one after another: each row's own card-coloured veil clears a little later than the one above. No row
      moves, so adjacent targets never overlap mid-animation (a moving row would read to a target-size check as obscuring its
      neighbour). */

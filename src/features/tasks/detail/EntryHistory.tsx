@@ -22,6 +22,7 @@ import {
 import type { DiscardResult } from "../../../lib/form-recovery/port";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { pageFormRegistry } from "../../../lib/form-recovery/registry";
+import { cn } from "../../../lib/utils";
 import type { TaskActions } from "../actions";
 import type { TasksResult } from "../api";
 import * as copy from "../copy";
@@ -1399,67 +1400,87 @@ export function EntryHistory({
       {shown.length === 0 ? (
         <p className="text-sm text-muted-foreground">{HISTORY_COPY.none}</p>
       ) : (
-        <ul className="m-0 flex list-none flex-col gap-1 p-0">
+        // The Final design: the activity as sentences on a timeline, a dot for each (done, a correction, anything else) with its moment under.
+        <ul
+          className="relative m-0 flex list-none flex-col gap-3 p-0 before:absolute before:bottom-2 before:left-[4px] before:top-2 before:w-px before:bg-border"
+          data-activity=""
+        >
           {shown.map((entry) => {
             const checking = scan?.entryId === entry.id;
             const checkFailed =
               !checking && journal?.checks[entry.id]?.found === "failed";
+            const done =
+              entry.evidence.kind === "checkbox" ||
+              entry.evidence.kind === "checklist"
+                ? entry.evidence.complete
+                : true;
             return (
               <li
                 key={entry.id}
                 data-entry={entry.id}
                 data-entry-pending={entry.pending ? "" : undefined}
-                className="flex flex-col gap-1 rounded-lg border border-border px-3 py-2"
+                className="relative flex gap-3"
               >
-                <span className="flex flex-wrap items-baseline gap-2 text-sm text-foreground">
-                  <span
-                    className={entry.replaced ? "text-muted-foreground" : ""}
-                  >
-                    {describeEvidence(entry.evidence, goal)}
-                  </span>
-                  <span className="text-muted-foreground">
-                    {entry.recordedBy === env.accountId
-                      ? HISTORY_COPY.byYou
-                      : HISTORY_COPY.byOther}
-                    {" · "}
-                    {momentLabel(entry.happenedAt * 1000, env.now(), zone)}
-                  </span>
-                  {entry.replaced ? (
-                    <span className="text-xs text-muted-foreground">
-                      {HISTORY_COPY.corrected}
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "mt-[5px] size-2.5 flex-none rounded-full ring-[3px] ring-card",
+                    entry.replaces !== null
+                      ? "bg-warning"
+                      : entry.replaced
+                        ? "bg-muted-foreground/50"
+                        : done
+                          ? "bg-success"
+                          : "bg-muted-foreground",
+                  )}
+                />
+                <span className="flex min-w-0 flex-1 flex-col gap-1">
+                  <span className="flex flex-col gap-0.5 text-[13px] text-foreground">
+                    <span
+                      className={entry.replaced ? "text-muted-foreground" : ""}
+                    >
+                      {describeEvidence(entry.evidence, goal)}
                     </span>
-                  ) : null}
-                  {entry.replaces !== null ? (
-                    <span className="text-xs text-muted-foreground">
-                      {HISTORY_COPY.correction}
+                    <span className="flex flex-wrap gap-x-2 text-[11px] text-muted-foreground">
+                      <span>
+                        {entry.recordedBy === env.accountId
+                          ? HISTORY_COPY.byYou
+                          : HISTORY_COPY.byOther}
+                        {" · "}
+                        {momentLabel(entry.happenedAt * 1000, env.now(), zone)}
+                      </span>
+                      {entry.replaced ? (
+                        <span>{HISTORY_COPY.corrected}</span>
+                      ) : null}
+                      {entry.replaces !== null ? (
+                        <span>{HISTORY_COPY.correction}</span>
+                      ) : null}
+                      {entry.pending ? (
+                        <span>{copy.PENDING.queued}</span>
+                      ) : null}
                     </span>
-                  ) : null}
-                  {entry.pending ? (
-                    <span className="text-xs text-muted-foreground">
-                      {copy.PENDING.queued}
+                  </span>
+                  {fix?.entry.id === entry.id ? (
+                    fixForm
+                  ) : canFix(entry) ? (
+                    <span>
+                      {checking ? (
+                        <Button disabled reason={HISTORY_COPY.checking}>
+                          {HISTORY_COPY.fix}
+                        </Button>
+                      ) : (
+                        <Button variant="ghost" onClick={() => askFix(entry)}>
+                          {HISTORY_COPY.fix}
+                        </Button>
+                      )}
+                      {checkFailed ? (
+                        <span className="text-xs text-muted-foreground">
+                          {HISTORY_COPY.checkFailed}
+                        </span>
+                      ) : null}
                     </span>
                   ) : null}
                 </span>
-                {fix?.entry.id === entry.id ? (
-                  fixForm
-                ) : canFix(entry) ? (
-                  <span>
-                    {checking ? (
-                      <Button disabled reason={HISTORY_COPY.checking}>
-                        {HISTORY_COPY.fix}
-                      </Button>
-                    ) : (
-                      <Button variant="ghost" onClick={() => askFix(entry)}>
-                        {HISTORY_COPY.fix}
-                      </Button>
-                    )}
-                    {checkFailed ? (
-                      <span className="text-xs text-muted-foreground">
-                        {HISTORY_COPY.checkFailed}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : null}
               </li>
             );
           })}

@@ -143,8 +143,15 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   row (who added them, their account, who can see them) are a documented contract with its own cases: the row's wording. Not done,
   for want of data: a person's age, birthday and "tasks about"; a list's sharing fact, who added an item, "Ticked · n" and "Clear
   ticked" (list items are tasks, not ticks).
-- **Phase 10 — Task editors as popovers and dialogs.** Short choices under the pressed cell; consequential editors as the
-  centred dialog; Turn / Timer / Follows cells; the phone's Done / Skip / Timer bar; the activity as sentences.
+- **Phase 10 — Task editors as popovers and dialogs (done, 8 November 2026).** The Day cell opens a popover under it (Today /
+  Tomorrow / No date, the month grid, the time row; a link to the full correction) and corrects the day alone; Repeats (the family's
+  frequencies and the interval) and If missed (the three carries) revise the task with its policy version, as buttons only while the
+  task may be revised here; Escape, a click outside or the queued save close a popover and focus returns to the pressed cell. The
+  Follows cell names the first open prerequisite with "n of m" and opens "What needs doing first"; the Timer cell leads to the timer's
+  section. The action row gains Tomorrow and Skip beside the record act and "Correct this day" (sticky on the phone). The activity is
+  a timeline of sentences. Not done, and why: "Who" stays plain (the server refuses a participation change on a revision; the form says
+  the same); the Turn cell's "you next" and the frame's timer control inside the cell (the timer's running state lives in its block);
+  Reminder (no backend); a drag between people (no hand-over command).
 - **Phase 11 — Create with chips.** The parsing title field (dates, times, "every …", people, #lists as chips); facts as
   buttons with popovers; "Add" / "Add and another"; drafts kept; no Sync buttons on forms or dialogs.
 - **Phase 12 — Timers, Focus, Sharing.** The goals aside; Focus's Later / Timer / key caps / "Meanwhile" and the phone ring;

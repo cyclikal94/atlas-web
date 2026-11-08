@@ -62,11 +62,23 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     turn", the state pill, a pending mark), and "More" (`components/ui/action-menu.tsx`, a `menu` of `menuitem`s: Edit task, Sharing,
     Who sees my progress, the streak, Archive or Restore, a withheld act a disabled item with its reason). Then the **facts strip**
     (`components/ui/facts-strip.tsx`, `Facts`): the day, who takes part or whose turn it is (with the roster's initials), how the task
-    repeats (`copy.CADENCE`), what it measures (or "Timer" for a task measured in time), what happens when it is missed, the way to the
-    streak (a link cell) and "Seen by" (a button cell that opens the sharing editor: editors with consequences open as a centred dialog
-    from the strip). Under the strip the day's **action row** (`RecordCard.tsx`, `data-record-card`): Mark done, or the amount with its
-    unit and "Log an amount" / "Just checked on it" as pills, or the checklist, with "Correct this day" beside it; on the phone the row
-    stays at the bottom of the viewport. Then ONE grouped box (`components/ui/grouped.tsx`, `DayWork.tsx`) of disclosure sections on
+    repeats (`copy.CADENCE`), what it measures (or "Timer" for a task measured in time), what happens when it is missed, what it
+    **follows** (the first open prerequisite and "n of m", a warning dot while one is open; the cell opens "What needs doing first"),
+    the way to the streak (a link cell) and "Seen by" (a button cell that opens the sharing editor: editors with consequences open as
+    a centred dialog from the strip). A **short choice opens as a popover under its cell** (`components/ui/popover.tsx`, `PopoverHost` /
+    `Popover` / `Choice`; `detail/FactEditors.tsx`): the day's editor (Today, Tomorrow, No date, a month grid, the time as Any, 09:00,
+    18:00 or another typed; `data-fact-editor="day"`) corrects this day alone through `reviseOccurrence`, exactly as the correction
+    dialog does (which it links to for the rest); the repeat (the family's frequencies and the interval; `data-fact-editor="repeat"`)
+    and "If missed" (the three carries with the chosen one's line; `data-fact-editor="carry"`) revise the task through `reviseTask`
+    with the cached policy version, so they are buttons only while the task may be revised from here (`editable`, synced, writable);
+    a one-off's repeat and a task that may not be revised keep plain cells, as the form's own locks say. A popover saves as a choice is
+    pressed and closes once the save is queued (a refusal keeps it open with its words); Escape and a click outside close it without a
+    save, and focus returns to the cell (`aria-expanded`). The timer's cell leads to the timer's section. Under the strip the day's
+    **action row** (`RecordCard.tsx`, `data-record-card`): Mark done, or the amount with its unit and "Log an amount" / "Just checked on
+    it" as pills, or the checklist, then **Tomorrow** (the same day correction, to tomorrow, keeping the time; `data-day-tomorrow`) and
+    **Skip** (the closure the "This day" section explains, `actions.resolve`; `data-day-skip`) while the day is open and may be changed,
+    with "Correct this day" beside them; on the phone the row stays at the bottom of the viewport. The activity (`EntryHistory.tsx`,
+    `data-activity`) is a timeline of sentences: a dot for each entry (green once done, amber for a correction) with its moment under. Then ONE grouped box (`components/ui/grouped.tsx`, `DayWork.tsx`) of disclosure sections on
     hairlines for the day's decisions and reference: WEB-10c's "What needs doing first" (a warning dot while a prerequisite is open, the
     count beside the heading), the timer (a green dot while one runs; only for a task measured in time), the turns of an Anyone task,
     "Who's on this" (with "Your settings" and "Who sees my progress") and "This day" (the closure and the streak exclusion). The

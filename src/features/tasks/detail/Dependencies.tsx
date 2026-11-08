@@ -192,7 +192,7 @@ function useGraphSettled(row: RowModel): string {
 }
 
 /** The labels of preview items from the cache: the task's title and the day's date, never an id. */
-function useLabels(
+export function useLabels(
   items: readonly { occurrence_id: string; task_id: string }[],
 ) {
   const ids = [

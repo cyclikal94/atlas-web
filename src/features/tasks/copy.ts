@@ -191,6 +191,7 @@ export const FACTS = {
   goal: "Goal",
   timer: "Timer",
   streak: "Streak",
+  follows: "Follows",
   seenBy: "Seen by",
 } as const;
 /** The task page's summary line (the Final design): "18:30 today · every Monday · your turn". */
@@ -202,21 +203,36 @@ export const SUMMARY_LINE = {
   theirTurn: (name: string) => `${name}'s turn`,
   justYou: "just you",
 } as const;
-/** The goal as one short phrase for the facts strip. */
-export const GOAL_FACT = (goal: Goal): string =>
-  goal.kind === "checkbox"
-    ? "Tick it off"
-    : goal.kind === "checklist"
-      ? goal.items.length === 1
-        ? "1 item"
-        : `${goal.items.length} items`
-      : goal.minimum !== null && goal.maximum !== null
-        ? `${goal.minimum} to ${goal.maximum} ${goal.unit}`
-        : goal.minimum !== null
-          ? `At least ${goal.minimum} ${goal.unit}`
-          : goal.maximum !== null
-            ? `At most ${goal.maximum} ${goal.unit}`
-            : `Any amount of ${goal.unit}`;
+/** A number of seconds as a short duration ("20 min", "1 h 30 min", "45 s"). */
+export const DURATION = (seconds: string): string => {
+  const n = Number(seconds);
+  if (!Number.isFinite(n)) return `${seconds} s`;
+  const h = Math.floor(n / 3600);
+  const m = Math.round((n % 3600) / 60);
+  if (h > 0) return m > 0 ? `${h} h ${m} min` : `${h} h`;
+  if (m > 0) return `${m} min`;
+  return `${Math.round(n)} s`;
+};
+/** The goal as one short phrase for the facts strip; a goal in seconds (a timer) reads as a duration. */
+export const GOAL_FACT = (goal: Goal): string => {
+  if (goal.kind === "checkbox") return "Tick it off";
+  if (goal.kind === "checklist")
+    return goal.items.length === 1 ? "1 item" : `${goal.items.length} items`;
+  const timed = goal.unit === "seconds";
+  const amount = (value: string) =>
+    timed ? DURATION(value) : `${value} ${goal.unit}`;
+  return goal.minimum !== null && goal.maximum !== null
+    ? timed
+      ? `${DURATION(goal.minimum)} to ${DURATION(goal.maximum)}`
+      : `${goal.minimum} to ${goal.maximum} ${goal.unit}`
+    : goal.minimum !== null
+      ? `At least ${amount(goal.minimum)}`
+      : goal.maximum !== null
+        ? `At most ${amount(goal.maximum)}`
+        : timed
+          ? "Any length of time"
+          : `Any amount of ${goal.unit}`;
+};
 export const CADENCE = (repeat: Cadence | null): string => {
   if (repeat === null) return "Once";
   const n = repeat.interval;

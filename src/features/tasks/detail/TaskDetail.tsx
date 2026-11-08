@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Check, ChevronRight, X } from "lucide-react";
-import { useId, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import { useLayoutMode } from "../../../app/shell/layout-mode";
 import { ActionMenu, type MenuItem } from "../../../components/ui/action-menu";
 import { useAnnouncer } from "../../../components/ui/announcer";
@@ -14,6 +14,7 @@ import { Label } from "../../../components/ui/label";
 import { NativeSelect } from "../../../components/ui/native-select";
 import { PageGrid } from "../../../components/ui/page-grid";
 import { PageHeading } from "../../../components/ui/page-heading";
+import { Popover, PopoverHost } from "../../../components/ui/popover";
 import {
   type DraftWithCommand,
   useDataEnv,
@@ -21,7 +22,7 @@ import {
 } from "../../../data";
 import { cn } from "../../../lib/utils";
 import { PolicyEditorRecoveryHost, ResourcePolicyEditor } from "../../sharing";
-import { useTaskActions } from "../actions";
+import { type TaskActions, useTaskActions } from "../actions";
 import { CatchUpNotice } from "../catchup/CatchUpNotice";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -31,6 +32,7 @@ import {
   type SubmittedCorrection,
   submittedCorrection,
 } from "../model/correction";
+import { prerequisitesOf, progressOf } from "../model/dependencies";
 import { addDays, resolveWallTime, timeIn, todayIn } from "../model/time";
 import { isTimerGoal } from "../model/timers";
 import { editable } from "../reasons";
@@ -44,8 +46,17 @@ import {
   CorrectionDialog,
   CorrectionRecoveryHost,
 } from "./CorrectionDialog";
-import { DayWork } from "./DayWork";
+import { type DayHandles, DayWork } from "./DayWork";
+import { DEPENDENCY_COPY, useLabels } from "./Dependencies";
 import { EntryHistory } from "./EntryHistory";
+import {
+  CarryEditor,
+  DayActs,
+  DayEditor,
+  EDITOR_COPY,
+  RepeatEditor,
+  type TaskRevision,
+} from "./FactEditors";
 import { anonymous, ROTA_COPY, RotaPanel, useUsernames } from "./Rota";
 import { useTaskDetail } from "./useTaskDetail";
 
@@ -59,7 +70,8 @@ export const DETAIL_COPY = {
   sharingProgress: "Who sees my progress",
   absent: "This task isn't on this device.",
   loading: "Loading this task",
-  day: "Day",
+  /** The select of the task's other saved days, beside its label. */
+  day: "Showing",
   undated: "No date",
   noOccurrence: "This task has no day to show yet.",
   dayLoading: "Loading this day",
@@ -72,6 +84,17 @@ export const DETAIL_COPY = {
   /** The "Seen by" cell of the facts strip (the Final design): it opens the sharing editor. */
   seenBy: "Who can see this",
   seenByWait: "Once synced",
+  /** The "Follows" cell: what the day waits for, in a few words. */
+  follows: {
+    none: "Nothing",
+    loading: "Checking…",
+    offline: "When online",
+    hidden: "Private",
+    failed: "Couldn't check",
+    of: (done: number, total: number) => `${done} of ${total}`,
+  },
+  /** The timer's cell leads to its section. */
+  timerGo: "Open the timer",
   close: "Close",
 } as const;
 
@@ -210,6 +233,21 @@ export function TaskDetail({
   const today = todayIn(zone, view.now);
   // The activity stands beside the day only where there is room for it: the desktop, and not inside a container beside another page.
   const wide = mode === "desktop" && !embedded;
+  // The strip's short editors of the task (how it repeats, what happens if it is missed) revise the task as the form does, so they need
+  // what a revision needs: an editable task and execution, synced, with its policy version known, on a device that may write.
+  const revision: TaskRevision | null =
+    editable(task, view.execution) &&
+    view.synced &&
+    policyVersion !== undefined &&
+    view.execution !== null &&
+    env.writable
+      ? {
+          taskId: task.id,
+          executionId: view.execution.id,
+          title: task.label,
+          policyVersion,
+        }
+      : null;
   // The task's other acts (the Final design): behind "More", each with its reason when it is withheld.
   const menu: MenuItem[] = [
     !editable(task, view.execution)
@@ -375,8 +413,15 @@ export function TaskDetail({
       view.days.previous ||
       view.days.paged ||
       view.days.error !== null ? (
-        <div className="flex flex-col gap-2" data-day-picker="">
-          <Label htmlFor={dayId}>{DETAIL_COPY.day}</Label>
+        // The task's other saved days (a repeating task): "Showing" and the day's select on one quiet row, so the Day cell below is
+        // the day's own fact and this row is the way to another day.
+        <div
+          className="flex flex-wrap items-center gap-x-3 gap-y-2"
+          data-day-picker=""
+        >
+          <Label htmlFor={dayId} className="text-muted-foreground">
+            {DETAIL_COPY.day}
+          </Label>
           <NativeSelect
             id={dayId}
             value={row?.id ?? ""}
@@ -502,33 +547,55 @@ export function TaskDetail({
             <DayWork
               key={`day:${row.id}`}
               row={row}
-              facts={
+              facts={(day) => (
                 <Facts
                   row={row}
                   taskId={task.id}
                   me={env.accountId}
                   names={names}
                   synced={view.synced}
-                  columns={embedded ? 2 : 3}
+                  columns={embedded ? 2 : 4}
                   onSharing={() => setSharing(task.id)}
+                  actions={actions}
+                  now={view.now}
+                  zone={zone}
+                  progressIds={progressIds}
+                  revision={revision}
+                  canCorrect={row.canEdit && env.writable}
+                  onCorrect={() => setCorrecting(row.id)}
+                  day={day}
                 />
-              }
+              )}
               actions={actions}
               now={view.now}
               zone={zone}
               writable={env.writable}
               focus={focusRecord === true || choseAgain}
               rowActions={
-                row.canEdit ? (
-                  <Button onClick={() => setCorrecting(row.id)}>
-                    {CORRECTION_COPY.open}
-                  </Button>
-                ) : (
-                  // A known denial of the occurrence withholds the correction (R30); an open dialog stays open and explains it.
-                  <Button disabled reason={CORRECTION_COPY.denied}>
-                    {CORRECTION_COPY.open}
-                  </Button>
-                )
+                <>
+                  {row.canEdit &&
+                  env.writable &&
+                  !row.data.resolved &&
+                  row.outcome !== "complete" ? (
+                    <DayActs
+                      row={row}
+                      now={view.now}
+                      zone={zone}
+                      progressIds={progressIds}
+                      actions={actions}
+                    />
+                  ) : null}
+                  {row.canEdit ? (
+                    <Button onClick={() => setCorrecting(row.id)}>
+                      {CORRECTION_COPY.open}
+                    </Button>
+                  ) : (
+                    // A known denial of the occurrence withholds the correction (R30); an open dialog stays open and explains it.
+                    <Button disabled reason={CORRECTION_COPY.denied}>
+                      {CORRECTION_COPY.open}
+                    </Button>
+                  )}
+                </>
               }
               extra={
                 // The rest of the day's reference, in the same box (the Final design): the turns, the entries (where there is no column
@@ -654,9 +721,12 @@ function StateGlyph({ row }: { row: RowModel | null }) {
 
 /**
  * The facts strip (the Final design): the day, who takes part (or whose turn it is), how the task repeats, what it measures, what
- * happens when it is missed, the way to its streak, and who can see it (the sharing editor opens from the cell, as every editor with
- * consequences does). A fact that is a decision or a reference lives in the grouped box below instead.
+ * happens when it is missed, what it follows, the way to its streak, and who can see it. A short choice (the day and its time, the
+ * repeat, the carry) opens as a popover under its cell and saves as it is chosen; an editor with consequences (sharing) opens as the
+ * centred dialog; the timer's cell leads to its section and "Follows" to what needs doing first.
  */
+type Editing = "day" | "repeat" | "carry" | null;
+
 function Facts({
   row,
   taskId,
@@ -665,6 +735,14 @@ function Facts({
   synced,
   onSharing,
   columns = 3,
+  actions,
+  now,
+  zone,
+  progressIds,
+  revision,
+  canCorrect,
+  onCorrect,
+  day,
 }: {
   row: RowModel;
   taskId: string;
@@ -672,7 +750,18 @@ function Facts({
   names: ReadonlyMap<string, string>;
   synced: boolean;
   onSharing(): void;
-  columns?: 2 | 3;
+  columns?: 2 | 3 | 4;
+  actions: TaskActions;
+  now: number;
+  zone: string;
+  progressIds: readonly string[];
+  /** What a revision of the task needs, or null while the task may not be revised from here. */
+  revision: TaskRevision | null;
+  /** This day may be corrected (R30) on a device that may write. */
+  canCorrect: boolean;
+  /** Opens the full correction dialog. */
+  onCorrect(): void;
+  day: DayHandles;
 }) {
   const definition = row.data.definition;
   const turn = row.data.rota?.account_id ?? null;
@@ -681,88 +770,257 @@ function Facts({
     name: id === me ? copy.WHO.you : (names.get(id) ?? anonymous(id)),
   }));
   const timer = isTimerGoal(row.data);
+  const cadence = definition.schedule.repeat;
+  const [editing, setEditing] = useState<Editing>(null);
+  const close = useCallback(() => setEditing(null), []);
+  const toggle = (which: Exclude<Editing, null>) =>
+    setEditing((open) => (open === which ? null : which));
+  const dayRef = useRef<HTMLButtonElement>(null);
+  const repeatRef = useRef<HTMLButtonElement>(null);
+  const carryRef = useRef<HTMLButtonElement>(null);
+  // What the day waits for, in a few words (the dialog has the rest).
+  const read = day.deps.read;
+  const preview = read.kind === "ready" ? read.preview : null;
+  const items = preview ? prerequisitesOf(preview, row.id) : [];
+  const label = useLabels(items);
+  const counts = preview ? progressOf(preview, row.id) : null;
+  const follows =
+    read.kind === "loading"
+      ? { text: DETAIL_COPY.follows.loading, dot: undefined, aside: null }
+      : read.kind === "offline"
+        ? { text: DETAIL_COPY.follows.offline, dot: undefined, aside: null }
+        : read.kind === "refused"
+          ? { text: DETAIL_COPY.follows.hidden, dot: undefined, aside: null }
+          : read.kind === "error" || counts === null
+            ? { text: DETAIL_COPY.follows.failed, dot: undefined, aside: null }
+            : counts.total === 0
+              ? { text: DETAIL_COPY.follows.none, dot: undefined, aside: null }
+              : counts.firstOpen === null
+                ? {
+                    text: DEPENDENCY_COPY.allDone,
+                    dot: "success" as const,
+                    aside: DETAIL_COPY.follows.of(counts.done, counts.total),
+                  }
+                : {
+                    text: label(counts.firstOpen).title,
+                    dot: "warning" as const,
+                    aside: DETAIL_COPY.follows.of(counts.done, counts.total),
+                  };
+  const dayValue = (
+    <span className="font-num">
+      {row.data.slot.date === null
+        ? DETAIL_COPY.undated
+        : dayLabel(row.data.slot.date)}
+    </span>
+  );
+  const timeValue =
+    row.data.slot.intended_time === null ||
+    row.data.slot.intended_time === undefined ? null : (
+      <span className="font-num text-xs text-muted-foreground">
+        {row.data.slot.intended_time.slice(0, 5)}
+      </span>
+    );
+  const aside = (text: string) => (
+    <span className="text-xs text-muted-foreground">{text}</span>
+  );
+  const chevron = (
+    <ChevronRight
+      aria-hidden="true"
+      className="size-4 flex-none text-muted-foreground"
+    />
+  );
   return (
-    <FactsStrip data-task-facts="" columns={columns}>
-      <FactCell label={copy.FACTS.day} data-fact="day">
-        <span className="font-num">
-          {row.data.slot.date === null
-            ? DETAIL_COPY.undated
-            : dayLabel(row.data.slot.date)}
-        </span>
-      </FactCell>
-      <FactCell
-        label={turn !== null ? copy.FACTS.turn : copy.FACTS.who}
-        data-fact="who"
-      >
-        {definition.participation === "personal" ? (
-          <span>{copy.PARTICIPATION.personal}</span>
+    <PopoverHost data-task-facts-host="">
+      <FactsStrip data-task-facts="" columns={columns}>
+        {canCorrect ? (
+          <FactCell
+            as="button"
+            ref={dayRef}
+            label={copy.FACTS.day}
+            data-fact="day"
+            pressed={editing === "day"}
+            onClick={() => toggle("day")}
+          >
+            {dayValue}
+            {timeValue}
+          </FactCell>
         ) : (
-          <>
-            {people.length > 0 ? (
-              <AvatarStack
-                people={people}
-                {...(turn !== null ? { highlight: turn } : {})}
-              />
-            ) : null}
-            <span>
-              {turn !== null
-                ? turn === me
-                  ? copy.WHO.you
-                  : (names.get(turn) ?? anonymous(turn))
-                : `${copy.PARTICIPATION[definition.participation]} · ${whoLabel(row, me)}`}
-            </span>
-          </>
+          <FactCell label={copy.FACTS.day} data-fact="day">
+            {dayValue}
+            {timeValue}
+          </FactCell>
         )}
-      </FactCell>
-      <FactCell label={copy.FACTS.repeat} data-fact="repeat">
-        <span>{copy.CADENCE(definition.schedule.repeat)}</span>
-      </FactCell>
-      <FactCell
-        label={timer ? copy.FACTS.timer : copy.FACTS.goal}
-        data-fact="goal"
-      >
-        <span>{copy.GOAL_FACT(definition.goal)}</span>
-      </FactCell>
-      <FactCell label={copy.FACTS.carry} data-fact="carry">
-        <span>{copy.CARRY[definition.carry].label}</span>
-      </FactCell>
-      <FactCell
-        as="link"
-        label={copy.FACTS.streak}
-        data-fact="streak"
-        data-streak-link=""
-        to="/tasks/$taskId/streak"
-        params={{ taskId }}
-        aria-label={STREAK_COPY.linkName}
-      >
-        <span>{STREAK_COPY.link}</span>
-        <ChevronRight
-          aria-hidden="true"
-          className="size-4 flex-none text-muted-foreground"
-        />
-      </FactCell>
-      {synced ? (
+        <FactCell
+          label={turn !== null ? copy.FACTS.turn : copy.FACTS.who}
+          data-fact="who"
+        >
+          {definition.participation === "personal" ? (
+            <span>{copy.PARTICIPATION.personal}</span>
+          ) : (
+            <>
+              {people.length > 0 ? (
+                <AvatarStack
+                  people={people}
+                  {...(turn !== null ? { highlight: turn } : {})}
+                />
+              ) : null}
+              <span>
+                {turn !== null
+                  ? turn === me
+                    ? copy.WHO.you
+                    : (names.get(turn) ?? anonymous(turn))
+                  : `${copy.PARTICIPATION[definition.participation]} · ${whoLabel(row, me)}`}
+              </span>
+            </>
+          )}
+        </FactCell>
+        {revision !== null && cadence !== null ? (
+          <FactCell
+            as="button"
+            ref={repeatRef}
+            label={copy.FACTS.repeat}
+            data-fact="repeat"
+            pressed={editing === "repeat"}
+            onClick={() => toggle("repeat")}
+          >
+            <span>{copy.CADENCE(cadence)}</span>
+          </FactCell>
+        ) : (
+          <FactCell label={copy.FACTS.repeat} data-fact="repeat">
+            <span>{copy.CADENCE(cadence)}</span>
+          </FactCell>
+        )}
+        {timer ? (
+          <FactCell
+            as="button"
+            label={copy.FACTS.timer}
+            data-fact="goal"
+            onClick={day.timer}
+            aria-label={DETAIL_COPY.timerGo}
+          >
+            <span>{copy.GOAL_FACT(definition.goal)}</span>
+            {chevron}
+          </FactCell>
+        ) : (
+          <FactCell label={copy.FACTS.goal} data-fact="goal">
+            <span>{copy.GOAL_FACT(definition.goal)}</span>
+          </FactCell>
+        )}
+        {revision !== null ? (
+          <FactCell
+            as="button"
+            ref={carryRef}
+            label={copy.FACTS.carry}
+            data-fact="carry"
+            pressed={editing === "carry"}
+            onClick={() => toggle("carry")}
+          >
+            <span>{copy.CARRY[definition.carry].label}</span>
+          </FactCell>
+        ) : (
+          <FactCell label={copy.FACTS.carry} data-fact="carry">
+            <span>{copy.CARRY[definition.carry].label}</span>
+          </FactCell>
+        )}
         <FactCell
           as="button"
-          label={copy.FACTS.seenBy}
-          data-fact="seen-by"
-          onClick={onSharing}
-          aria-label={DETAIL_COPY.seenBy}
+          label={copy.FACTS.follows}
+          data-fact="follows"
+          data-follows={read.kind}
+          dot={follows.dot}
+          onClick={day.see}
         >
-          <span>{DETAIL_COPY.seenBy}</span>
-          <ChevronRight
-            aria-hidden="true"
-            className="size-4 flex-none text-muted-foreground"
+          <span>{follows.text}</span>
+          {follows.aside === null ? null : aside(follows.aside)}
+          {chevron}
+        </FactCell>
+        <FactCell
+          as="link"
+          label={copy.FACTS.streak}
+          data-fact="streak"
+          data-streak-link=""
+          to="/tasks/$taskId/streak"
+          params={{ taskId }}
+          aria-label={STREAK_COPY.linkName}
+        >
+          <span>{STREAK_COPY.link}</span>
+          {chevron}
+        </FactCell>
+        {synced ? (
+          <FactCell
+            as="button"
+            label={copy.FACTS.seenBy}
+            data-fact="seen-by"
+            onClick={onSharing}
+            aria-label={DETAIL_COPY.seenBy}
+          >
+            <span>{DETAIL_COPY.seenBy}</span>
+            {chevron}
+          </FactCell>
+        ) : (
+          <FactCell label={copy.FACTS.seenBy} data-fact="seen-by">
+            <span className="text-muted-foreground">
+              {DETAIL_COPY.seenByWait}
+            </span>
+          </FactCell>
+        )}
+      </FactsStrip>
+      {canCorrect ? (
+        <Popover
+          anchor={dayRef}
+          open={editing === "day"}
+          onClose={close}
+          label={EDITOR_COPY.day.title}
+          data-fact-editor="day"
+        >
+          <DayEditor
+            row={row}
+            now={now}
+            zone={zone}
+            progressIds={progressIds}
+            actions={actions}
+            onDone={close}
+            onMore={() => {
+              close();
+              onCorrect();
+            }}
           />
-        </FactCell>
-      ) : (
-        <FactCell label={copy.FACTS.seenBy} data-fact="seen-by">
-          <span className="text-muted-foreground">
-            {DETAIL_COPY.seenByWait}
-          </span>
-        </FactCell>
-      )}
-    </FactsStrip>
+        </Popover>
+      ) : null}
+      {revision !== null && cadence !== null ? (
+        <Popover
+          anchor={repeatRef}
+          open={editing === "repeat"}
+          onClose={close}
+          label={EDITOR_COPY.repeat.title}
+          data-fact-editor="repeat"
+        >
+          <RepeatEditor
+            definition={definition}
+            cadence={cadence}
+            revision={revision}
+            actions={actions}
+            onDone={close}
+          />
+        </Popover>
+      ) : null}
+      {revision !== null ? (
+        <Popover
+          anchor={carryRef}
+          open={editing === "carry"}
+          onClose={close}
+          label={EDITOR_COPY.carry.title}
+          data-fact-editor="carry"
+        >
+          <CarryEditor
+            definition={definition}
+            revision={revision}
+            actions={actions}
+            onDone={close}
+          />
+        </Popover>
+      ) : null}
+    </PopoverHost>
   );
 }
 

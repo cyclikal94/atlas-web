@@ -13,12 +13,23 @@ import {
   DependencyEditor,
   DependencyEditorRecoveryHost,
   DependencyRow,
+  type DependencyState,
   gateOf,
   type RootEvidence,
   SetConflict,
   UnmetConflict,
   useDependencies,
 } from "./Dependencies";
+
+/** What the facts strip may reach of the day: what it waits for (and the dialog that shows it) and the timer's section. */
+export interface DayHandles {
+  deps: DependencyState;
+  /** Opens "What needs doing first". */
+  see(): void;
+  /** Brings the timer's section into view and focuses its control. */
+  timer(): void;
+}
+
 import { RecordCard } from "./RecordCard";
 import { TimerBlock } from "./Timer";
 
@@ -48,7 +59,7 @@ export function DayWork({
    * The facts strip (the Final design): above the record card from the tablet up; on the phone the record card comes first, so the
    * day's primary action is on the first screen.
    */
-  facts?: ReactNode;
+  facts?: ReactNode | ((day: DayHandles) => ReactNode);
   /** More sections of the day's grouped box (the rota, when the task takes turns). */
   extra?: ReactNode;
   /** The day's other acts beside the record control (the correction, the timer). */
@@ -114,7 +125,25 @@ export function DayWork({
       ) : null}
       {/* The Final design: the facts strip, then the day's action row under it (on the phone the row stays at the bottom of the viewport). */}
       <div className="flex flex-col gap-5" data-day-top="">
-        {facts}
+        {typeof facts === "function"
+          ? facts({
+              deps,
+              see: () => openDialog(null),
+              timer: () => {
+                const block = document.querySelector<HTMLElement>(
+                  "[data-day-work] [data-timer-block]",
+                );
+                if (!block) return;
+                block.scrollIntoView?.({
+                  block: "nearest",
+                  behavior: "smooth",
+                });
+                block
+                  .querySelector<HTMLElement>("button:not([disabled])")
+                  ?.focus({ preventScroll: true });
+              },
+            })
+          : facts}
         <RecordCard
           key={`record:${row.id}`}
           row={row}

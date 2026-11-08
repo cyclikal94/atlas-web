@@ -132,6 +132,16 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
   not physical devices or a screen reader (WEB-09d, collected by WEB-15).
 
+### The facts strip's popovers (the Final design, 8 November 2026)
+
+- A short choice of the task page (the day and its time, how it repeats, what happens if it is missed) is a button cell of the facts
+  strip with `aria-expanded`; it opens a `dialog` named for the choice ("When", "Repeats", "If it isn't done") directly under the cell.
+  Focus moves to the pressed choice (`aria-pressed`) or the first control; Tab loops inside; Escape, a click outside or a queued save
+  close it and focus returns to the cell. A refusal keeps the popover open and says why in it (the announcer says it too).
+- The month grid's days are buttons named in full ("Tuesday 10 November 2026"), the chosen one pressed, today ringed; the previous and
+  next month are named buttons.
+- Tomorrow and Skip on the action row are plain buttons, withheld (not disabled) while the day is closed, done or may not be changed.
+
 ## The dependency graph (WEB-18)
 
 - **Decorative map, real list** (TASK-04: "the diagram is decoration… the list is the real control"). The map is `aria-hidden` and holds nothing
