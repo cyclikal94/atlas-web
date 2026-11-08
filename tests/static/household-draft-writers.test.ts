@@ -28,6 +28,10 @@ import { UNIT } from "../../scripts/mutation/data-catalogue.mjs";
  * Known asymmetries are listed (`known`), not hidden: O-R3-3, DA-2 (latent; with D-1's follow-up card) and N-1 (decision D-2 open).
  * Decision D-1 is decided (Kieran, 7 November 2026, WEB12B-D1-ANSWER-20261107): a successful Try again forgets text typed since, as
  * D-12b-18 is written; its cells pin that. Mirrored as tables in `docs/pwa.md` ("WEB-12b's household dialogs").
+ * Not pinned, deferred to a follow-up card (Review 5 F-R5-1 and F-R5-2; Kieran's decision WEB12B-R5-FINDINGS-TO-FOLLOW-UP-20261107):
+ * that a durable success FINISHES its ticket (the cells tied to `completeTicket`'s durable arm check the draft, not the ticket, so an
+ * accepted update's wait on it is untested), the per-household draft keys, the codecs' version gate, base integrity and length
+ * boundaries, and R8's `sent` flag after a held-back Try again. Listed in `docs/pwa.md`; a tie here does not claim them.
  */
 const ROOT = join(import.meta.dirname, "..", "..");
 const DIR = "src/features/sharing/households";
@@ -1318,6 +1322,7 @@ const EXITS: Record<string, Record<string, Exit[]>> = {
     ],
     completeTicket: [
       {
+        // The O1 cells pin the draft this arm leaves; that it finishes the ticket is not pinned (Review 5 F-R5-1, deferred: header).
         line: "if (durable) void ticket.succeeded();",
         cells: ["O1.create", "O1.rename", "O1.invite"],
       },

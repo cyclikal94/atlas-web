@@ -506,7 +506,7 @@ describe("R4 × a restored rename's base, beyond Save, Escape and Discard instea
   // N-1 (second design assessment, class `new`, low): the dialog's first try forgets a restored base on a conflict (`renameConflict` in
   // `households-recovery.test.tsx`, this cell's control); `operations.retry()` has no such writer. Whether to change that is decision D-2
   // (open: the coordinator's / Kieran's). Until it is decided this cell pins the behaviour AS IT IS, so a change is deliberate: a fix
-  // turns this cell red (catalogued mutant MU-6294) and must change it and `docs/pwa.md`. Not a waiver: a review may still raise N-1.
+  // turns this cell red (catalogued mutant MU-6282) and must change it and `docs/pwa.md`. Not a waiver: a review may still raise N-1.
   test("R4.rename.retry-conflict-keeps-stale-base: N-1, decision D-2 open, pinned as the product behaves: a restored rename (3) lost, its Try again refused as changed elsewhere, the next Save is still sent under 3 (the server's guard refuses it again: never an overwrite)", async () => {
     const w = await restored();
     w.api.next.command.push({ ok: false, kind: "uncertain" });

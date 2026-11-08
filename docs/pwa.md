@@ -530,7 +530,8 @@ suites:
 | W8 Rename's Escape ends the session (copy discarded) | n/a | M-1 (MU-6247, MU-6294, MU-6299) | n/a |
 | D-1 (decided: keep as written) a successful Try again forgets text typed since | Rules "D-1 New household" (MU-6266) | Rules "D-1 Rename" (MU-6267) | Rules "D-1 Invite" (MU-6268) |
 
-The shared completion (`completeTicket`) is MU-6260 over every R3 test. Exits with no cell carry an argued reason in the inventory:
+The shared completion (`completeTicket`) is MU-6260 over every R3 test; that a durable success also FINISHES its ticket is not pinned
+(deferred, below). Exits with no cell carry an argued reason in the inventory:
 `run()`'s and `invite()`'s refused admission and `retry()`'s guard (no UI path: the buttons are disabled while the same refusal holds),
 another identity displayed after a send, a lookup or a conflict's reads (no UI path: its models retire with page memory), and a connection
 lost while the lookup is on its way (a race). Off-diagonal Try again pairs other than the one above are not cells: a create's Try again
@@ -542,6 +543,14 @@ assessment, class `new`, low): a restored rename whose Try again is refused as a
 under it and refused again (never an overwrite), because `retry()` has no writer that forgets it. Whether to fix N-1 is decision **D-2**,
 open with the coordinator; cell `R4.rename.retry-conflict-keeps-stale-base` pins the product as it is, and MU-6282 (the fix applied
 without its decision) turns it red, so a fix must change that cell and this paragraph.
+
+**Not pinned, deferred to a follow-up card** (Review 5 of 7 November 2026, F-R5-1 and F-R5-2; Kieran's decision
+`WEB12B-R5-FINDINGS-TO-FOLLOW-UP-20261107`, `approval/web12b-r5-followup-20261107.json` in the orchestrator: test-sensitivity gaps on
+correct, unchanged product behaviour). The product does each of the following, but no test above fails when it breaks: a durable success
+finishes its ticket, so a later accepted update's "Save and reload" proceeds (F-R5-1); the Rename and Invitations drafts are kept per
+household; a copy of another codec version is offered, not restored; a rename base must be an integer of at least 1; a name of exactly
+300 characters and a username of exactly 100 restore, one more does not; after a held-back Try again, a Try again answered `closed`
+still says the earlier attempt may have been made (R8) (F-R5-2).
 
 Fixture evidence: `tests/features/sharing/households-recovery.test.tsx` (the production coordinator's accepted update, its save and its one
 reload, per dialog; mutants MU-6239..MU-6251), `households-submission-rules.test.tsx` and `households-submission-cells.test.tsx` (the cells above; MU-6252..MU-6299, MU-6307..MU-6332), the
