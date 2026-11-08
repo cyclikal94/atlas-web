@@ -411,7 +411,7 @@ export function CalendarPage({
           next month takes the title; the month is named here and nowhere else. */}
       <div
         ref={setSticky}
-        className="sticky top-[var(--shell-inset-top,0px)] z-20 -mx-4 -mt-4 flex flex-col gap-3 border-b border-border/70 bg-background/92 px-4 pt-4 pb-2 backdrop-blur tablet:-mx-10 tablet:-mt-9 tablet:px-10 tablet:pt-9 tablet:pb-2.5"
+        className="sticky top-[var(--shell-inset-top,0px)] z-20 -mt-4 flex flex-col gap-3 border-b border-border/70 bg-background/92 pt-4 pb-2 backdrop-blur tablet:-mt-9 tablet:pt-9 tablet:pb-2.5"
         data-calendar-sticky=""
       >
         <PageHeader
@@ -428,7 +428,7 @@ export function CalendarPage({
                 onClick={() => setPicking((open) => !open)}
                 className="atlas-transition -ml-1 flex max-w-full items-center gap-2 rounded-md px-1 text-left text-[30px] font-semibold leading-[1.05] tracking-[-0.035em] text-foreground hover:text-primary tablet:text-[40px]"
               >
-                <span className="truncate" data-calendar-title="">
+                <span className="whitespace-nowrap" data-calendar-title="">
                   {title}
                 </span>
                 <ChevronDown
@@ -557,9 +557,6 @@ export function CalendarPage({
           />
         ))}
       </div>
-      <p className="pt-4 text-xs text-muted-foreground">
-        {CALENDAR_COPY.fromDevice}
-      </p>
     </div>
   );
 }
@@ -611,7 +608,7 @@ function Block({
     "aria-labelledby": heading,
     "data-calendar-block": blockKey,
     "data-calendar-current": current ? "" : undefined,
-    className: "pt-3",
+    className: "pt-4",
     style: { scrollMarginTop: stickyHeight + SCROLL_GAP },
   };
   if (phone) {
@@ -658,7 +655,7 @@ function Block({
       {label}
       <table
         aria-labelledby={heading}
-        className="w-full table-fixed border-separate border-spacing-0"
+        className="w-full table-fixed border-separate border-spacing-px overflow-hidden rounded-[14px] border border-border bg-border"
       >
         <thead className="sr-only">
           <tr>
@@ -713,17 +710,22 @@ function DayCell({
   const shown = tall ? rows : rows.slice(0, 3);
   const number = Number(day.slice(8, 10));
   return (
+    // One cell of the month's box (the facts strip's look: hairlines inside, the box's corners outside), the same height whether or
+    // not the day holds anything; a week's cells grow with their rows.
     <td
       data-calendar-day={day}
       data-calendar-outside={outside ? "" : undefined}
-      className="p-[3px] align-top"
+      className={cn(
+        "bg-card p-1.5 align-top",
+        tall ? "min-h-[240px]" : "h-[132px]",
+        today ? "bg-accent/40" : "",
+      )}
     >
       <div
         className={cn(
-          "flex flex-col gap-[3px] rounded-[10px] border border-border bg-card p-1.5",
-          tall ? "min-h-[240px]" : "min-h-[132px]",
+          "flex flex-col gap-[3px] overflow-hidden",
+          tall ? "" : "h-[120px]",
           outside ? "opacity-55" : "",
-          today ? "border-primary/50" : "",
         )}
       >
         <Link

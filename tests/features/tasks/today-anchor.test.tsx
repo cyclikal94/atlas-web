@@ -178,11 +178,7 @@ describe("the fold, and the pull past the end of the day", () => {
     expect(document.querySelector("[data-upcoming]")).toBeNull();
     const fold = screen.getByRole("button", { name: copy.FOLD_UPCOMING });
     expect(fold).toHaveAttribute("aria-expanded", "false");
-    // A layout engine without geometry is always at the end of the page: a wheel pull fills the fold's line, then reveals.
-    act(() => {
-      window.dispatchEvent(new WheelEvent("wheel", { deltaY: 100 }));
-    });
-    expect(document.querySelector("[data-today-fold-progress]")).not.toBeNull();
+    // A layout engine without geometry is always at the end of the page: scrolling on past it reveals the days ahead at once.
     act(() => {
       window.dispatchEvent(
         new WheelEvent("wheel", { deltaY: REVEAL_DISTANCE }),

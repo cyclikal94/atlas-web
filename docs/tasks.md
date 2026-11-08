@@ -25,11 +25,14 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     anchor and is lit by the address's hash (`destinations.ts` `hash`, `destinationFor(pathname, hash)`), and the hash FOLLOWS THE
     SCROLL: the block under the sticky bar says which half the reader is in (`data-rail-section`), and once they have scrolled the page
     replaces the address's hash (`TodayScreen` `onSection`, `resetScroll: false`), so the navigation switches from Today to Upcoming as
-    the days ahead come under the bar and back again at the top. The sticky bar names the block under it: "Tomorrow · Monday 9
-    November", "Tomorrow · Monday 9 November · Morning", "Rest of week · Tuesday 10 November" (a day at a time), "Next week · Monday 16
-    November" (a day at a time), then each month a week at a time, "November · 23–29 Nov", "December · 1–6 Dec" (`groupAhead`;
-    `data-rail-heading` on each block's heading, `copy.UPCOMING.bar`); revealed or landed on, the days ahead are brought so that
-    "Tomorrow" is the block under the bar. The page's one h1 is
+    the days ahead come under the header and back again at the top. The page has ONE header and it stays at the top as the reader
+    scrolls (revised 8 November 2026 after the fifth review: no smaller bar, the day written once): the eyebrow (the page's h1: "Today",
+    "Upcoming" once the days ahead are under it), the large title, the summary line, the controls, and under them the day's controls
+    (‹ date ›, the zone, the filters). In the day the title is the date and the summary its counts; in the days ahead the title is the
+    block under the header and the summary its count: "Tomorrow · Monday 9 November · 6 things", "Rest of week · Tuesday 10 November"
+    (a day at a time), "Next week · Monday 16 November" (a day at a time), then each month a week at a time, "November · 23–29 Nov",
+    "December · 1–6 Dec" (`groupAhead`; `data-rail-heading` and `data-rail-summary` on each block's heading, `copy.UPCOMING.bar`);
+    revealed or landed on, the days ahead are brought so that "Tomorrow" is the block under the header. The page's one h1 is
     "Today" (the eyebrow); the date is its title; nothing is duplicated.
   - **The look-ahead (8 November 2026).** The server makes an occurrence only when asked (`materialise`), and Today's catch-up asks only
     through today, so a day ahead held nothing until it came. While the fold is open, Today asks the page's runner to bring every task this
@@ -44,10 +47,9 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     next 30 days are planned with the server and anything further off appears as it comes within a month. In the first week block,
     tomorrow's rows are not repeated (tomorrow has its own block).
   - **Revealing the days ahead (revised 8 November 2026).** The fold is CLOSED to begin with: Today reads as one page that ends at the
-    "Add to today…" row and the fold's pill. Scrolled to the end, a further pull (a wheel or a touch; `today/reveal.ts`,
-    `usePullToReveal`) fills the fold's line with a little resistance (`REVEAL_DISTANCE`, the pill turning as it fills; a pause or a pull
-    back lets it go) and past it the days ahead are revealed: the fold opens, the page glides to them under the sticky bar and the
-    navigation moves to Upcoming. The pill does the same on a click (and folds the days away again, bringing the navigation back to
+    "Add to today…" row and the fold's pill. Scrolled to the end, scrolling on (a wheel notch or two, a touch; `today/reveal.ts`,
+    `usePullToReveal`, `REVEAL_DISTANCE`) reveals the days ahead AT ONCE: the fold opens, the page jumps so "Tomorrow" is under the
+    header and the navigation moves to Upcoming (no progress line, no glide). The pill does the same on a click (and folds the days away again, bringing the navigation back to
     Today). `#upcoming` (the rail's Upcoming, the old `/upcoming`) opens the fold and starts there, and the days ahead are kept at the top
     while the day's rows settle, until the reader scrolls. A scroll the page makes itself is never taken for the reader's (the navigation
     follows only a wheel, a touch, a key or a later scroll), and above every heading the bar and the hash are the day's. Nothing of the

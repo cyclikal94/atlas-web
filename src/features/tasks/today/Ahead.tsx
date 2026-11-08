@@ -112,10 +112,8 @@ export function Ahead({
   };
   if (settled || settledBefore)
     return stopped.length === 0 ? (
-      <p
-        className="pl-[94px] text-xs text-muted-foreground"
-        data-ahead="planned"
-      >
+      // Settled: nothing to say on the page (the days ahead speak for themselves); the plan's reach for assistive technology only.
+      <p className="sr-only" data-ahead="planned">
         {AHEAD_COPY.planned(horizonLabel)}
       </p>
     ) : null;

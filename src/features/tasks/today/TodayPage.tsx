@@ -23,6 +23,7 @@ import { inputClass } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
 import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeader, TitleText } from "../../../components/ui/page-header";
+import { PageHeading } from "../../../components/ui/page-heading";
 import { Skeleton } from "../../../components/ui/skeleton";
 import { cn } from "../../../lib/utils";
 import { useTaskActions } from "../actions";
@@ -45,6 +46,7 @@ import {
   type RowInputs,
 } from "../model/row-state";
 import { addDays, timeIn, todayIn } from "../model/time";
+import { TODAY_TITLE } from "../titles";
 import type { RowModel } from "../view";
 import { AddRow } from "./AddRow";
 import { CatchUpBanner } from "./CatchUpBanner";
@@ -88,21 +90,26 @@ const GAP_SECONDS = 2 * 3600;
  * The section whose heading has scrolled under the sticky bar, so the bar can say where the reader is ("Evening", "Tomorrow").
  * Measured from layout on scroll; a layout engine without geometry (jsdom) never reports one.
  */
+interface CurrentSection {
+  label: string;
+  section: "today" | "upcoming";
+  /** The block's count ("6 things"), for the header's summary line while the block is under it. */
+  summary: string | null;
+}
 function useCurrentSection(
   root: HTMLElement | null,
   bar: HTMLElement | null,
-): { label: string; section: "today" | "upcoming" } | null {
-  const [current, setCurrent] = useState<{
-    label: string;
-    section: "today" | "upcoming";
-  } | null>(null);
+): CurrentSection | null {
+  const [current, setCurrent] = useState<CurrentSection | null>(null);
   useEffect(() => {
     if (root === null || bar === null) return;
     let frame = 0;
     const measure = () => {
       frame = 0;
+      // A layout engine without geometry (jsdom) reports no block: the header stays the day's.
+      if (root.getBoundingClientRect().height === 0) return;
       const limit = bar.getBoundingClientRect().bottom + 4;
-      let found: { label: string; section: "today" | "upcoming" } | null = null;
+      let found: CurrentSection | null = null;
       for (const heading of root.querySelectorAll<HTMLElement>(
         "[data-rail-heading]",
       )) {
@@ -111,11 +118,14 @@ function useCurrentSection(
             label: heading.dataset.railHeading ?? "",
             section:
               heading.dataset.railSection === "upcoming" ? "upcoming" : "today",
+            summary: heading.dataset.railSummary ?? null,
           };
         else break;
       }
       setCurrent((previous) =>
-        previous?.label === found?.label && previous?.section === found?.section
+        previous?.label === found?.label &&
+        previous?.section === found?.section &&
+        previous?.summary === found?.summary
           ? previous
           : found,
       );
@@ -291,24 +301,24 @@ export function TodayPage({
     if (!ahead || !revealing.current) return;
     revealing.current = false;
     scrolled.current = true;
-    scrollToFoldRef.current("smooth");
+    scrollToFoldRef.current("auto");
     if (sectionRef.current !== "upcoming") onSectionRef.current?.("upcoming");
-    // The days ahead may still be being read: once their first block is there, glide to it (unless the reader has moved on since).
+    // The days ahead may still be being read: once their first block is there, land on it (unless the reader has moved on since).
     const since = userMoves.current;
-    const timers = [250, 600, 1100].map((ms) =>
+    const timers = [120, 360, 800].map((ms) =>
       window.setTimeout(() => {
         if (
           userMoves.current === since &&
           document.querySelector("[data-upcoming-loading]") === null
         )
-          scrollToFoldRef.current("smooth");
+          scrollToFoldRef.current("auto");
       }, ms),
     );
     return () => {
       for (const timer of timers) window.clearTimeout(timer);
     };
   }, [ahead]);
-  const progress = usePullToReveal(!ahead && !view.loading, reveal);
+  usePullToReveal(!ahead && !view.loading, reveal);
   // The navigation follows the reader's scroll (Today and Upcoming are one page): the section under the sticky bar names the address's
   // hash; above every heading it is the day's. Only the reader's scrolling: the first measure (a landing, a layout engine without
   // geometry) and the page's own scrolls move nothing.
@@ -377,169 +387,183 @@ export function TodayPage({
       className="atlas-enter flex min-w-0 flex-col"
       data-today-page=""
     >
-      {/* The page's heading is the route's (`features/today/route.tsx`), the eyebrow above this date. */}
-      <PageHeader
-        title={
-          <TitleText data-today-date="">
-            {mode === "mobile" ? dayLabel(day) : longDayLabel(day)}
-          </TitleText>
-        }
-        summary={
-          <span data-today-summary="">
-            {copy.SUMMARY(
-              counts.done,
-              counts.total,
-              counts.toDo,
-              counts.notKnown,
-            )}
-          </span>
-        }
-        actions={
-          // The Final design: the search pill (search, or add a task to the day), Focus, and the way to the full form.
-          <>
-            <SearchPill
-              day={day}
-              zone={zone}
-              className="min-w-0 flex-1 tablet:w-[320px] tablet:flex-none"
-            />
-            <Button asChild variant="outline" size="icon">
-              <Link
-                to="/focus"
-                search={{ ...(dayGiven ? { day } : {}), tz: zone }}
-                aria-label={copy.FOCUS_MODE}
-                data-today-focus=""
-              >
-                <Crosshair aria-hidden="true" strokeWidth={2} />
-              </Link>
-            </Button>
-            <Button asChild variant="outline" size="icon">
-              <Link
-                to={newTask?.to ?? "/tasks/new"}
-                params={newTask?.params}
-                search={newTask?.search ?? {}}
-                aria-label={copy.NEW_TASK}
-                data-today-new-task=""
-              >
-                <Plus aria-hidden="true" strokeWidth={2.25} />
-              </Link>
-            </Button>
-          </>
-        }
-        data-today-controls=""
-      />
+      {/* The page's one header, and it STAYS (the Final design, revised 8 November 2026): the eyebrow (the page's h1), the large title,
+          the summary line and the controls, then the day's controls. Scrolled into the days ahead, the title becomes the block under
+          the header ("Tomorrow · Monday 9 November") with its count, and the eyebrow says Upcoming; the day is written once. */}
       <div
         ref={setBar}
         data-today-bar=""
-        className="sticky top-[var(--shell-inset-top,0px)] z-20 -mx-4 mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/70 bg-background/90 px-4 py-2 backdrop-blur tablet:-mx-10 tablet:px-10"
+        // On the phone the header scrolls with the page (stuck, it would take half the screen); from the tablet up it stays.
+        className="z-20 -mt-4 flex flex-col gap-2.5 border-b border-border/70 bg-background/92 pt-4 pb-2 backdrop-blur tablet:sticky tablet:top-[var(--shell-inset-top,0px)] tablet:-mt-9 tablet:pt-9 tablet:pb-2.5"
       >
-        <p
-          className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground"
-          data-current-section=""
+        <PageHeader
+          eyebrow={
+            <PageHeading eyebrow>
+              {current?.section === "upcoming"
+                ? copy.FOLD_UPCOMING
+                : TODAY_TITLE}
+            </PageHeading>
+          }
+          title={
+            <TitleText data-today-date="" data-current-section="">
+              {current !== null && current.section === "upcoming"
+                ? current.label
+                : mode === "mobile"
+                  ? dayLabel(day)
+                  : longDayLabel(day)}
+            </TitleText>
+          }
+          summary={
+            <span data-today-summary="">
+              {current !== null && current.section === "upcoming"
+                ? (current.summary ?? "")
+                : copy.SUMMARY(
+                    counts.done,
+                    counts.total,
+                    counts.toDo,
+                    counts.notKnown,
+                  )}
+            </span>
+          }
+          actions={
+            // The Final design: the search pill (search, or add a task to the day), Focus, and the way to the full form.
+            <>
+              <SearchPill
+                day={day}
+                zone={zone}
+                className="min-w-0 flex-1 tablet:w-[320px] tablet:flex-none"
+              />
+              <Button asChild variant="outline" size="icon">
+                <Link
+                  to="/focus"
+                  search={{ ...(dayGiven ? { day } : {}), tz: zone }}
+                  aria-label={copy.FOCUS_MODE}
+                  data-today-focus=""
+                >
+                  <Crosshair aria-hidden="true" strokeWidth={2} />
+                </Link>
+              </Button>
+              <Button asChild variant="outline" size="icon">
+                <Link
+                  to={newTask?.to ?? "/tasks/new"}
+                  params={newTask?.params}
+                  search={newTask?.search ?? {}}
+                  aria-label={copy.NEW_TASK}
+                  data-today-new-task=""
+                >
+                  <Plus aria-hidden="true" strokeWidth={2.25} />
+                </Link>
+              </Button>
+            </>
+          }
+          data-today-controls=""
+        />
+        <div
+          className="flex flex-wrap items-center gap-x-3 gap-y-2"
+          data-today-day-row=""
         >
-          {current?.label ??
-            (mode === "mobile" ? dayLabel(day) : longDayLabel(day))}
-        </p>
-        {/* The day's controls, quiet on the bar: the arrows and the date, with the time zone behind a toggle on the phone. */}
-        <div className="flex items-center gap-0.5" data-today-day-controls="">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-9"
-            aria-label={copy.PREVIOUS_DAY}
-            onClick={() => onChange({ day: addDays(day, -1) })}
-          >
-            <ChevronLeft aria-hidden="true" />
-          </Button>
-          <label className="sr-only" htmlFor={dayId}>
-            {copy.DAY_LABEL}
-          </label>
-          <input
-            id={dayId}
-            type="date"
-            value={day}
-            data-field-edge=""
-            onChange={(event) => {
-              if (event.target.value) onChange({ day: event.target.value });
-            }}
-            className={cn(
-              inputClass,
-              "h-9 w-auto min-w-0 rounded-full border-border bg-card px-3 font-num text-xs",
-            )}
-          />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-9"
-            aria-label={copy.NEXT_DAY}
-            onClick={() => onChange({ day: addDays(day, 1) })}
-          >
-            <ChevronRight aria-hidden="true" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-9 tablet:hidden"
-            aria-label={copy.ZONE_TOGGLE}
-            aria-expanded={zoneOpen}
-            aria-controls={zoneRowId}
-            data-zone-toggle=""
-            onClick={() => setZoneOpen((open) => !open)}
-          >
-            <Globe aria-hidden="true" />
-          </Button>
-          {dayGiven && !isToday ? (
+          {/* The day's controls, quiet on the bar: the arrows and the date, with the time zone behind a toggle on the phone. */}
+          <div className="flex items-center gap-0.5" data-today-day-controls="">
             <Button
               variant="ghost"
-              size="sm"
-              className="rounded-full text-xs"
-              onClick={() => onChange({ day: today })}
+              size="icon"
+              className="size-9"
+              aria-label={copy.PREVIOUS_DAY}
+              onClick={() => onChange({ day: addDays(day, -1) })}
             >
-              {copy.BACK_TO_TODAY}
+              <ChevronLeft aria-hidden="true" />
             </Button>
-          ) : null}
-        </div>
-        <fieldset className="flex max-w-full gap-1.5 overflow-x-auto [scrollbar-width:none] tablet:flex-wrap">
-          <legend className="sr-only" id={filterName}>
-            {copy.FILTERS_NAME}
-          </legend>
-          {FILTERS.map((f) => (
-            <label key={f} className={chip}>
-              <input
-                type="radio"
-                name={filterName}
-                value={f}
-                checked={filter === f}
-                onChange={() => setFilter(f)}
-                className="sr-only"
-              />
-              {copy.FILTER_LABEL[f]}
+            <label className="sr-only" htmlFor={dayId}>
+              {copy.DAY_LABEL}
             </label>
-          ))}
-        </fieldset>
-        <div
-          id={zoneRowId}
-          className={cn(
-            "w-full tablet:block tablet:w-auto",
-            zoneOpen ? "block" : "hidden",
-          )}
-        >
-          <label className="sr-only" htmlFor={zoneId}>
-            {copy.ZONE_LABEL}
-          </label>
-          <NativeSelect
-            id={zoneId}
-            value={zone}
-            onChange={(event) => onChange({ zone: event.target.value })}
-            className="h-9 w-full rounded-full border-border bg-card text-xs tablet:w-[180px]"
-            wrapperClassName="w-full tablet:w-auto"
-            aria-description={copy.ZONE_HINT(zone)}
-          >
-            {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
-              <option key={z} value={z}>
-                {z}
-              </option>
+            <input
+              id={dayId}
+              type="date"
+              value={day}
+              data-field-edge=""
+              onChange={(event) => {
+                if (event.target.value) onChange({ day: event.target.value });
+              }}
+              className={cn(
+                inputClass,
+                "h-9 w-auto min-w-0 rounded-full border-border bg-card px-3 font-num text-xs",
+              )}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-9"
+              aria-label={copy.NEXT_DAY}
+              onClick={() => onChange({ day: addDays(day, 1) })}
+            >
+              <ChevronRight aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-9 tablet:hidden"
+              aria-label={copy.ZONE_TOGGLE}
+              aria-expanded={zoneOpen}
+              aria-controls={zoneRowId}
+              data-zone-toggle=""
+              onClick={() => setZoneOpen((open) => !open)}
+            >
+              <Globe aria-hidden="true" />
+            </Button>
+            {dayGiven && !isToday ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="rounded-full text-xs"
+                onClick={() => onChange({ day: today })}
+              >
+                {copy.BACK_TO_TODAY}
+              </Button>
+            ) : null}
+          </div>
+          <fieldset className="flex max-w-full gap-1.5 overflow-x-auto [scrollbar-width:none] tablet:flex-wrap">
+            <legend className="sr-only" id={filterName}>
+              {copy.FILTERS_NAME}
+            </legend>
+            {FILTERS.map((f) => (
+              <label key={f} className={chip}>
+                <input
+                  type="radio"
+                  name={filterName}
+                  value={f}
+                  checked={filter === f}
+                  onChange={() => setFilter(f)}
+                  className="sr-only"
+                />
+                {copy.FILTER_LABEL[f]}
+              </label>
             ))}
-          </NativeSelect>
+          </fieldset>
+          <div
+            id={zoneRowId}
+            className={cn(
+              "w-full tablet:block tablet:w-auto",
+              zoneOpen ? "block" : "hidden",
+            )}
+          >
+            <label className="sr-only" htmlFor={zoneId}>
+              {copy.ZONE_LABEL}
+            </label>
+            <NativeSelect
+              id={zoneId}
+              value={zone}
+              onChange={(event) => onChange({ zone: event.target.value })}
+              className="h-9 w-full rounded-full border-border bg-card text-xs tablet:w-[180px]"
+              wrapperClassName="w-full tablet:w-auto"
+              aria-description={copy.ZONE_HINT(zone)}
+            >
+              {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
+                <option key={z} value={z}>
+                  {z}
+                </option>
+              ))}
+            </NativeSelect>
+          </div>
         </div>
       </div>
       <div className="flex flex-col gap-4 py-4">
@@ -698,7 +722,6 @@ export function TodayPage({
         label={copy.FOLD_UPCOMING}
         expanded={ahead}
         controls={upcomingId}
-        progress={progress}
         onToggle={() => {
           if (!ahead) {
             reveal();

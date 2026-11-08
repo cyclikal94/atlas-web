@@ -1,5 +1,5 @@
 import { type AnyRoute, createRoute, redirect } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
+import { lazy, type ReactNode, Suspense } from "react";
 import { PageHeading } from "../../components/ui/page-heading";
 import { useOptionalDataEnv } from "../../data";
 import { CacheGate } from "../sync/CacheGate";
@@ -58,20 +58,20 @@ export const todayRoute = (parent: AnyRoute) => {
       // The heading is the route's, outside the cache gate and the lazy screen (revision 2): the page has its one level-one heading in every
       // gate state and at once, so a route change can move focus to it (RouteFocus), as the placeholder this replaced did. It is the small
       // eyebrow above the day's date (the Final design): the date is the page's large title, the destination its heading.
+      // The page draws the heading itself, inside its header that stays at the top (revised 8 November 2026); while the gate hides
+      // the page, or its lazy screen is still loading, the heading is shown instead, so the page always has its one h1.
+      const heading = <PageHeading eyebrow>{TODAY_TITLE}</PageHeading>;
       return (
-        <div className="flex flex-col gap-1">
-          <PageHeading eyebrow>{TODAY_TITLE}</PageHeading>
-          <CacheGate>
-            <FromSearch />
-          </CacheGate>
-        </div>
+        <CacheGate heading={heading}>
+          <FromSearch heading={heading} />
+        </CacheGate>
       );
     },
   });
-  function FromSearch() {
+  function FromSearch({ heading }: { heading: ReactNode }) {
     const search = route.useSearch();
     return (
-      <Suspense fallback={null}>
+      <Suspense fallback={heading}>
         <TodayScreen search={search} />
       </Suspense>
     );

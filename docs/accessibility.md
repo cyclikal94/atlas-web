@@ -93,9 +93,10 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 
 - Every page has one `h1` (Today, Tasks, the task's title, New task / Edit task); sections are labelled by their `h2`. Today and Upcoming
   are one page: the Upcoming item is a link to the anchor `/today#upcoming` (`aria-current` follows the address's hash, which follows the
-  scroll), and the sticky bar names the block under it. The days ahead are folded to begin with: the fold's pill (`aria-expanded`,
-  `aria-controls`) reveals them for the keyboard and for everyone, the pull past the end of the day (a wheel or a touch) is a pointer's
-  shortcut to the same thing, and arriving at `#upcoming` (the rail, the old address) lands focus on the days ahead themselves (the
+  scroll), and the page's one header, which stays at the top, names the block under it (its h1 reads "Today" in the day and "Upcoming"
+  in the days ahead). The days ahead are folded to begin with: the fold's pill (`aria-expanded`,
+  `aria-controls`) reveals them for the keyboard and for everyone, scrolling on past the end of the day (a wheel or a touch) is a
+  pointer's shortcut to the same thing, and arriving at `#upcoming` (the rail, the old address) lands focus on the days ahead themselves (the
   region is focusable, not in the tab order), so a screen reader starts where the address points. A task opened
   beside or over the day (Settings · Layout) keeps the day's h1: its title is an h2 in a `region` (the split pane) or a `dialog` (the side
   peek: Escape closes, ↑/↓ step between the day's rows; the overlay is the shared `Dialog`). A row's amount or checklist recorder opens from

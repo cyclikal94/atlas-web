@@ -378,7 +378,6 @@ export function RecordCard({
           {extra}
         </div>
       ) : null}
-      <p className="text-xs text-muted-foreground">{RECORD_COPY.offline}</p>
     </section>
   );
 }

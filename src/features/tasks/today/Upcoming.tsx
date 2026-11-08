@@ -206,7 +206,7 @@ export function Upcoming({
     block: DayBlock,
     rowDay: (row: RowModel) => string,
     level: "h2" | "h3",
-    /** What the sticky bar says while this block is under it ("Rest of the week · Tuesday 10 November"). */
+    /** What the header says while this block is under it ("Rest of week · Tuesday 10 November"). */
     barLabel: string,
   ) => {
     const particular = block.rows.filter((row) => !routine(row));
@@ -221,6 +221,7 @@ export function Upcoming({
             <Heading
               id={`${headingId}-${block.key}`}
               data-rail-heading={barLabel}
+              data-rail-summary={copy.THINGS(block.rows.length)}
               data-rail-section="upcoming"
             >
               {block.label}
@@ -318,6 +319,7 @@ export function Upcoming({
                   copy.UPCOMING.tomorrow,
                   longDayLabel(tomorrow),
                 )}
+                data-rail-summary={copy.THINGS(groups.tomorrow.length)}
                 data-rail-section="upcoming"
               >
                 {copy.UPCOMING.tomorrow}
@@ -355,6 +357,9 @@ export function Upcoming({
                   copy.UPCOMING.restOfWeek,
                   longDayLabel(groups.week[0]?.key ?? tomorrow),
                 )}
+                data-rail-summary={copy.THINGS(
+                  groups.week[0]?.rows.length ?? 0,
+                )}
                 data-rail-section="upcoming"
               >
                 {copy.UPCOMING.restOfWeek}
@@ -384,6 +389,9 @@ export function Upcoming({
                 data-rail-heading={copy.UPCOMING.bar(
                   copy.UPCOMING.nextWeek,
                   groups.nextWeek[0]?.label ?? "",
+                )}
+                data-rail-summary={copy.THINGS(
+                  groups.nextWeek[0]?.rows.length ?? 0,
                 )}
                 data-rail-section="upcoming"
               >
@@ -416,6 +424,9 @@ export function Upcoming({
                   month.label,
                   month.weeks[0]?.label ?? "",
                 )}
+                data-rail-summary={copy.THINGS(
+                  month.weeks[0]?.rows.length ?? 0,
+                )}
                 data-rail-section="upcoming"
               >
                 {month.label}
@@ -441,9 +452,6 @@ export function Upcoming({
           {copy.UPCOMING.empty}
         </p>
       ) : null}
-      <p className="pt-4 pl-[94px] text-xs text-muted-foreground">
-        {copy.UPCOMING.fromDevice}
-      </p>
     </div>
   );
 }

@@ -117,9 +117,18 @@ and the task's "Seen by" and retire the page.
 
 ## C. Phases
 
-- **Phase 6 — Today's one header.** The large header stays and names the section (title and eyebrow change as you scroll);
-  the day's controls move into it; the small bar goes; the reveal is an instant jump to "Tomorrow" with no progress line; the
-  row's one fact; routine folds name their tasks; the captions go. Tests: today-anchor, the scroll e2e.
+Progress (8 November 2026, evening): Phase 6 is done except the row's one fact and the routine fold naming its tasks (moved to Phase
+9 with the rest of the row work); the calendar's one-box grid with cells of one height (from Phase 7) was brought forward because the
+review asked for it. One decision is held for Kieran: the dialogs' sync chip ("Updates stopped" / the green dot beside Close in New
+person, New list, the editors) is the documented "in-dialog sync control" (WEB-10a decisions 49-50, revision 18 R33: it keeps the
+dialog's input across a visit to the sync screens) and some forty unit and e2e cases exercise it; removing it outright is a contract
+change, so Phase 11 proposes hiding it while the state is "up to date" and keeping it when something needs the person.
+
+- **Phase 6 — Today's one header (done).** The large header stays and names the section (title and eyebrow change as you
+  scroll); the day's controls moved into it; the small bar is gone; the reveal is an instant jump to "Tomorrow" with no progress
+  line; the "Planned with the server…", "From this device…" and "Saves offline…" captions are gone; the calendar's month is one box of
+  hairlined cells of one height and its title no longer truncates. Left for Phase 9: the row's one fact; routine folds naming their
+  tasks. On the phone the header scrolls with the page (stuck, it took half the screen); Phase 13 gives the phone a compact one.
 - **Phase 7 — Calendar grid and People view.** The one-box month grid with fixed cells; the "Show" row (people, task /
   birthday chips); the People lanes view with the rota's "Anyone" lane and the weekly balance; the phone's people chips.
 - **Phase 8 — One container everywhere.** "How things open" applied to people rows, All-tasks rows, list rows and settings

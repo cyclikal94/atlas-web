@@ -1,27 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
-/** How far the reader pulls past the end of the day (wheel or touch) before the days ahead are revealed. */
-export const REVEAL_DISTANCE = 220;
-const REVEAL_IDLE_MS = 500;
+/** How far the reader scrolls on past the end of the day (wheel or touch) before the days ahead are revealed: a notch or two. */
+export const REVEAL_DISTANCE = 48;
+const REVEAL_IDLE_MS = 400;
 
 /**
- * The days ahead are revealed by pulling past the end of the day (the Final design, revised 8 November 2026): once the page is scrolled
- * to its end, a further wheel or touch pull fills the fold with a little resistance; past `REVEAL_DISTANCE` the fold opens
- * (`onReveal`). The progress (0 to 1) draws the fold's line filling; a pause or a pull back lets it go. Nothing of this while the
- * fold is open (`enabled` false) and nothing before the end of the page: an ordinary scroll stays an ordinary scroll.
+ * The days ahead are revealed by scrolling on past the end of the day (the Final design, revised 8 November 2026): once the page is
+ * at its end, a further wheel or touch pull of `REVEAL_DISTANCE` opens the fold (`onReveal`), at once and without ceremony. A pause
+ * or a pull back lets the distance go. Nothing of this while the fold is open (`enabled` false) and nothing before the end of the page:
+ * an ordinary scroll stays an ordinary scroll.
  */
-export function usePullToReveal(
-  enabled: boolean,
-  onReveal: () => void,
-): number {
-  const [progress, setProgress] = useState(0);
+export function usePullToReveal(enabled: boolean, onReveal: () => void): void {
   const reveal = useRef(onReveal);
   reveal.current = onReveal;
   useEffect(() => {
-    if (!enabled) {
-      setProgress(0);
-      return;
-    }
+    if (!enabled) return;
     let pulled = 0;
     let timer = 0;
     let touchY: number | null = null;
@@ -32,7 +25,6 @@ export function usePullToReveal(
       window.clearTimeout(timer);
       timer = 0;
       pulled = 0;
-      setProgress(0);
     };
     const pull = (delta: number) => {
       if (delta <= 0 || !atEnd()) {
@@ -41,13 +33,11 @@ export function usePullToReveal(
       }
       window.clearTimeout(timer);
       pulled += delta;
-      const next = Math.min(1, pulled / REVEAL_DISTANCE);
-      if (next >= 1) {
+      if (pulled >= REVEAL_DISTANCE) {
         release();
         reveal.current();
         return;
       }
-      setProgress(next);
       timer = window.setTimeout(release, REVEAL_IDLE_MS);
     };
     const onWheel = (event: WheelEvent) =>
@@ -79,5 +69,4 @@ export function usePullToReveal(
       window.removeEventListener("touchcancel", onTouchEnd);
     };
   }, [enabled]);
-  return progress;
 }

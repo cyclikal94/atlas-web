@@ -196,28 +196,22 @@ export function RailFoldLine({
 }
 
 /**
- * The fold between today and the days after it: a pill on a dotted rail, a dashed line across. Folded, a pull past the end of the day
- * fills the line (`progress`, 0 to 1) until the days ahead are revealed; the pill does the same on a click.
+ * The fold between today and the days after it: a pill on a dotted rail, a dashed line across. The pill opens the days ahead (and
+ * folds them away); scrolling on past the end of the day does the same without it.
  */
 export function RailFold({
   label,
   expanded,
   controls,
-  progress = 0,
   onToggle,
 }: {
   label: string;
   expanded: boolean;
   controls: string;
-  progress?: number;
   onToggle(): void;
 }) {
-  const pulling = !expanded && progress > 0;
   return (
-    <div
-      className={cn("relative flex h-14 items-center gap-3", RAIL_INSET)}
-      data-today-fold-progress={pulling ? progress.toFixed(2) : undefined}
-    >
+    <div className={cn("relative flex h-14 items-center gap-3", RAIL_INSET)}>
       <RailLine dotted />
       <button
         type="button"
@@ -225,31 +219,21 @@ export function RailFold({
         aria-controls={controls}
         data-today-fold=""
         onClick={onToggle}
-        className={cn(
-          "atlas-transition inline-flex h-11 items-center gap-1.5 rounded-full border px-3.5 text-xs",
-          pulling
-            ? "border-primary bg-accent text-foreground"
-            : "border-border text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-        )}
+        className="atlas-transition inline-flex h-11 items-center gap-1.5 rounded-full border border-border px-3.5 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       >
         {label}
         <ChevronDown
           aria-hidden="true"
-          className="size-3.5 transition-transform"
-          style={{
-            transform: `rotate(${expanded ? 180 : Math.round(progress * 180)}deg)`,
-          }}
+          className={cn(
+            "size-3.5 transition-transform",
+            expanded ? "rotate-180" : "",
+          )}
         />
       </button>
       <span
         aria-hidden="true"
-        className="relative h-0 flex-1 border-t border-dashed border-border"
-      >
-        <span
-          className="absolute -top-px left-0 h-0.5 rounded-full bg-primary transition-[width] duration-100"
-          style={{ width: `${Math.round(progress * 100)}%` }}
-        />
-      </span>
+        className="h-0 flex-1 border-t border-dashed border-border"
+      />
     </div>
   );
 }
