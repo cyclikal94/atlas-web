@@ -1,6 +1,13 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import { pressTab } from "./helpers";
-import { managedHousehold, sharingReads } from "./pwa-reads";
+import {
+  API,
+  managedHousehold,
+  STUB_ACCOUNT,
+  seededTaskDay,
+  sharingReads,
+  taskDayReads,
+} from "./pwa-reads";
 import {
   armReload,
   build,
@@ -572,6 +579,303 @@ test.describe("WEB-13b M-13b-1 G-1: the new task's calendar anchor across an acc
     await expect(anchorSection(page)).toContainText(summary);
     expect(await build(page)).toBe("b");
     expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+});
+
+/**
+ * WEB-13b revision 37 (Review 46, F-R46-1/F-R46-2): G-2 and G-3 natively, through the person's real path. A modal dialog makes the update
+ * banner inert, so the person leaves the dialog by its in-dialog sync control (the session is kept for the visit) and accepts the update
+ * at the sync screens; Back returns to the screen that opened the dialog. Reviewer-owned probes (Review 46) were the starting point.
+ */
+const editorDialog = (page: Page) => page.getByRole("dialog");
+const restoredNotice = (scope: ReturnType<Page["getByRole"]>) =>
+  scope.locator('[data-recovery-state="restored"]');
+/** The element focused, as the restore left it: never inside a recovery surface (F-R51-1), on the dialog's first field (D2). */
+const focusOf = (page: Page) =>
+  page.evaluate(() => {
+    const active = document.activeElement as HTMLElement | null;
+    return {
+      inDialog: active?.closest('[role="dialog"]') != null,
+      inRecovery:
+        active?.closest(
+          "[data-recovery-state],[data-recovery-alternatives],[data-recovery-check]",
+        ) != null,
+      anchorFirst: active?.hasAttribute("data-anchor-first-field") ?? false,
+      importFirst: active?.hasAttribute("data-import-first-field") ?? false,
+    };
+  });
+
+/** B installed and waiting, "Save and reload" offered (the page holds unfinished input); the server's log cleared. */
+async function updateOffered(page: Page, world: Generations): Promise<void> {
+  await quiet(page);
+  await world.serve("fixture-b");
+  await checkForUpdate(page);
+  await expect(
+    updateRegion(page).getByRole("button", { name: "Save and reload" }),
+  ).toBeVisible();
+  await world.clearLog();
+  await quiet(page);
+}
+
+/** "Save and reload" accepted at the sync screens; B running with the account displayed; Back to the screen that opened the dialog. */
+async function reloadedAndBack(page: Page, world: Generations): Promise<void> {
+  await updateOffered(page, world);
+  const pageReload = await armReload(page);
+  await updateRegion(page)
+    .getByRole("button", { name: "Save and reload" })
+    .click();
+  await pageReload.loaded();
+  await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
+  await displayed(page);
+  await expect(page).toHaveURL(/\/sync/);
+  await page.goBack();
+  await displayed(page);
+}
+
+// ---- G-3: the import dialog --------------------------------------------------------------------------------------------------------------
+const ICS_FILE = {
+  name: "bins.ics",
+  mimeType: "text/calendar",
+  buffer: Buffer.from(
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//r37//EN\r\nBEGIN:VEVENT\r\nUID:r37@example\r\nDTSTAMP:20261101T000000Z\r\nDTSTART;VALUE=DATE:20261102\r\nSUMMARY:Bin day\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+  ),
+};
+const importRow = (page: Page) =>
+  page.getByRole("button", { name: "Import events into Family calendar" });
+
+/** The calendar screen on A, controlled by its worker, the row's import dialog open. */
+async function importOpen(
+  context: BrowserContext,
+  world: Generations,
+): Promise<Page> {
+  await world.reads({
+    [`${API}/notification-capabilities`]: {
+      calendar_links: true,
+      ntfy: false,
+      web_push: false,
+      native_local: false,
+      apns: false,
+      fcm: false,
+      vapid_public_key: null,
+    },
+    [`${API}/calendar-sources`]: { items: [], next_after: null },
+  });
+  await seedAccount(context, world, "acct-a", "s1", {
+    validCache: "pwa-r40-empty",
+    rows: anchorRows,
+  });
+  const page = await openApp(context, world, {
+    route: "/settings/calendars",
+    form: false,
+  });
+  await workerActive(page);
+  await reloadQuietly(page);
+  await importRow(page).click();
+  await expect(editorDialog(page)).toBeVisible();
+  return page;
+}
+
+test.describe("WEB-13b M-13b-1 G-3: the import dialog across an accepted update (revision 37)", () => {
+  test("kept by its sync control with a window typed: the update saves it; Back: the row's dialog reopens on the copy with the restored notice, focus on From and no file; nothing is sent", async ({
+    context,
+    generations,
+  }) => {
+    const page = await importOpen(context, generations);
+    const importer = editorDialog(page);
+    await importer.getByLabel("From", { exact: true }).fill("2026-01-05");
+    await importer.getByLabel("Through", { exact: true }).fill("2026-03-30");
+    await importer.locator("[data-sync-tone]").click();
+    await expect(editorDialog(page)).toHaveCount(0);
+    await reloadedAndBack(page, generations);
+    const reopened = editorDialog(page);
+    await expect(
+      reopened,
+      "the row reopened the dialog on its copy",
+    ).toBeVisible();
+    await expect(restoredNotice(reopened)).toBeVisible();
+    await expect(reopened.getByLabel("From", { exact: true })).toHaveValue(
+      "2026-01-05",
+    );
+    await expect(reopened.getByLabel("Through", { exact: true })).toHaveValue(
+      "2026-03-30",
+    );
+    await expect(reopened.locator("[data-import-file]")).toHaveCount(0);
+    const focus = await focusOf(page);
+    expect(focus.importFirst, `focus is From: ${JSON.stringify(focus)}`).toBe(
+      true,
+    );
+    expect(focus.inRecovery).toBe(false);
+    expect(await build(page)).toBe("b");
+    expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+
+  test("kept by its sync control with a FILE chosen: the accepted update STOPS (Retry save, Discard and reload anyway) and the page does not reload; Back: the row's dialog shows the kept file and window; nothing is sent", async ({
+    context,
+    generations,
+  }) => {
+    const page = await importOpen(context, generations);
+    const importer = editorDialog(page);
+    await importer.getByLabel("From", { exact: true }).fill("2026-01-05");
+    await importer.locator('input[type="file"]').setInputFiles(ICS_FILE);
+    await expect(importer.locator("[data-import-file]")).toContainText(
+      "bins.ics",
+    );
+    await importer.locator("[data-sync-tone]").click();
+    await expect(editorDialog(page)).toHaveCount(0);
+    await updateOffered(page, generations);
+    await mark(page);
+    await updateRegion(page)
+      .getByRole("button", { name: "Save and reload" })
+      .click();
+    // The file is input no copy can hold (docs/pwa.md, D-P7): the update stops with retry or an explicit discard.
+    await expect(updateRegion(page).getByText(SAVE_FAILED)).toBeVisible();
+    await expect(
+      updateRegion(page).getByRole("button", { name: "Retry save" }),
+    ).toBeVisible();
+    await expect(
+      updateRegion(page).getByRole("button", {
+        name: "Discard and reload anyway",
+      }),
+    ).toBeVisible();
+    expect(await marked(page), "the page did not reload").toBe(true);
+    expect(await build(page)).toBe("a");
+    // Nothing was lost: Back at the calendar screen, the row's Import events shows the kept session, file and window.
+    await page.goBack();
+    await displayed(page);
+    await importRow(page).click();
+    const again = editorDialog(page);
+    await expect(again.locator("[data-import-file]")).toContainText("bins.ics");
+    await expect(again.getByLabel("From", { exact: true })).toHaveValue(
+      "2026-01-05",
+    );
+    expect(await marked(page), "still the same page").toBe(true);
+    expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+});
+
+// ---- G-2: a task's anchor panel ----------------------------------------------------------------------------------------------------------
+const WASH = {
+  taskId: "aaaaaaaa-0000-4000-8000-000000000001",
+  executionId: "aaaaaaaa-0000-4000-8000-000000000002",
+  title: "Hang the washing",
+};
+
+/** A non-repeating task's detail on A; its anchor panel edited (an event series, an offset at a time) and left by its sync control. */
+async function detailPanelKept(
+  context: BrowserContext,
+  world: Generations,
+): Promise<{ page: Page; day: Awaited<ReturnType<typeof seededTaskDay>> }> {
+  const day = await seededTaskDay(WASH);
+  await world.reads(taskDayReads(day));
+  await seedAccount(context, world, STUB_ACCOUNT, "s1", {
+    validCache: "pwa-r37-anchor-detail",
+    rows: [...day.rows, ...anchorRows],
+  });
+  const page = await openApp(context, world, {
+    route: `/tasks/${day.taskId}?occurrence=${day.occurrenceId}`,
+    form: false,
+  });
+  await workerActive(page);
+  await reloadQuietly(page);
+  const section = page.locator("[data-anchor-section]");
+  await expect(section).toHaveAttribute("data-anchor-section", "none");
+  await section
+    .getByRole("button", { name: /Anchor/ })
+    .first()
+    .click();
+  const panel = editorDialog(page);
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "Change event…" }).click();
+  await panel
+    .getByRole("button", { name: /Bin day/ })
+    .first()
+    .click();
+  await panel
+    .getByRole("textbox", { name: "Days before (−) or after (+)" })
+    .fill("-2");
+  await panel.getByRole("textbox", { name: "Time (optional)" }).fill("07:15");
+  await panel.locator("[data-sync-tone]").click();
+  await expect(editorDialog(page)).toHaveCount(0);
+  return { page, day };
+}
+
+test.describe("WEB-13b M-13b-1 G-2: a task's anchor panel across an accepted update (revision 37)", () => {
+  test("kept by its sync control: the update saves it; Back: the section reopens the panel on its copy with the restored notice and focus on its first field; nothing is sent", async ({
+    context,
+    generations,
+  }) => {
+    const { page } = await detailPanelKept(context, generations);
+    await reloadedAndBack(page, generations);
+    const reopened = editorDialog(page);
+    await expect(
+      reopened,
+      "the section reopened the panel on its copy",
+    ).toBeVisible();
+    await expect(restoredNotice(reopened)).toBeVisible();
+    await expect(
+      reopened.getByRole("textbox", { name: "Days before (−) or after (+)" }),
+    ).toHaveValue("-2");
+    await expect(
+      reopened.getByRole("textbox", { name: "Time (optional)" }),
+    ).toHaveValue("07:15");
+    const focus = await focusOf(page);
+    expect(
+      focus.anchorFirst,
+      `focus is the panel's first field: ${JSON.stringify(focus)}`,
+    ).toBe(true);
+    expect(focus.inRecovery).toBe(false);
+    expect(await build(page)).toBe("b");
+    expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+
+  test("the task changed while the page reloaded: Save on the restored panel says the task changed and sends nothing", async ({
+    context,
+    generations,
+  }) => {
+    const { page, day } = await detailPanelKept(context, generations);
+    await reloadedAndBack(page, generations);
+    const reopened = editorDialog(page);
+    await expect(restoredNotice(reopened)).toBeVisible();
+    // Another page of the account changes the cached task (a newer version), as a sync would, while the restored panel is open.
+    const other = await context.newPage();
+    try {
+      await navigate(other, `${generations.url}/__data`);
+      await other.waitForFunction(() => window.__atlasData !== undefined);
+      await other.evaluate(
+        async ({ account, task }) => {
+          const data = window.__atlasData;
+          if (!data) throw new Error("no data harness");
+          data.setIdentity(account);
+          await data.open(account);
+          await data.put(account, "cache", [task]);
+          data.close(account);
+        },
+        {
+          account: STUB_ACCOUNT,
+          task: {
+            ...day.rows[0],
+            label: `${WASH.title} (renamed)`,
+            version: 2,
+          },
+        },
+      );
+    } finally {
+      await other.close();
+    }
+    // The page has seen the newer task (its heading, behind the modal panel) before Save is pressed.
+    await expect(
+      page.getByText(`${WASH.title} (renamed)`, { exact: true }).first(),
+    ).toBeAttached();
+    await reopened
+      .getByRole("button", { name: "Save anchor", exact: true })
+      .click();
+    await expect(reopened).toContainText(
+      "This task changed while you were editing — check the anchor and save again.",
+    );
+    expect(
+      await writes(generations),
+      "nothing is sent over the newer task",
+    ).toEqual([]);
   });
 });
 

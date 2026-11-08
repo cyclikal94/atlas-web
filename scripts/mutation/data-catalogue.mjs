@@ -23,7 +23,7 @@ import { ENGINE_10C, UNIT_10C } from "./catalogue-web10c.mjs";
 import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
 import { ENGINE_WEB12B, UNIT_WEB12B } from "./catalogue-web12b.mjs";
 import { ENGINE_13B, UNIT_13B } from "./catalogue-web13b.mjs";
-import { UNIT_13B_M1 } from "./catalogue-web13b-m1.mjs";
+import { ENGINE_13B_M1, UNIT_13B_M1 } from "./catalogue-web13b-m1.mjs";
 import { UNIT_13B_R1 } from "./catalogue-web13b-r1.mjs";
 import { UNIT_13B_R2 } from "./catalogue-web13b-r2.mjs";
 import { UNIT_13B_R3 } from "./catalogue-web13b-r3.mjs";
@@ -36364,6 +36364,7 @@ export const ENGINE = [
   ...ENGINE_13B_R24,
   ...ENGINE_13B_R35,
   ...ENGINE_13B_R36,
+  ...ENGINE_13B_M1,
   // WEB-11a (plan §7.4, N-P1..N-P3): real-engine mutants, each caught by its native case.
   {
     id: "MU-2719",

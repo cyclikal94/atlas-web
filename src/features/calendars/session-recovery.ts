@@ -16,7 +16,8 @@ import {
  *
  *  - A SESSION OUTLIVES ITS DIALOG. The in-dialog sync control, a remount of the section or of the protected tree hide the dialog while the
  *    owner keeps the session for its visit: that unmount is no dismissal (`keep`), so the model stays listed and dirty, and a later update
- *    still saves the input. Only the session's END (Cancel, Escape or the close icon, its own save consuming it, a departure, another
+ *    still saves the input. Input no copy can hold (a file chosen or being read) is kept with it, so the model goes on asking the session
+ *    while it is kept, and a later update stops instead of reloading over it (revision 37, Review 46 F-R46-1). Only the session's END (Cancel, Escape or the close icon, its own save consuming it, a departure, another
  *    identity, a cache that expired it) ends the model's session (`end`: its copies are discarded, never restored after a later reload).
  *  - A NEW SESSION IS A NEW MODEL SESSION. A dialog that shows a session the model has not seen begins the model from what that session began
  *    from (`opening`), unless the model has just restored a copy into it; one that shows a session holding input the model does not have
@@ -80,7 +81,11 @@ export function useSessionRecovery<T>(options: {
   decode(text: string): T | null;
   /** Puts `value` into the session (a restored copy, or "Discard instead"'s baseline). */
   apply(value: T): void;
-  /** The dialog shows input the model cannot hold (a file, a date partly typed): an update stops instead of reloading over it. */
+  /**
+   * The session holds, or the dialog shows, input the model cannot hold (a file, a date partly typed): an update stops instead of reloading
+   * over it. Revision 37 (F-R46-1): also asked while the session is kept and no dialog shows it, so it must read the session first (a
+   * dialog's own state, such as a partly typed field, is gone with the dialog and must read as nothing then).
+   */
   unfinished?: () => boolean;
 }): RecoverableEditor<T> {
   const { identity, context, owned } = options;
@@ -140,7 +145,17 @@ export function useSessionRecovery<T>(options: {
     }
     return () => {
       // Hidden while its owner keeps it (the sync control, a remount): no dismissal; the model stays listed while it is dirty.
-      if (!shown.ended()) latestRecovery.current.keep();
+      // Revision 37 (Review 46, F-R46-1): what the session holds that no copy can (a file chosen or still being read) outlives the dialog
+      // too, so the model goes on asking the SESSION (`unfinished` reads it, and nothing of the unmounted dialog) until a dialog shows it
+      // again or it ends: an accepted update stops instead of reloading over the file. Before, the dialog's unmount dropped the check, and
+      // the update reloaded over the file unless something had happened to ask the model while the dialog was still shown.
+      if (!shown.ended())
+        latestRecovery.current.keep(
+          undefined,
+          latest.current.unfinished
+            ? () => latest.current.unfinished?.() ?? false
+            : undefined,
+        );
     };
   }, [key, owned]);
   return {

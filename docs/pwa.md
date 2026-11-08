@@ -588,7 +588,13 @@ page-memory editing sessions only, so on the merged tree an accepted update relo
   dialog chose and the window AS TYPED, version 1 (`calendars/import-recovery.ts`), under the entry that opened it; the row's "Import
   events" or the drop zone reopens the dialog on it, focus on From. NEVER THE FILE: its text stays page memory (E11) and a file control
   cannot be captured (D-P7), so while a file is chosen or read (or a date is partly typed) the model is unfinished and the update STOPS
-  (retry, or "Discard and reload anyway") instead of reloading over it. No import is begun while an update reload is prepared.
+  (retry, or "Discard and reload anyway") instead of reloading over it. That holds whether the dialog is shown or its session is KEPT
+  with no dialog showing it (the person left by the sync control: the only way to the update banner from a modal dialog). The file is
+  the session's, so the model goes on asking the SESSION while it is kept (`editor.ts` `keep(value, unfinished)`, wired by
+  `session-recovery.ts`), until a dialog shows it again or the session ends (Cancel, its own save, the visit's end, another identity):
+  an ended session holds the update no longer. Before revision 37 (Review 46, F-R46-1) the dialog's unmount dropped that check, and the
+  update reloaded over the file unless something had happened to ask the model while the dialog was still shown. A partly typed date is
+  the dialog's own state and goes with the dialog. No import is begun while an update reload is prepared.
 
 Evidence: `tests/features/tasks/web13b-anchor-recovery.test.tsx` and `tests/features/calendars/web13b-import-recovery.test.tsx` (the
 production coordinator's accepted update, its save and its one reload, the hosts reopening each editor, freeze, the base, and the Cancel
@@ -596,6 +602,16 @@ and visit-end controls; on the merge without the correction 11 of their 14 cases
 `tests/features/calendars/web13b-recovery-codecs.test.ts`, mutants MU-5276..MU-5295 (`scripts/mutation/catalogue-web13b-m1.mjs`), and the
 native case "WEB-13b M-13b-1 G-1" in `tests/e2e/fixture.pwa-editors.spec.ts` (generation A updated to B: the new task form restored WITH
 its anchor, nothing sent). Revision 57's focus-site registry has the two new sites (23).
+
+Revision 37 (Review 46, F-R46-1/F-R46-2): the import suite's STOP cases leave the dialog by its sync control with nothing asking the model
+in between (a file chosen; a file still being read, no window typed), with the control that a kept session's end holds the update no
+longer; on the tree before revision 37 both STOP cases fail by assertion (the update reloads). Native cases, generation A updated to B, in
+`tests/e2e/fixture.pwa-editors.spec.ts`: "WEB-13b M-13b-1 G-3" (kept with a window typed: reopened on the copy, restored notice, focus on
+From, no file, nothing sent; kept with a FILE chosen: the update stops with "Retry save" and "Discard and reload anyway", the page does not
+reload, and Back shows the kept file and window) and "WEB-13b M-13b-1 G-2" (a task's panel kept: reopened on its copy, restored notice,
+focus on its first field, nothing sent; the task changed while the page reloaded: Save says so and sends nothing). E-IMP7's revision-37
+case in `tests/e2e/fixture.calendar-import.spec.ts` reaches the same rule in the fixture build (the save an accepted update makes first
+fails), so a real-engine mutant can reach it. Mutants MU-5296..MU-5299 (unit) and MU-5300 (real engine).
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 

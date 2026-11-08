@@ -334,8 +334,9 @@ anchor panel and the import dialog are registered while shown (an update offers 
 saved by it and reopened on their copy by the screen that opens them (the task's or the new task form's "Calendar anchor" section, the
 source's "Import events", the drop zone), restored and never saved until the person presses Save or Import; the new task's anchor is in
 the task form's own text (version 2). A detail panel's copy keeps the read of the task it is checked against, so a task changed meanwhile
-is refused as "changed", never overwritten. An import copy holds the source and the window as typed, NEVER the file: with a file chosen the
-update stops instead of reloading over it.
+is refused as "changed", never overwritten. An import copy holds the source and the window as typed, NEVER the file: with a file chosen or
+still being read the update stops instead of reloading over it, whether the dialog is shown or its session is kept (left by the sync
+control, the only way to the update banner from the modal dialog), until the session ends (revision 37, Review 46 F-R46-1).
 
 ## Limits and what is not claimed
 

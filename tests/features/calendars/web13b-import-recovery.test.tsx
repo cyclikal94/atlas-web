@@ -35,7 +35,9 @@ import { SLOW } from "../../support/tasks/journal";
  *  - a row's dialog is a registered recoverable editor: dirty once its window is edited, kept (and still saved) when the person leaves it by
  *    its in-dialog sync control; the accepted update saves the source and the window AS TYPED, never the file, and reloads once; back at the
  *    calendar screen the row reopens the dialog on the copy, with the restored notice and focus on From, nothing queued;
- *  - a file chosen is input no copy can hold: the update STOPS (nothing reloads over it) and no copy holds the file or its text;
+ *  - a file chosen is input no copy can hold: the update STOPS (nothing reloads over it) and no copy holds the file or its text, with the
+ *    dialog left by its sync control and nothing asking the model in between (revision 37, Review 46 F-R46-1/F-R46-2), and while the file
+ *    is still being read; a kept session that ends (a departure) stops nothing any more;
  *  - while an update reload is prepared nothing changes and nothing is stored; Cancel ends the copies.
  *
  * The form contexts are spelt out here (not imported), so that on a tree without the correction each test fails at an assertion. FIXTURE/
@@ -103,15 +105,32 @@ async function windowTyped(w: World): Promise<HTMLElement> {
   return shown;
 }
 
-async function chooseFile(w: World, shown: HTMLElement): Promise<void> {
+async function chooseFile(
+  w: World,
+  shown: HTMLElement,
+  file: File = new File([ICS], "retained.ics", { type: "text/calendar" }),
+): Promise<void> {
   const input = present(
     shown.querySelector('input[type="file"]'),
   ) as HTMLInputElement;
-  const file = new File([ICS], "retained.ics", { type: "text/calendar" });
   await act(async () => {
     fireEvent.change(input, { target: { files: [file] } });
   });
   await w.settle();
+}
+
+/**
+ * Revision 37 (Review 46, F-R46-1): a file whose read the test holds (`readImportFile` reads `arrayBuffer`): the session is READING it
+ * until `release`, as a large file on a slow device is.
+ */
+function heldFile(): { file: File; release(): void } {
+  const file = new File([ICS], "held.ics", { type: "text/calendar" });
+  let release: () => void = () => undefined;
+  const read = new Promise<ArrayBuffer>((resolve) => {
+    release = () => resolve(new TextEncoder().encode(ICS).buffer);
+  });
+  Object.defineProperty(file, "arrayBuffer", { value: () => read });
+  return { file, release: () => release() };
 }
 
 /** The person leaves the modal dialog by its in-dialog sync control (the session is kept for the import's visit). */
@@ -218,16 +237,19 @@ describe("M-13b-1 G-3: the import dialog takes part in app-update recovery", () 
   );
 
   test(
-    "a file chosen is input no copy can hold: the accepted update STOPS (nothing reloads over it), and no copy holds the file or its text",
+    "a file chosen is input no copy can hold: the accepted update STOPS (nothing reloads over it) after the dialog was left by its sync control with nothing asking the model in between; back at the row the dialog shows the file and the window; no copy holds the file or its text",
     SLOW,
     async () => {
+      // Revision 37 (Review 46, F-R46-1/F-R46-2): the person's real path. A modal dialog makes the update banner inert, so the update is
+      // reached only after leaving the dialog by its sync control. NOTHING asks the registry or the model between choosing the file and
+      // the update (before, the case asked `pageFormRegistry.dirty()` while the dialog was shown, and that question alone kept the model
+      // unfinished after the dialog had gone: without it the update reloaded over the file).
       const w = await world();
       const shown = await windowTyped(w);
       await chooseFile(w, shown);
       await waitFor(() =>
         expect(shown.querySelector("[data-import-file]")).not.toBeNull(),
       );
-      expect(contextsOf(pageFormRegistry.dirty())).toContain(CONTEXT);
       await leftForSync(w, shown);
       expect((await acceptUpdate(w)).reloads, "the update did not reload").toBe(
         0,
@@ -236,6 +258,67 @@ describe("M-13b-1 G-3: the import dialog takes part in app-update recovery", () 
         expect(text).not.toContain("retained.ics");
         expect(text).not.toContain("VCALENDAR");
       }
+      // Nothing was lost: Back at the calendar screen, the row's Import events shows the kept session again, file and window.
+      await act(async () => {
+        await w.traverse(-1);
+      });
+      await w.settle();
+      fireEvent.click(await screen.findByRole("button", { name: ROW }));
+      await waitFor(() => expect(dialog()).not.toBeNull());
+      await w.settle();
+      const again = present(dialog());
+      expect(again.querySelector("[data-import-file]")).toHaveTextContent(
+        "retained.ics",
+      );
+      expect(field(again, "From").value).toBe("2026-01-01");
+      expect(w.rows("drafts"), "nothing was stored").toHaveLength(0);
+    },
+  );
+
+  test(
+    "a file still being READ when the dialog is left by its sync control (no window typed): the accepted update STOPS, and stops again once the read has finished",
+    SLOW,
+    async () => {
+      // Revision 37 (F-R46-1, the related state the review names): the session is reading the file while no dialog shows it. Nothing
+      // was typed, so the model's own text is the session's opening: only what the session holds keeps it listed and unfinished.
+      const w = await world();
+      const shown = await openRow(w);
+      const held = heldFile();
+      await chooseFile(w, shown, held.file);
+      expect(shown, "the read is held").toHaveTextContent(words.READING);
+      await leftForSync(w, shown);
+      expect(
+        (await acceptUpdate(w)).reloads,
+        "the update did not reload over the read",
+      ).toBe(0);
+      held.release();
+      await w.settle();
+      expect(
+        (await acceptUpdate(w)).reloads,
+        "the file read since is still input no copy can hold",
+      ).toBe(0);
+      for (const text of await texts(w)) expect(text).not.toContain("held.ics");
+    },
+  );
+
+  test(
+    "CONTROL: a kept session that ENDS (the person goes elsewhere) while its file is still being read holds the update no longer: the next update reloads and restores nothing",
+    SLOW,
+    async () => {
+      // Revision 37 (F-R46-1): the session's own check is asked only while the session is kept. Its end (a departure: the import's visit
+      // is over) ends the model's session too, and the update must not keep stopping for a file the person can no longer reach.
+      const w = await world();
+      const shown = await windowTyped(w);
+      const held = heldFile();
+      await chooseFile(w, shown, held.file);
+      expect(shown).toHaveTextContent(words.READING);
+      await leftForSync(w, shown);
+      await w.navigate("/settings");
+      await w.settle();
+      expect(contextsOf(pageFormRegistry.dirty())).not.toContain(CONTEXT);
+      expect((await acceptUpdate(w)).reloads, "the update reloaded").toBe(1);
+      expect(await texts(w), "the ended session left no copy").toEqual([]);
+      held.release();
     },
   );
 

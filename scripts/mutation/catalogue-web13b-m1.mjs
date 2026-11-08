@@ -14,6 +14,21 @@
 //   the visit-end control's next panel only in composition, not in an assertion of its own).
 // - `useOpenWhenReady` opening at once (without waiting for the host to be ready): the hosts tested here are ready by the time the look
 //   restores, so the early opening is equivalent in these cases; the wait is a robustness rule for a host still reading its task.
+//
+// Revision 37 (Review 46 F-R46-1/F-R46-2, family `kept-session-unfinished-marker-lost`): a kept import session's file (chosen or still being
+// read) outlives its dialog, and the model goes on asking the session while it is kept (`editor.ts` `keep(value, unfinished)`, wired by
+// `session-recovery.ts`). Unit MU-5296..MU-5299 over `web13b-import-recovery.test.tsx`, whose STOP cases leave the dialog by its sync
+// control with nothing asking the model in between (the old case asked `pageFormRegistry.dirty()` while the dialog was shown, which alone
+// kept MU-5287 caught); real-engine MU-5300 over E-IMP7's revision-37 case (`fixture.calendar-import.spec.ts`, the fixture build the engine
+// runner serves: the PWA generations of `fixture.pwa-editors.spec.ts` are built apart from it, so no engine mutant can reach those cases).
+// Considered and not selected (revision 37):
+// - the editor's mount not forgetting a kept check (`entry.keptProbe = null`), or its `else` that stops asking one for an editor with no
+//   check of its own: a session's dialog always has its own check, and every later way out of the mount (`begin`, `edit`, a keep, an end)
+//   sets the kept check again or releases it, so no case can tell either from its absence (defence of the invariant "a kept check only while
+//   kept").
+// - `begin` not releasing: `begin` comes only from a dialog that is shown, whose mount has already forgotten the kept check.
+// - the unmount asking `entry.keptProbe` when kept before it: the session bridge keeps after the editor's own unmount (React runs the
+//   cleanups in order), so this branch serves a `keep` made while shown, which no production caller makes with a check.
 import { sub } from "./data-catalogue.mjs";
 
 const FORM_INPUT = "src/features/tasks/form/form-input.ts";
@@ -29,6 +44,13 @@ const ACTION = "src/features/calendars/import-action.tsx";
 const T_ANCHOR = "tests/features/tasks/web13b-anchor-recovery.test.tsx";
 const T_IMPORT = "tests/features/calendars/web13b-import-recovery.test.tsx";
 const T_CODECS = "tests/features/calendars/web13b-recovery-codecs.test.ts";
+const EDITOR = "src/lib/form-recovery/editor.ts";
+const IMPORT_SPEC = "tests/e2e/fixture.calendar-import.spec.ts";
+/** Revision 37: the two STOP cases (a file chosen, a file still being read), each with the dialog left by its sync control. */
+const IMPORT_STOPS =
+  /left by its sync control.*the accepted update STOPS|the accepted update STOPS.*left by its sync control/;
+const IMPORT_KEPT_END =
+  /CONTROL: a kept session that ENDS \(the person goes elsewhere\) while its file is still being read/;
 
 const FORM_PANEL_CASE =
   /open and edited: registered \(Save and reload\) and dirty; the accepted update saves its draft; after the reload the form comes back/;
@@ -137,8 +159,13 @@ export const UNIT_13B_M1 = [
     file: SESSION,
     tests: [T_ANCHOR],
     expect: DETAIL_CASE,
+    // Revision 37: re-anchored to the keep that now also hands the session's own check (the same fault: the hidden session is not kept).
     patch: (t) =>
-      sub(t, "      if (!shown.ended()) latestRecovery.current.keep();\n", ""),
+      sub(
+        t,
+        "      if (!shown.ended())\n        latestRecovery.current.keep(\n          undefined,\n          latest.current.unfinished\n            ? () => latest.current.unfinished?.() ?? false\n            : undefined,\n        );\n",
+        "",
+      ),
   },
   {
     id: "MU-5284",
@@ -298,6 +325,81 @@ export const UNIT_13B_M1 = [
         t,
         "  const [restoredAtOpen] = useState(() => panel.view.restored !== null);\n",
         "  const [restoredAtOpen] = useState(() => false);\n",
+      ),
+  },
+  // ---- revision 37 (Review 46 F-R46-1): a kept session's input no copy can hold -----------------------------------------------------------
+  {
+    id: "MU-5296",
+    title:
+      "WEB-13b revision 37 (F-R46-1): the session bridge keeps a hidden session without its own check (the review's defect: a file chosen is dropped from the model with the dialog, and the update reloads over it)",
+    file: SESSION,
+    tests: [T_IMPORT],
+    expect: IMPORT_STOPS,
+    patch: (t) =>
+      sub(
+        t,
+        "          latest.current.unfinished\n            ? () => latest.current.unfinished?.() ?? false\n            : undefined,\n",
+        "          undefined,\n",
+      ),
+  },
+  {
+    id: "MU-5297",
+    title:
+      "WEB-13b revision 37 (F-R46-1): a session kept after its editor's unmount records its check but the model is never told to ask it",
+    file: EDITOR,
+    tests: [T_IMPORT],
+    expect: IMPORT_STOPS,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (entry.editor === null) model.probe(unfinished);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-5298",
+    title:
+      "WEB-13b revision 37 (F-R46-1): a kept session's end does not release its check (an update keeps stopping for a file the person can no longer reach)",
+    file: EDITOR,
+    tests: [T_IMPORT],
+    expect: IMPORT_KEPT_END,
+    patch: (t) =>
+      sub(
+        t,
+        "    end: () => {\n      release();\n      return model.end();\n    },\n",
+        "    end: () => model.end(),\n",
+      ),
+  },
+  {
+    id: "MU-5299",
+    title:
+      "WEB-13b revision 37 (F-R46-1): a released check is forgotten by the editor but the model goes on asking it",
+    file: EDITOR,
+    tests: [T_IMPORT],
+    expect: IMPORT_KEPT_END,
+    patch: (t) =>
+      sub(
+        t,
+        "    entry.keptProbe = null;\n    if (entry.editor === null) model.probe(null);\n",
+        "    entry.keptProbe = null;\n",
+      ),
+  },
+];
+
+export const ENGINE_13B_M1 = [
+  {
+    id: "MU-5300",
+    title:
+      "WEB-13b revision 37 (F-R46-1): (REAL ENGINE) the session bridge keeps a hidden import session without its own check: after the sync control the update's save writes the window and reports success over the chosen file",
+    file: SESSION,
+    spec: IMPORT_SPEC,
+    grep: "E-IMP7.*revision 37 \\(Review 46 F-R46-1\\)",
+    expect: /revision 37 \(Review 46 F-R46-1\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "          latest.current.unfinished\n            ? () => latest.current.unfinished?.() ?? false\n            : undefined,\n",
+        "          undefined,\n",
       ),
   },
 ];

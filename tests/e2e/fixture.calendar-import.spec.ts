@@ -876,6 +876,58 @@ test.describe("E-IMP7: the in-dialog sync control keeps the import (revision 6, 
     expect(await rows(page, "drafts")).toHaveLength(0);
   });
 
+  test("revision 37 (Review 46 F-R46-1): kept through /sync, a chosen file is input no copy can hold: with nothing asked of the page since the choice, the save an accepted update makes first fails (the update stops), and no copy holds the file", async ({
+    context,
+  }) => {
+    // WEB-13b M-13b-1 G-3 in a real engine: the dialog is a recoverable editor of the page's form registry (`window.__atlasForms`, the
+    // fixture's view of what the app-update coordinator sees). The person leaves the modal dialog by its sync control, the only way to the
+    // update banner; NOTHING asks the registry between the choice and the save below. Before revision 37 the dialog's unmount dropped the
+    // file's "unfinished" mark, so this save wrote the window and the update reloaded over the file. The full update (generations A and B)
+    // is `fixture.pwa-editors.spec.ts` "WEB-13b M-13b-1 G-3"; this case is the one a real-engine mutant of the fixture build can reach.
+    const { page } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    await openRow(page);
+    const dialog = await chooseFile(page, text(), "retained.ics");
+    await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+    await dialog.locator("button[data-sync-tone]").click();
+    await syncScreen(page);
+    await expect(dialog).toBeHidden();
+    const save = await page.evaluate(async () => {
+      const forms = (
+        window as unknown as {
+          __atlasForms: {
+            dirty(): Array<{ formContext: string; flush(): Promise<string> }>;
+          };
+        }
+      ).__atlasForms;
+      const imports = forms
+        .dirty()
+        .filter((form) => form.formContext.includes("calendar-import:"));
+      return {
+        contexts: imports.map((form) => form.formContext),
+        results: await Promise.all(imports.map((form) => form.flush())),
+      };
+    });
+    expect(save, "the kept import is unfinished: its save fails").toEqual({
+      contexts: [`calendar-import:${SOURCE}`],
+      results: ["failed"],
+    });
+    const copies = JSON.stringify(await rows(page, "form_recovery"));
+    expect(copies).not.toContain(MARK);
+    expect(copies).not.toContain("retained.ics");
+    expect(await rows(page, "drafts")).toHaveLength(0);
+    // Nothing was lost: Back and Import events show the kept file and window.
+    await page.goBack();
+    await expect(page).toHaveURL(/settings\/calendars/);
+    await openRow(page);
+    expect(await shown(page)).toEqual({
+      file: expect.stringContaining("retained.ics"),
+      from: "2026-01-01",
+      through: expect.any(String),
+    });
+  });
+
   test("a file read still under way at the sync control settles while away (a held read, released at /sync): shown on return, nothing stored", async ({
     context,
   }) => {

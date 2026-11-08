@@ -327,6 +327,10 @@ export function taskDayReads(
       edges: [],
       maxDepth: 1,
     }),
+    // WEB-13b revision 37 (Review 46, F-R46-3): the task detail's calendar section reads a non-repeating task's binding
+    // (`GET /tasks/{id}/anchor`, `AnchorSection`); the seeded day is not anchored. Unanswered, the read was a 404 the world's read oracle
+    // refuses. A repeating task makes no such read, so answering it is harmless there.
+    [`${API}/tasks/${day.taskId}/anchor`]: { binding: null },
   };
   if (rota) {
     reads[`${API}/tasks/${day.taskId}/rota`] = {
