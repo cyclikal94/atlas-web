@@ -29,6 +29,14 @@ const SITES: Record<string, Site[]> = {
   "src/features/calendars/AddSourceDialog.tsx": [
     { firstFieldRef: "labelRef", kind: "ref" },
   ],
+  // WEB-13b maintenance merge of accepted main, correction M-13b-1 G-2: the anchor panel's first field (the reference's first radio).
+  "src/features/calendars/AnchorDialog.tsx": [
+    { firstFieldRef: "referenceRef", kind: "ref" },
+  ],
+  // M-13b-1 G-3: the import dialog's From (a copy never holds a file, so the file's button is never where focus goes).
+  "src/features/calendars/ImportDialog.tsx": [
+    { firstFieldRef: "fromRef", kind: "ref" },
+  ],
   "src/features/calendars/LinkCalendarDialog.tsx": [
     { firstFieldRef: "labelRef", kind: "ref" },
   ],
@@ -262,12 +270,14 @@ const readRepo = (path: string): string | null => {
 describe("revision 57 (C-F3, Q-F7): every RecoveryNotice site is registered with its focus target's kind", () => {
   const files = sources(join(ROOT, "src"));
 
-  test("the registry and the source agree: 22 sites, their targets, kinds and named focus tests", () => {
+  // M-13b-1 (WEB-13b maintenance merge of accepted main): main's 22 sites (with WEB-12b's household dialogs) + WEB-13b's anchor
+  // panel and import dialog = 24.
+  test("the registry and the source agree: 24 sites, their targets, kinds and named focus tests", () => {
     expect(audit(files, SITES, readRepo)).toEqual([]);
-    expect(Object.values(SITES).flat()).toHaveLength(22);
+    expect(Object.values(SITES).flat()).toHaveLength(24);
   });
 
-  test("a 23rd site, unregistered, fails", () => {
+  test("a 25th site, unregistered, fails", () => {
     const extra = {
       ...files,
       "src/features/new/Editor.tsx":

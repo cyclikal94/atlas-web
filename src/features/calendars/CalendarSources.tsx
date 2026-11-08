@@ -23,6 +23,7 @@ import {
   useStatusInputs,
 } from "../../data";
 import { useRecoveryHost } from "../../lib/form-recovery/editor";
+import { pageFormRegistry } from "../../lib/form-recovery/registry";
 import { useSession } from "../../session";
 import { CacheGate } from "../sync/CacheGate";
 import { ADD_CONTEXT, AddSourceDialog } from "./AddSourceDialog";
@@ -313,6 +314,8 @@ function Sources() {
   const opener = useMemo<ImportOpener>(
     () => ({
       open: (sourceId, file) => {
+        // M-13b-1 G-3: no import is begun while an update reload is prepared (nothing may be chosen after the last save).
+        if (pageFormRegistry.frozen()) return;
         const context = ownerContext();
         if (context === null) return;
         const editor = openImportSession(

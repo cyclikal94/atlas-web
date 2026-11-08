@@ -12,6 +12,11 @@ import {
   useDraftWithCommand,
   useResourceView,
 } from "../../../data";
+import { useRecoveryHost } from "../../../lib/form-recovery/editor";
+import {
+  anchorPanelContext,
+  readCalendarAnchor,
+} from "../../calendars/anchor-recovery";
 import {
   AnchorDialog,
   type AnchorEditor,
@@ -50,6 +55,7 @@ import {
   SECTION_HEADING,
   TRY_AGAIN,
 } from "../../calendars/copy-anchor";
+import { useOpenWhenReady } from "../../calendars/session-recovery";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import {
@@ -283,6 +289,62 @@ export function AnchorSection({
     );
     if (editor !== null) setDialog({ editor, visit: on });
   };
+  // M-13b-1 G-2 (WEB-13b maintenance merge of accepted main): a panel left by the page before an app update is reopened ONCE on its
+  // copy (a dialog is not open after a reload), for someone who may still edit the task's anchor; the copy's draft, names and base go into
+  // the new session (`AnchorDialog` takes them), and nothing is queued until the person presses Save.
+  useRecoveryHost({
+    identity: env.identity,
+    context: anchorPanelContext(task.id),
+    open: useOpenWhenReady(
+      !repeats && canEdit && env.writable && dialog === null,
+      () => open(anchor, null),
+    ),
+  });
+  /**
+   * M-13b-1 G-2: what a copy of this section's panel keeps of what its session was opened for: the anchor it began from, the conflicted
+   * change it supersedes, the read of the task it is checked against and whether a done save renewed it. Never the identities of changes
+   * pressed (a restored change is a new operation, never a replay); a restored session takes the visit's own.
+   */
+  const panelBase = {
+    encode: (c: PanelFor) => ({
+      anchor: c.anchor,
+      supersede: c.supersede,
+      observed: c.observed,
+      renewed: c.renewed,
+    }),
+    decode: (raw: unknown): PanelFor | undefined => {
+      if (typeof raw !== "object" || raw === null) return undefined;
+      const {
+        anchor: from,
+        supersede,
+        observed,
+        renewed,
+      } = raw as Record<string, unknown>;
+      const anchored = from === null ? null : readCalendarAnchor(from);
+      if (from !== null && anchored === null) return undefined;
+      if (supersede !== null && typeof supersede !== "string") return undefined;
+      if (typeof renewed !== "boolean") return undefined;
+      let read: Observation | null = null;
+      if (observed !== null) {
+        const o = observed as Record<string, unknown> | undefined;
+        if (
+          typeof o !== "object" ||
+          o === null ||
+          o.resourceId !== task.id ||
+          typeof o.token !== "string"
+        )
+          return undefined;
+        read = { resourceId: task.id, token: o.token };
+      }
+      return {
+        anchor: anchored,
+        supersede: supersede as string | null,
+        observed: read,
+        renewed,
+        keys: operationKeys(panelKey, owner.current, ownKeys.current),
+      };
+    },
+  };
   // A panel shown when its visit ends (an ordinary departure, another identity) shows a session that ended with it: the panel closes, never
   // left showing input it can no longer save, even where React keeps the section (R3c).
   useEffect(() => {
@@ -481,6 +543,11 @@ export function AnchorSection({
         <AnchorDialog
           editor={dialog.editor}
           repeats={repeats}
+          recovery={{
+            identity: env.identity,
+            context: anchorPanelContext(task.id),
+            base: panelBase,
+          }}
           onSave={(next, _names, _draft, context) => save(next, context)}
           {...(dialog.editor.context().anchor !== null || anchor !== null
             ? { onRemove: (context: PanelFor) => save(null, context) }

@@ -1,5 +1,6 @@
 import { Button } from "../../components/ui/button";
 import { useOptionalDataEnv, useOutstanding } from "../../data";
+import { useRecoveryHost } from "../../lib/form-recovery/editor";
 import { NEEDS_DATABASE } from "./copy";
 import {
   IMPORT_EVENTS,
@@ -8,9 +9,12 @@ import {
   VIEW_ONLY_IMPORT,
 } from "./copy-import";
 import { useOpenImport } from "./import-opener";
+import { importContext } from "./import-recovery";
 import { CONFIGURE_SOURCE } from "./model/commands";
 import { displayedRow, type Enablement } from "./model/status";
+import { useCalendarRecoveryIdentity } from "./recovery";
 import type { CalendarSourceView } from "./row-actions";
+import { useOpenWhenReady } from "./session-recovery";
 
 /**
  * Whether "Import events" may open for a source (WEB-13b §4.2). Composing an import never needs a connection (Q22: it queues, offline
@@ -46,6 +50,13 @@ export function ImportAction({ source }: { source: CalendarSourceView }) {
     turnedOff: shown.archived,
   });
   const name = importEventsName(source.label);
+  // M-13b-1 G-3 (WEB-13b maintenance merge of accepted main): an import into this source left by the page before an app update is
+  // reopened once on its copy (the source and the window as typed; never a file), while the source may still be imported into.
+  useRecoveryHost({
+    identity: useCalendarRecoveryIdentity(),
+    context: importContext(source.id),
+    open: useOpenWhenReady(enablement.enabled, () => open?.open(source.id)),
+  });
   return enablement.enabled ? (
     <Button aria-label={name} onClick={() => open?.open(source.id)}>
       {IMPORT_EVENTS}

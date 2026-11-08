@@ -292,10 +292,12 @@ export const UNIT_13B_R9 = [
     tests: [T_RET],
     expect:
       /another page's W18 and refill committed: Import stores NOTHING \(expired\), closes and says why/,
+    // ADAPTED in WEB-13b's maintenance merge of accepted main, correction M-13b-1 (7 November 2026): the import's store moved into
+    // its own `store` (so that the recovery ticket wraps it), and the line sits two spaces further out; the same defect.
     patch: (t) =>
       sub(
         t,
-        '          if (outcome.reason === "expired") expireImport(editor);\n',
+        '        if (outcome.reason === "expired") expireImport(editor);\n',
         "",
       ),
   },

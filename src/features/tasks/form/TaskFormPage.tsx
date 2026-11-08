@@ -18,7 +18,9 @@ import {
   useDataEnv,
   useSharingDefaults,
 } from "../../../data";
+import { useRecoveryHost } from "../../../lib/form-recovery/editor";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
+import { FORM_ANCHOR_CONTEXT } from "../../calendars/anchor-recovery";
 import {
   AnchorDialog,
   type AnchorDraft,
@@ -36,6 +38,7 @@ import {
   FORM_REMOVE,
   FORM_SECTION,
 } from "../../calendars/copy-anchor";
+import { useOpenWhenReady } from "../../calendars/session-recovery";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { DETAIL_COPY } from "../detail/TaskDetail";
@@ -75,14 +78,16 @@ import {
   visibleFields,
 } from "../model/form";
 import { occurrenceId, progressId } from "../model/ids";
-import {
-  decodeTaskFormInput,
-  encodeTaskFormInput,
-  taskFormContext,
-} from "../model/recovery";
+import { taskFormContext } from "../model/recovery";
 import { firstSlot, todayIn } from "../model/time";
 import { editable } from "../reasons";
 import { knownZones } from "../today/TodayPage";
+import {
+  decodeFormInput,
+  encodeFormInput,
+  type FormAnchor,
+  type FormInput,
+} from "./form-input";
 import { PresetPicker } from "./PresetPicker";
 
 export const FORM_COPY = {
@@ -157,12 +162,13 @@ const NEW_PICK = "task-form:new:preset";
 
 /**
  * Revision 37 (WEB-14a R40): the task form's input is recoverable around an app-update reload (Q4), as one versioned text of its editing
- * session (`model/recovery.ts`), under a context of the editor and its target (the new task's, or the task edited).
+ * session, under a context of the editor and its target (the new task's, or the task edited). M-13b-1 G-1 (WEB-13b maintenance merge of
+ * accepted main): version 2 of that text (`form-input.ts`), which keeps the new task's calendar anchor and its kept panel.
  */
 const formRecovery = (context: string): KeptRecovery<FormInput> => ({
   context,
-  encode: encodeTaskFormInput,
-  decode: decodeTaskFormInput,
+  encode: encodeFormInput,
+  decode: decodeFormInput,
 });
 
 function NewTask() {
@@ -287,32 +293,6 @@ type FormMode =
       /** Both the task and its details may be changed by me, as this device last read them (R29). */
       editable: boolean;
     };
-
-/**
- * WEB-13b: the new task's calendar anchor as the anchor panel last saved it: the panel's whole state (every field, so it opens again as
- * it was left), the anchor it validated to, and the names its summary shows.
- */
-interface FormAnchor {
-  draft: AnchorDraft;
-  anchor: CalendarAnchor;
-  names: AnchorNames;
-}
-
-/** A form's editing session (R33): the values it began from (a locked choice is judged against them) and what is typed now. */
-interface FormInput {
-  initial: TaskFormState;
-  state: TaskFormState;
-  /**
-   * WEB-13b, new tasks only: the anchor, kept while "Repeats" hides its section (PRODUCT-DECISIONS-20261011: it comes back with its value);
-   * a save of a repeating task sends none and says nothing about it.
-   */
-  anchor?: FormAnchor | null;
-  /**
-   * WEB-13b revision 1: the anchor panel as its in-dialog sync control left it (every field, unsaved), so the next panel opened resumes it
-   * (ia.md §1.3.3, I1); part of the form's session, kept and dropped with it.
-   */
-  panel?: { draft: AnchorDraft; names: AnchorNames } | null;
-}
 
 /** The anchor a save sends: the new form's, only while the task does not repeat (the section is shown); else none. */
 export const anchorToSend = (
@@ -1096,6 +1076,7 @@ function AnchorSection({
   /** Keeps (or, with null, lets go of) the panel's unsaved state in the form's session. */
   onPanel(panel: { draft: AnchorDraft; names: AnchorNames } | null): void;
 }) {
+  const env = useTasksEnv();
   // The panel's editing session (revision 2): its own, from the kept panel or the anchor; the form's session keeps what is kept.
   const [open, setOpen] = useState<AnchorEditor | null>(null);
   const openPanel = () => {
@@ -1111,6 +1092,13 @@ function AnchorSection({
     // The panel now holds it: a later Cancel discards it, as any panel's.
     if (panel !== null) onPanel(null);
   };
+  // M-13b-1 G-2 (WEB-13b maintenance merge of accepted main): a panel left OPEN by the page before an app update is reopened once
+  // on its copy (the form itself comes back first, with its anchor: G-1); nothing is kept in the form until the person presses Save.
+  useRecoveryHost({
+    identity: env.identity,
+    context: FORM_ANCHOR_CONTEXT,
+    open: useOpenWhenReady(open === null, openPanel),
+  });
   return (
     <section
       aria-labelledby="task-form-anchor"
@@ -1139,6 +1127,15 @@ function AnchorSection({
         <AnchorDialog
           editor={open}
           repeats={false}
+          // The new task's panel has no base of its own: its anchor is kept in the form, whose own text carries it (G-1).
+          recovery={{
+            identity: env.identity,
+            context: FORM_ANCHOR_CONTEXT,
+            base: {
+              encode: () => null,
+              decode: (raw) => (raw === null ? null : undefined),
+            },
+          }}
           onRetain={({ draft, names }) => onPanel({ draft, names })}
           onSave={async (next, names, draft) => {
             // The panel's state is kept whole with the anchor, so it opens again as it was left.

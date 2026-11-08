@@ -28,6 +28,12 @@ import { createSubmission, type Submission } from "./model/submission";
  *
  * Page memory only: never stored, sent, broadcast or logged; a reload or another tab has no session. Session and flight numbers are never
  * reused.
+ *
+ * WEB-13b maintenance merge of accepted main, correction M-13b-1 G-3 (Kieran, 7 November 2026): around an app-update reload the
+ * dialog showing a session gives WEB-14a's recoverable model (`session-recovery.ts`) the source and the window as typed, NEVER the file
+ * (its text stays page memory: a session holding a file is input the model cannot hold, so an update stops instead of reloading over it).
+ * For that the session tells what it began from (`opening`), takes a restored copy's choices (`restoreChoice`) and says when it ends
+ * (`onEnded`), so that a departure discards the copies as it discards the input.
  */
 export interface ChosenFile {
   readonly name: string;
@@ -102,6 +108,22 @@ export interface ImportEditor {
   ): boolean;
   /** `revoked`: its identity or its database is no longer the displayed one. */
   end(reason?: "discarded" | "revoked"): void;
+  /** M-13b-1 G-3: the source and window the session began with (never changed by an edit). */
+  opening(): ImportInput;
+  /**
+   * M-13b-1 G-3: a restored copy's choices (or "Discard instead"'s baseline) become the session's, as an edit (its revision moves): the
+   * source and the window; any file is let go of (a copy never holds one). Nothing while a save is being made or once it has ended.
+   */
+  restoreChoice(input: ImportInput): void;
+  /** M-13b-1 G-3: `listener` is told once when the session ends, by its owner or by its own save consuming it. */
+  onEnded(listener: () => void): () => void;
+}
+
+/** M-13b-1 G-3: what a recovery copy of the dialog holds: the source chosen (the drop zone's; a row's is its own) and the raw window. */
+export interface ImportInput {
+  readonly chosen: string | null;
+  readonly from: string;
+  readonly through: string;
 }
 
 let sessions = 0;
@@ -124,6 +146,7 @@ export function createImportEditor({
 }): ImportEditor {
   sessions += 1;
   const session = sessions;
+  const opening: ImportInput = { chosen, ...defaultWindow(today) };
   let state: ImportEditorState = {
     chosen,
     window: defaultWindow(today),
@@ -141,6 +164,7 @@ export function createImportEditor({
   let submission: Submission<ImportChoice> | null =
     createSubmission<ImportChoice>(mintKey);
   const listeners = new Set<(event: "changed" | "consumed") => void>();
+  const endings = new Set<() => void>();
   const publish = (event: "changed" | "consumed") => {
     for (const listener of [...listeners]) listener(event);
   };
@@ -151,6 +175,9 @@ export function createImportEditor({
   const finish = () => {
     over = true;
     listeners.clear();
+    const told = [...endings];
+    endings.clear();
+    for (const listener of told) listener();
     // Let go of the file's text and the save identity (no claim of erasing what the browser itself holds).
     state = { ...state, file: null };
     submission = null;
@@ -263,6 +290,31 @@ export function createImportEditor({
       if (over) return;
       revoked = reason === "revoked";
       finish();
+    },
+    opening: () => opening,
+    restoreChoice(input) {
+      if (over || waiting !== null) return;
+      latestRead = null;
+      change({
+        chosen: input.chosen,
+        window: { from: input.from, through: input.through },
+        file: null,
+        reading: false,
+        errors: NO_ERRORS,
+        message: null,
+        revision: state.revision + 1,
+      });
+    },
+    onEnded(listener) {
+      // Already ended: told at once (an end is never missed by a listener that comes late).
+      if (!over) {
+        endings.add(listener);
+        return () => {
+          endings.delete(listener);
+        };
+      }
+      listener();
+      return () => undefined;
     },
   };
 }

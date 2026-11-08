@@ -400,13 +400,17 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
   forms, the household dialogs (since the maintenance merge of WEB-12b: New household `household-create`, Rename
   `household-rename:<id>` with the version it was composed against, and a household's Invitations `household-invite:<id>`), the sharing
   policy editor (`sharing-policy:<id>`, with the version it was composed against) and each defaults layer form
-  (`sharing-defaults:<layer>:<household|personal>:<kind>`). Component-state editors use `editor.ts` (`useRecoverableEditor`); the People
-  forms and the household dialogs, whose drafts live in their feature's page memory, have their own owners (`people/form-recovery.ts`,
-  `sharing/households/form-recovery.ts`).
+  (`sharing-defaults:<layer>:<household|personal>:<kind>`), and, since WEB-13b's maintenance merge (correction M-13b-1, below), the new
+  task's calendar anchor in the task form's own text (version 2), WEB-13b's anchor panel (`task-form:new:anchor`, `task-anchor:<task>`)
+  and its import dialog (`calendar-import:<source>`, `calendar-import:chooser`). Component-state editors use `editor.ts`
+  (`useRecoverableEditor`); the People forms and the household dialogs, whose drafts live in their feature's page memory, have their own
+  owners (`people/form-recovery.ts`, `sharing/households/form-recovery.ts`); WEB-13b's page-memory editing sessions use `editor.ts`
+  through `calendars/session-recovery.ts`.
 - **Restore hosts.** A dialog or stage that is not open after a reload cannot look: the screen that opens it does (`useKeptRecovery` for
   the new task's preset stage, `CorrectionRecoveryHost` and `PolicyEditorRecoveryHost` on the task detail, `DependencyEditorRecoveryHost`
   in the day's work, the conflict block of a refused `set_dependencies` and the rota panel, `useRecoveryHost` on the calendar screen and
-  its rows). A copy found is held for the editor (never submitted) and the editor is opened on it. A route-addressed dialog needs no host:
+  its rows, and, since M-13b-1, the new task form's and a task's "Calendar anchor" sections, each source's "Import events" and the import
+  drop zone). A copy found is held for the editor (never submitted) and the editor is opened on it. A route-addressed dialog needs no host:
   the update's reload keeps the URL, so the dialog mounts again and looks itself (the defaults layers, the household dialogs).
 - **Departure, discard and submission.** A departure that drops an owner's input (the visit's end, Cancel, another day) discards its
   copies (`end`), so it never returns after a later reload; a session kept for a visit to the sync screens stays dirty and listed. A save
@@ -559,6 +563,39 @@ household cases of `tests/features/recovery-owner-discard.test.tsx`,
 `tests/e2e/fixture.pwa-editors.spec.ts` (revisions 52, 53 and 55 over the dialogs). The old screen's composition of several household
 forms on one page is gone: F-R52-1's overlapping looks, F-R52-2's three restored invitations and F-R54-1's late earlier restore are carried
 by the defaults layers and the library suites (`tests/lib/recovery-observation.test.tsx`, `recovery-discard-focus.test.tsx`).
+
+**WEB-13b's editors (merge correction M-13b-1, 7 November 2026; Kieran's decision "Fix all three in the merge",
+`approval/web13b-m13b1-decision-20261107.json` in the orchestrator).** WEB-13b was built before this protocol and kept its input in
+page-memory editing sessions only, so on the merged tree an accepted update reloaded over it (R40's class). Now:
+
+- **G-1, the new task's anchor.** The task form's text is version 2 (`tasks/form/form-input.ts`): what the session began from, what is
+  typed, and WEB-13b's calendar ANCHOR (the draft the panel saved, the anchor it validated to, the names its summary shows) and the panel
+  its in-dialog sync control kept. Version 1 dropped both: the form came back without its anchor, saying nothing, and Save then created a
+  task with no anchor whose first day came from its own schedule. A saved anchor is read back only if its draft still validates to exactly
+  it (`calendars/anchor-recovery.ts`); a version-1 copy restores with none (that build held none); anything else is offered, never
+  restored in part.
+- **G-2, the anchor panel** (`AnchorDialog.tsx`, on the new task form and on a task's detail). The panel is a recoverable editor over its
+  editing session (`calendars/session-recovery.ts`): registered while shown, every change given to the model first (refused, unchanged,
+  while an update reload is prepared; Save and Remove are unavailable then, and the panel never closes as if it had saved), a save
+  taking the model's ticket in the same step as it reads what it sends. A session kept for the visit (the sync control) stays dirty and
+  listed; its END (Cancel, its own save, the visit's end, another identity) ends the copies. A detail panel's copy keeps its BASE: the read
+  of the task its change is checked against, the conflicted change it supersedes and whether a done save renewed it, so a task changed
+  meanwhile meets the outbox's own "changed" refusal, never a silent overwrite; the identities of changes pressed are not kept (a restored
+  change is a new operation). After the reload the section reopens the panel ONCE on the copy (for someone who may still edit, once the
+  task is read), with the restored notice and focus on the panel's first field (the dialog's `initialFocusSelector`: a modal takes focus
+  inside it, and the form behind it may have taken focus for its own restore in the same arrival, D2).
+- **G-3, the import dialog** (`ImportDialog.tsx`). The same, over the import's editing session: a copy holds the source the drop zone's
+  dialog chose and the window AS TYPED, version 1 (`calendars/import-recovery.ts`), under the entry that opened it; the row's "Import
+  events" or the drop zone reopens the dialog on it, focus on From. NEVER THE FILE: its text stays page memory (E11) and a file control
+  cannot be captured (D-P7), so while a file is chosen or read (or a date is partly typed) the model is unfinished and the update STOPS
+  (retry, or "Discard and reload anyway") instead of reloading over it. No import is begun while an update reload is prepared.
+
+Evidence: `tests/features/tasks/web13b-anchor-recovery.test.tsx` and `tests/features/calendars/web13b-import-recovery.test.tsx` (the
+production coordinator's accepted update, its save and its one reload, the hosts reopening each editor, freeze, the base, and the Cancel
+and visit-end controls; on the merge without the correction 11 of their 14 cases fail by assertion), the pure codec suite
+`tests/features/calendars/web13b-recovery-codecs.test.ts`, mutants MU-5276..MU-5295 (`scripts/mutation/catalogue-web13b-m1.mjs`), and the
+native case "WEB-13b M-13b-1 G-1" in `tests/e2e/fixture.pwa-editors.spec.ts` (generation A updated to B: the new task form restored WITH
+its anchor, nothing sent). Revision 57's focus-site registry has the two new sites (23).
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 

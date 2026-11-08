@@ -1,5 +1,6 @@
 import { useId, useRef } from "react";
 import { Button } from "../../components/ui/button";
+import { useRecoveryHost } from "../../lib/form-recovery/editor";
 import {
   BOUNDS,
   BROWSE,
@@ -9,6 +10,9 @@ import {
 } from "./copy-import";
 import { useImportableSources } from "./ImportDialog";
 import { useOpenImport } from "./import-opener";
+import { importContext } from "./import-recovery";
+import { useCalendarRecoveryIdentity } from "./recovery";
+import { useOpenWhenReady } from "./session-recovery";
 
 /**
  * The page's import entry (WEB-13b §4.2; the wireframe's "Import — offline-queueable" zone): a real file control behind "browse" is the
@@ -24,6 +28,13 @@ export function ImportDropZone() {
   // A later page of sources may hold one this account can import into (the dialog pages them, R4).
   const available =
     open !== null && (sources.rows.length > 0 || sources.page.partial);
+  // M-13b-1 G-3 (WEB-13b maintenance merge of accepted main): the chooser's import left by the page before an app update is
+  // reopened once on its copy (its source and window; the file is never in a copy, so the person chooses it again).
+  useRecoveryHost({
+    identity: useCalendarRecoveryIdentity(),
+    context: importContext(null),
+    open: useOpenWhenReady(available, () => open?.open(null)),
+  });
   return (
     <div className="flex flex-col gap-1">
       <span

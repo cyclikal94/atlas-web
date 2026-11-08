@@ -459,6 +459,122 @@ test.describe("R40: the production new-task editor across an accepted update", (
  * household's Invitations (`/sharing/households/<id>/invitations`), each recoverable through `households/form-recovery.ts`. In-app
  * navigation keeps the page and its memory; a page navigation is a new page.
  */
+/**
+ * WEB-13b maintenance merge of accepted main, correction M-13b-1 G-1 (Kieran, 7 November 2026, "Fix all three in the merge"): the
+ * new task's CALENDAR ANCHOR is part of the task form's recoverable text (version 2). Before the correction an accepted update restored the
+ * form without it, saying nothing, and Save then created a task with no anchor. The account's cache holds a calendar source and one of its
+ * events (synced rows, as the snapshot would); the anchor is chosen with the real panel, saved into the form, and the update accepted.
+ */
+const ANCHOR_SOURCE = "00000000-0000-4000-8000-0000000000a1";
+const anchorRows = [
+  {
+    id: ANCHOR_SOURCE,
+    kind: "calendar_source",
+    label: "Family calendar",
+    parent_id: null,
+    value: { timezone: "Europe/London" },
+    version: 1,
+    can_edit: true,
+    archived: false,
+  },
+  {
+    id: "00000000-0000-4000-8000-0000000000e1",
+    kind: "event",
+    label: "Bin day",
+    parent_id: ANCHOR_SOURCE,
+    value: {
+      uid: "bin@example",
+      original: "2026-11-02",
+      title: "Bin day",
+      start: {
+        date: "2026-11-02",
+        time: null,
+        timezone: "Europe/London",
+        instant: null,
+      },
+      end: null,
+      status: "present",
+      sequence: 0,
+    },
+    version: 1,
+    can_edit: true,
+    archived: false,
+  },
+];
+const anchorSection = (page: Page) => page.locator("[data-task-form-anchor]");
+
+test.describe("WEB-13b M-13b-1 G-1: the new task's calendar anchor across an accepted update", () => {
+  test("'Save and reload': B restores the form WITH its anchor (the summary as saved), and sends nothing", async ({
+    context,
+    generations,
+  }) => {
+    await seedAccount(context, generations, "acct-a", "s1", {
+      validCache: "pwa-r40-empty",
+      rows: anchorRows,
+    });
+    const page = await openApp(context, generations, {
+      route: "/tasks/new",
+      form: false,
+    });
+    await workerActive(page);
+    await reloadQuietly(page);
+    await scratch(page).click();
+    await nameField(page).fill("Put the bins out");
+    await page
+      .getByRole("combobox", { name: "Repeats", exact: true })
+      .selectOption("none");
+    await anchorSection(page)
+      .getByRole("button", { name: "Anchor…", exact: true })
+      .click();
+    const panel = page.getByRole("dialog");
+    await panel.getByRole("button", { name: "Change event…" }).click();
+    await panel
+      .getByRole("button", { name: /Bin day/ })
+      .first()
+      .click();
+    await panel
+      .getByRole("textbox", { name: "Days before (−) or after (+)" })
+      .fill("-1");
+    await panel.getByRole("textbox", { name: "Time (optional)" }).fill("18:00");
+    await panel
+      .getByRole("button", { name: "Save anchor", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const summary = "Family calendar · Bin day · 1 day before at 18:00";
+    await expect(anchorSection(page)).toHaveAttribute(
+      "data-task-form-anchor",
+      "set",
+    );
+    await expect(anchorSection(page)).toContainText(summary);
+    await quiet(page);
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    // The form is in the page's registry, so the prompt is the save-first one.
+    await expect(
+      updateRegion(page).getByRole("button", { name: "Save and reload" }),
+    ).toBeVisible();
+    await generations.clearLog();
+    await quiet(page);
+    const pageReload = await armReload(page);
+    await updateRegion(page)
+      .getByRole("button", { name: "Save and reload" })
+      .click();
+    await pageReload.loaded();
+    await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
+    await displayed(page);
+    // The stage and the name, as R40 restores them, and now the anchor too: the summary exactly as it was saved.
+    await expect(nameField(page)).toHaveValue("Put the bins out");
+    await expect(restoredBanner(page)).toBeVisible();
+    await expect(anchorSection(page)).toHaveAttribute(
+      "data-task-form-anchor",
+      "set",
+    );
+    await expect(anchorSection(page)).toContainText(summary);
+    expect(await build(page)).toBe("b");
+    expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+});
+
 const NEW_HOUSEHOLD = "/sharing/new";
 const invitationsOf = (house: { id: string }) =>
   `/sharing/households/${house.id}/invitations`;

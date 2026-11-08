@@ -328,6 +328,15 @@ therefore classified `rejected` by the dispatcher (unit evidence) but is not rec
 its run is stopped that way, and revisions 4 and 5 (F-13b-1a/1b/1c, N1) its failed settlement and the owed-retry and stop authority; see
 `docs/data-layer.md`. The original failure evidence stays in the card's evidence; the final shared regression is still owed.
 
+**Around an app update (WEB-13b's maintenance merge of accepted main, correction M-13b-1; Kieran, 7 November 2026).** WEB-13b's
+editing sessions stay page memory, and their dialogs take part in WEB-14a's app-update recovery (Q4; docs/pwa.md "WEB-13b's editors"): the
+anchor panel and the import dialog are registered while shown (an update offers "Save and reload"), frozen while the reload is prepared,
+saved by it and reopened on their copy by the screen that opens them (the task's or the new task form's "Calendar anchor" section, the
+source's "Import events", the drop zone), restored and never saved until the person presses Save or Import; the new task's anchor is in
+the task form's own text (version 2). A detail panel's copy keeps the read of the task it is checked against, so a task changed meanwhile
+is refused as "changed", never overwritten. An import copy holds the source and the window as typed, NEVER the file: with a file chosen the
+update stops instead of reloading over it.
+
 ## Limits and what is not claimed
 
 * **Refreshes publish new versions.** A refresh (the worker's, every 15 minutes for a linked source, or a manual one) publishes the source's new health as a new version, and a queued settings change is built on the version the outbox assumes, the cache's. A change saved before the cache has caught up with a refresh is therefore answered `409 conflict` and shown as needing a decision (**Review**, which supersedes it). This is the contract's `expected_version` rule, not a client defect; it is listed for Kieran's review because offline settings changes to a linked source will often meet it (a backend change would be needed to exempt health from the version).

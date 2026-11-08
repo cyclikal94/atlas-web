@@ -20,6 +20,11 @@ import type { AnchorDraft, AnchorNames } from "./model/anchor";
  *    (`AnchorRefusal`): told that the task changed, the person's next press is a deliberate save of the task as it is then.
  *
  * Page memory only: never stored; a reload has no session. The caller's save itself (`run`) and its operation identity are the caller's.
+ *
+ * WEB-13b maintenance merge of accepted main, correction M-13b-1 G-2 (Kieran, 7 November 2026): around an app-update reload the
+ * panel showing a session gives its input to WEB-14a's recoverable model (`session-recovery.ts`), which saves it; the session itself stays
+ * page memory. For that it tells what it began from (`opening`), takes a restored copy's input (`restore`) and says when it ends, however
+ * it ends (`onEnded`: its owner's end, or its own save consuming it), so that a departure discards the copies as it discards the input.
  */
 export interface AnchorEditorState {
   readonly draft: AnchorDraft;
@@ -62,6 +67,15 @@ export interface AnchorEditor<C = null> {
   /** A panel shows it again. */
   resume(): void;
   end(): void;
+  /** M-13b-1 G-2: the draft and names the session began from (never changed by an edit). */
+  opening(): { draft: AnchorDraft; names: AnchorNames };
+  /**
+   * M-13b-1 G-2: a restored copy's input (or "Discard instead"'s baseline) becomes the session's, as an edit (its revision moves); `context`,
+   * when given, replaces what the session was opened for (a restored copy's base). Nothing while a save is being made or once it has ended.
+   */
+  restore(input: { draft: AnchorDraft; names: AnchorNames }, context?: C): void;
+  /** M-13b-1 G-2: `listener` is told once when the session ends, by its owner or by its own save consuming it. */
+  onEnded(listener: () => void): () => void;
 }
 
 let sessions = 0;
@@ -94,7 +108,14 @@ export function createAnchorEditor<C>({
   let waiting: { submission: number; revision: number } | null = null;
   let over = false;
   let kept = false;
+  const opening = { draft, names };
   const listeners = new Set<(event: "changed" | "consumed") => void>();
+  const endings = new Set<() => void>();
+  const ended = () => {
+    const told = [...endings];
+    endings.clear();
+    for (const listener of told) listener();
+  };
   const publish = (event: "changed" | "consumed") => {
     for (const listener of [...listeners]) listener(event);
   };
@@ -118,6 +139,7 @@ export function createAnchorEditor<C>({
       publish("consumed");
       listeners.clear();
       onConsumed?.();
+      ended();
     } else {
       current = renew(current);
       change({ busy: false, note: ANCHOR_SAVED_NEWER });
@@ -166,6 +188,29 @@ export function createAnchorEditor<C>({
     end() {
       over = true;
       listeners.clear();
+      ended();
+    },
+    opening: () => opening,
+    restore(input, context) {
+      if (over || waiting !== null) return;
+      if (context !== undefined) current = context;
+      change({
+        draft: input.draft,
+        names: input.names,
+        revision: state.revision + 1,
+        note: null,
+      });
+    },
+    onEnded(listener) {
+      // Already ended: told at once (an end is never missed by a listener that comes late).
+      if (!over) {
+        endings.add(listener);
+        return () => {
+          endings.delete(listener);
+        };
+      }
+      listener();
+      return () => undefined;
     },
   };
 }
