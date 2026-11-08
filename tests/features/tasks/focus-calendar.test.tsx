@@ -17,7 +17,13 @@ import { FOCUS_COPY } from "../../../src/features/tasks/focus/FocusPage";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import { addDays } from "../../../src/features/tasks/model/time";
 import { installMatchMedia } from "../../helpers/match-media";
-import { mountTasks, seededTask, TODAY } from "../../support/tasks/world";
+import {
+  ME,
+  mountTasks,
+  OTHER,
+  seededTask,
+  TODAY,
+} from "../../support/tasks/world";
 
 /** Focus mode and the calendar's month (the Final design, 8 November 2026), on the app's router over the production data controller. */
 const media = installMatchMedia({ width: 1440 });
@@ -284,5 +290,74 @@ describe("the calendar", () => {
       () => titleButton().getAttribute("data-calendar-month") === month,
     );
     expect(titleButton().getAttribute("data-calendar-month")).toBe(month);
+  });
+});
+
+describe("the calendar's People view", () => {
+  test("a lane each, a task of anyone's in its own lane, the week's balance; Show narrows the week to one person", async () => {
+    const mine = await seededTask({
+      title: "Water the plants",
+      date: TODAY,
+      participants: [ME],
+    });
+    const shared = await seededTask({
+      title: "School run",
+      date: TODAY,
+      participants: [ME, OTHER],
+    });
+    const anyone = await seededTask({
+      title: "Take the bins out",
+      date: TODAY,
+      definition: { participation: "anyone" },
+      participants: [ME, OTHER],
+    });
+    const t = await mountTasks({
+      path: `/calendar?view=people&at=${TODAY}&tz=UTC`,
+      rows: [...mine.rows, ...shared.rows, ...anyone.rows],
+      env: { online: false },
+    });
+    await t.until(
+      () =>
+        document.querySelector(
+          `[data-calendar-row="${anyone.occurrenceId}"]`,
+        ) !== null,
+    );
+    const block = document.querySelector(
+      `[data-calendar-block="${mondayOf(TODAY)}"]`,
+    ) as HTMLElement;
+    const lane = (id: string) =>
+      block.querySelector(`[data-calendar-lane="${id}"]`) as HTMLElement | null;
+    expect(
+      within(lane(ME) as HTMLElement).getByText("Water the plants"),
+    ).toBeInTheDocument();
+    expect(
+      within(lane(ME) as HTMLElement).getByText("School run"),
+    ).toBeInTheDocument();
+    // The other participant is outside the household here: an "Others" lane; the rota's task sits in "Anyone".
+    expect(
+      within(lane("others") as HTMLElement).getByText("School run"),
+    ).toBeInTheDocument();
+    expect(
+      within(lane("anyone") as HTMLElement).getByText("Take the bins out"),
+    ).toBeInTheDocument();
+    expect(
+      block.querySelector('[data-calendar-balance-lane="anyone"]')?.textContent,
+    ).toContain("1");
+    expect(
+      screen.getByRole("button", { name: CALENDAR_COPY.views.people }),
+    ).toHaveAttribute("aria-pressed", "true");
+    // Show: one person narrows the week to what they take part in; Everyone brings the rest back.
+    fireEvent.click(
+      document.querySelector(
+        `[data-calendar-show-person="${ME}"]`,
+      ) as HTMLElement,
+    );
+    await t.until(() => lane("others") === null);
+    expect(lane(ME)).not.toBeNull();
+    expect(lane("anyone")).not.toBeNull();
+    fireEvent.click(
+      document.querySelector("[data-calendar-show-everyone]") as HTMLElement,
+    );
+    await t.until(() => lane("others") !== null);
   });
 });

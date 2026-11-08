@@ -129,8 +129,10 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   line; the "Planned with the server…", "From this device…" and "Saves offline…" captions are gone; the calendar's month is one box of
   hairlined cells of one height and its title no longer truncates. Left for Phase 9: the row's one fact; routine folds naming their
   tasks. On the phone the header scrolls with the page (stuck, it took half the screen); Phase 13 gives the phone a compact one.
-- **Phase 7 — Calendar grid and People view.** The one-box month grid with fixed cells; the "Show" row (people, task /
-  birthday chips); the People lanes view with the rota's "Anyone" lane and the weekly balance; the phone's people chips.
+- **Phase 7 — Calendar grid and People view (done).** The one-box month grid with fixed cells (in phase 6); the "Show" row of
+  the household's chips and Everyone, narrowing every view to one person; the People lanes view (`view=people`) with the "Anyone ·
+  whose turn" lane, "Others" and the weekly balance, a lane at a time on the phone. Not done, for want of data: the Task /
+  Calendar event / Birthday chips (no events, no birthday field kind), "Sources · n / Import a file", dragging between lanes.
 - **Phase 8 — One container everywhere.** "How things open" applied to people rows, All-tasks rows, list rows and settings
   sections; the person and the list drawn as `embedded` inside TaskPane; Settings' Appearance as a page like the rest.
 - **Phase 9 — People and Lists on the frames.** Grouped rows with one fact and badges; the person's facts strip and fields box;

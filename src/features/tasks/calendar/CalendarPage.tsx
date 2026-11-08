@@ -13,6 +13,7 @@ import {
   useState,
 } from "react";
 import { useLayoutMode } from "../../../app/shell/layout-mode";
+import { PersonAvatar } from "../../../components/ui/avatar-stack";
 import { Button } from "../../../components/ui/button";
 import { Pill } from "../../../components/ui/chip";
 import { enterFocusLoop } from "../../../components/ui/focus-loop";
@@ -22,6 +23,8 @@ import { Segmented } from "../../../components/ui/segmented";
 import { cn } from "../../../lib/utils";
 import { useCatchUpService } from "../catchup/useCatchUp";
 import * as copy from "../copy";
+import { anonymous, useUsernames } from "../detail/Rota";
+import { useTasksEnv } from "../env";
 import { compareRows, dayLabel, longDayLabel } from "../format";
 import { addDays, timeIn, todayIn } from "../model/time";
 import { SearchPill } from "../today/CommandPalette";
@@ -50,15 +53,30 @@ export const CALENDAR_COPY = {
   title: "Calendar",
   things: (n: number) => (n === 1 ? "1 thing" : `${n} things`),
   done: (n: number) => `${n} done`,
-  previous: { month: "Previous month", week: "Previous week" },
-  next: { month: "Next month", week: "Next week" },
+  previous: {
+    month: "Previous month",
+    week: "Previous week",
+    people: "Previous week",
+  },
+  next: { month: "Next month", week: "Next week", people: "Next week" },
   pick: "Choose a month",
   pickOpen: (title: string) => `${title}. Choose another month`,
   yearPrevious: "Previous year",
   yearNext: "Next year",
   today: "Today",
   view: "View",
-  views: { month: "Month", week: "Week" },
+  views: { month: "Month", week: "Week", people: "People" },
+  /** The "Show" row (the Final design): the household, one chip each, and Everyone. */
+  show: "Show",
+  everyone: "Everyone",
+  you: "You",
+  others: "Others",
+  /** The People view ("FD_CalendarPeople"): a lane each, "Anyone · whose turn" and the week's balance. */
+  people: {
+    anyone: "Anyone · whose turn",
+    turn: (name: string) => `→ ${name}`,
+    balance: "Balance this week",
+  },
   weekends: "Weekends",
   more: (n: number) => `+${n} more`,
   empty: "Nothing planned here.",
@@ -92,6 +110,19 @@ const EXTEND = 6;
 const SCROLL_SETTLE_MS = 900;
 /** The room left between the bar and a block scrolled to. */
 const SCROLL_GAP = 6;
+/** The People view's lane column. */
+const LANE_WIDTH = 168;
+
+interface Lane {
+  id: string;
+  name: string;
+  kind: "member" | "anyone" | "others";
+}
+/** A task anyone of the household does in turn (a rota), rather than each participant for themselves. */
+const isAnyone = (row: RowModel) => {
+  const participation = row.data.definition.participation;
+  return participation === "anyone" || participation === "pooled";
+};
 
 function reducedMotion(): boolean {
   return (
@@ -206,7 +237,34 @@ export function CalendarPage({
   // A wider window reads again; what was read stays on screen until the new read lands (never a blank calendar between windows).
   const lastRows = useRef<RowModel[]>([]);
   if (!read.loading) lastRows.current = read.rows;
-  const rows = read.loading ? lastRows.current : read.rows;
+  const all = read.loading ? lastRows.current : read.rows;
+  // The household's lanes (the Final design's "Show" row and People view): you first, then the household's other members by name;
+  // a task of anyone's (a rota) is in the "Anyone" lane with whose turn it is; a participant outside the household is "Others".
+  const me = useTasksEnv().accountId;
+  const usernames = useUsernames();
+  const lanes = useMemo<Lane[]>(() => {
+    const out: Lane[] = [
+      { id: me, name: usernames.get(me) ?? CALENDAR_COPY.you, kind: "member" },
+    ];
+    for (const [id, name] of [...usernames].sort((a, b) =>
+      a[1].localeCompare(b[1]),
+    ))
+      if (id !== me) out.push({ id, name, kind: "member" });
+    return out;
+  }, [me, usernames]);
+  // "Show": everyone, or one person (their tasks, and the rota's when the turn is theirs); kept for the visit, not the address.
+  const [who, setWho] = useState<string>("everyone");
+  const rows = useMemo(
+    () =>
+      who === "everyone"
+        ? all
+        : all.filter(
+            (row) =>
+              row.data.participants.includes(who) ||
+              (isAnyone(row) && row.data.rota?.account_id === who),
+          ),
+    [all, who],
+  );
   const byDay = useMemo(() => {
     const out = new Map<string, RowModel[]>();
     for (const row of rows) {
@@ -503,6 +561,7 @@ export function CalendarPage({
                 options={[
                   { value: "month", label: CALENDAR_COPY.views.month },
                   { value: "week", label: CALENDAR_COPY.views.week },
+                  { value: "people", label: CALENDAR_COPY.views.people },
                 ]}
                 onChange={(next) => onChange({ view: next })}
               />
@@ -517,14 +576,47 @@ export function CalendarPage({
           }
           data-calendar-controls=""
         />
-        {phone && view === "week" ? null : (
+        {/* "Show" (the Final design): the household as chips, and Everyone. */}
+        <div
+          className="flex items-center gap-2 overflow-x-auto [scrollbar-width:none]"
+          data-calendar-show=""
+        >
+          <span className="flex-none text-xs text-muted-foreground">
+            {CALENDAR_COPY.show}
+          </span>
+          <Pill
+            pressed={who === "everyone"}
+            onClick={() => setWho("everyone")}
+            className="h-9 flex-none"
+            data-calendar-show-everyone=""
+          >
+            {CALENDAR_COPY.everyone}
+          </Pill>
+          {lanes.map((lane) => (
+            <Pill
+              key={lane.id}
+              pressed={who === lane.id}
+              onClick={() => setWho(who === lane.id ? "everyone" : lane.id)}
+              className="h-9 flex-none gap-2 pl-1.5"
+              data-calendar-show-person={lane.id}
+            >
+              <PersonAvatar id={lane.id} name={lane.name} size={24} />
+              {lane.name}
+            </Pill>
+          ))}
+        </div>
+        {phone && view !== "month" ? null : (
           <div
             className="grid gap-1.5"
             style={{
-              gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+              gridTemplateColumns:
+                view === "people"
+                  ? `${LANE_WIDTH}px repeat(${columns}, minmax(0, 1fr))`
+                  : `repeat(${columns}, minmax(0, 1fr))`,
             }}
             data-calendar-weekdays=""
           >
+            {view === "people" ? <span aria-hidden="true" /> : null}
             {weekdays.map((name, n) => (
               <span
                 // biome-ignore lint/suspicious/noArrayIndexKey: the letters repeat (T, S); the column is the identity
@@ -548,6 +640,11 @@ export function CalendarPage({
             view={view}
             weekends={weekends}
             byDay={byDay}
+            lanes={
+              who === "everyone" ? lanes : lanes.filter((l) => l.id === who)
+            }
+            others={who === "everyone"}
+            usernames={usernames}
             today={today}
             zone={zone}
             phone={phone}
@@ -572,6 +669,9 @@ function Block({
   view,
   weekends,
   byDay,
+  lanes,
+  others: othersLane,
+  usernames,
   today,
   zone,
   phone,
@@ -583,6 +683,10 @@ function Block({
   view: CalendarView;
   weekends: boolean;
   byDay: ReadonlyMap<string, RowModel[]>;
+  lanes: readonly Lane[];
+  /** Whether a participant outside the lanes gets an "Others" lane (not when the week is narrowed to one person). */
+  others: boolean;
+  usernames: ReadonlyMap<string, string>;
   today: string;
   zone: string;
   phone: boolean;
@@ -599,9 +703,9 @@ function Block({
   // The header names the block in view; here the block's name is for assistive technology only (the month is written once).
   const label = (
     <h2 id={heading} className="sr-only">
-      {view === "week"
-        ? `${title} · ${CALENDAR_COPY.week(isoWeek(blockKey))} · ${CALENDAR_COPY.things(total)}`
-        : `${title} · ${CALENDAR_COPY.things(total)}`}
+      {view === "month"
+        ? `${title} · ${CALENDAR_COPY.things(total)}`
+        : `${title} · ${CALENDAR_COPY.week(isoWeek(blockKey))} · ${CALENDAR_COPY.things(total)}`}
     </h2>
   );
   const sectionProps = {
@@ -611,6 +715,23 @@ function Block({
     className: "pt-4",
     style: { scrollMarginTop: stickyHeight + SCROLL_GAP },
   };
+  if (view === "people")
+    return (
+      <section {...sectionProps}>
+        {label}
+        <PeopleWeek
+          days={days.filter((day) => weekends || weekdayIndex(day) < 5)}
+          byDay={byDay}
+          lanes={lanes}
+          othersLane={othersLane}
+          usernames={usernames}
+          today={today}
+          zone={zone}
+          phone={phone}
+          dayLink={dayLink}
+        />
+      </section>
+    );
   if (phone) {
     const agendaDays =
       view === "week"
@@ -757,6 +878,201 @@ function DayCell({
         ) : null}
       </div>
     </td>
+  );
+}
+
+/**
+ * The People view of a week ("FD_CalendarPeople"): a lane per member of the household (you first), each day's tasks as chips in the
+ * lane of whoever takes part, a task of anyone's in the "Anyone · whose turn" lane with the rota's answer, a participant outside the
+ * household under "Others", and the week's balance (how many things each lane holds) at the end. On the phone a lane at a time.
+ */
+function PeopleWeek({
+  days,
+  byDay,
+  lanes,
+  othersLane,
+  usernames,
+  today,
+  zone,
+  phone,
+  dayLink,
+}: {
+  days: string[];
+  byDay: ReadonlyMap<string, RowModel[]>;
+  lanes: readonly Lane[];
+  othersLane: boolean;
+  usernames: ReadonlyMap<string, string>;
+  today: string;
+  zone: string;
+  phone: boolean;
+  dayLink: DayLink;
+}) {
+  const cells = new Map<string, Map<string, RowModel[]>>();
+  const put = (lane: string, day: string, row: RowModel) => {
+    const byLane = cells.get(lane) ?? new Map<string, RowModel[]>();
+    byLane.set(day, [...(byLane.get(day) ?? []), row]);
+    cells.set(lane, byLane);
+  };
+  const known = new Set(lanes.map((lane) => lane.id));
+  let anyone = false;
+  let others = false;
+  for (const day of days)
+    for (const row of byDay.get(day) ?? []) {
+      if (isAnyone(row)) {
+        anyone = true;
+        put("anyone", day, row);
+        continue;
+      }
+      for (const id of row.data.participants)
+        if (known.has(id)) put(id, day, row);
+        else if (othersLane) {
+          others = true;
+          put("others", day, row);
+        }
+    }
+  const shown: Lane[] = [
+    ...lanes,
+    ...(anyone
+      ? [
+          {
+            id: "anyone",
+            name: CALENDAR_COPY.people.anyone,
+            kind: "anyone" as const,
+          },
+        ]
+      : []),
+    ...(others
+      ? [{ id: "others", name: CALENDAR_COPY.others, kind: "others" as const }]
+      : []),
+  ];
+  const countOf = (lane: string) =>
+    [...(cells.get(lane)?.values() ?? [])].reduce(
+      (n, list) => n + list.length,
+      0,
+    );
+  const chip = (row: RowModel) => {
+    const turn = row.data.rota?.account_id ?? null;
+    const name =
+      turn === null
+        ? null
+        : (usernames.get(turn) ?? (turn ? anonymous(turn) : null));
+    return (
+      <Row
+        key={row.id}
+        row={row}
+        zone={zone}
+        {...(isAnyone(row) && name !== null
+          ? { tag: CALENDAR_COPY.people.turn(name) }
+          : {})}
+      />
+    );
+  };
+  const laneHead = (lane: Lane) => (
+    <span className="flex min-w-0 items-center gap-2">
+      {lane.kind === "member" ? (
+        <PersonAvatar id={lane.id} name={lane.name} size={24} />
+      ) : (
+        <span
+          aria-hidden="true"
+          className="flex size-6 flex-none items-center justify-center rounded-full border border-dashed border-input text-[11px] text-muted-foreground"
+        >
+          ?
+        </span>
+      )}
+      <span className="min-w-0 text-[13px] font-medium leading-tight text-foreground">
+        {lane.name}
+      </span>
+    </span>
+  );
+  const balance = (
+    <p
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-3 text-xs text-muted-foreground"
+      data-calendar-balance=""
+    >
+      <span className="font-semibold uppercase tracking-[0.08em]">
+        {CALENDAR_COPY.people.balance}
+      </span>
+      {shown.map((lane) => (
+        <span key={lane.id} data-calendar-balance-lane={lane.id}>
+          {lane.name}{" "}
+          <span className="font-num text-foreground">{countOf(lane.id)}</span>
+        </span>
+      ))}
+    </p>
+  );
+  if (phone)
+    return (
+      <div className="flex flex-col gap-4">
+        {shown.map((lane) => (
+          <section
+            key={lane.id}
+            className="flex flex-col gap-1"
+            data-calendar-lane={lane.id}
+          >
+            {laneHead(lane)}
+            {days
+              .filter((day) => (cells.get(lane.id)?.get(day)?.length ?? 0) > 0)
+              .map((day) => (
+                <div key={day} className="flex flex-col gap-1 pl-8">
+                  <Link
+                    {...dayLink(day)}
+                    className="font-num text-[11px] text-muted-foreground"
+                  >
+                    {dayLabel(day)}
+                  </Link>
+                  {(cells.get(lane.id)?.get(day) ?? []).map(chip)}
+                </div>
+              ))}
+          </section>
+        ))}
+        {balance}
+      </div>
+    );
+  return (
+    <>
+      <table className="w-full table-fixed border-separate border-spacing-px overflow-hidden rounded-[14px] border border-border bg-border">
+        <colgroup>
+          <col style={{ width: LANE_WIDTH }} />
+          {days.map((day) => (
+            <col key={day} />
+          ))}
+        </colgroup>
+        <thead className="sr-only">
+          <tr>
+            <th scope="col">{CALENDAR_COPY.show}</th>
+            {days.map((day) => (
+              <th key={day} scope="col">
+                {dayLabel(day)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((lane) => (
+            <tr key={lane.id} data-calendar-lane={lane.id}>
+              <th scope="row" className="bg-card p-2 text-left align-top">
+                {laneHead(lane)}
+              </th>
+              {days.map((day) => (
+                <td
+                  key={day}
+                  data-calendar-day={day}
+                  className={cn(
+                    "min-h-[72px] bg-card p-1.5 align-top",
+                    day === today ? "bg-accent/40" : "",
+                  )}
+                >
+                  <div className="flex min-h-[60px] flex-col gap-[3px]">
+                    {(cells.get(lane.id)?.get(day) ?? []).map(chip)}
+                  </div>
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {balance}
+    </>
   );
 }
 
@@ -1004,10 +1320,13 @@ function Row({
   row,
   zone,
   agenda = false,
+  tag,
 }: {
   row: RowModel;
   zone: string;
   agenda?: boolean;
+  /** A grey word after the title ("→ Sam", whose turn it is). */
+  tag?: string;
 }) {
   const instant = row.data.slot.instant;
   const done = row.outcome === "complete";
@@ -1044,6 +1363,11 @@ function Row({
       />
       <span className="min-w-0 flex-1 truncate">
         {row.title ?? copy.UNTITLED}
+        {tag ? (
+          <span className="text-muted-foreground" data-calendar-turn="">
+            {` ${tag}`}
+          </span>
+        ) : null}
       </span>
       {agenda ? null : time}
     </Link>

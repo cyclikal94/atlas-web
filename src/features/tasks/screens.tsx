@@ -374,7 +374,7 @@ export function CalendarScreen({
           void navigate({
             to: "/calendar",
             search: {
-              ...(view === "week" ? { view } : {}),
+              ...(view === "month" ? {} : { view }),
               ...(weekends ? {} : { weekends: false }),
               at: next.at ?? at,
               ...(search.tz ? { tz: search.tz } : {}),

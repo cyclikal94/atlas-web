@@ -10,8 +10,8 @@ const CalendarScreen = lazy(() =>
 );
 
 export interface CalendarSearch {
-  /** The month or week in view: `month` (the default) or `week`. */
-  view?: "month" | "week";
+  /** The month, the week, or the week as lanes of people in view: `month` (the default), `week` or `people`. */
+  view?: "month" | "week" | "people";
   /** Saturday and Sunday shown (the default) or not. */
   weekends?: boolean;
   /** The day the view is at (`YYYY-MM-DD`); absent: today. */
@@ -29,7 +29,9 @@ export const calendarRoute = (parent: AnyRoute) => {
     getParentRoute: () => parent,
     path: "calendar",
     validateSearch: (search: Record<string, unknown>): CalendarSearch => ({
-      ...(search.view === "week" ? { view: "week" as const } : {}),
+      ...(search.view === "week" || search.view === "people"
+        ? { view: search.view }
+        : {}),
       ...(search.weekends === false ||
       search.weekends === "false" ||
       search.weekends === 0 ||

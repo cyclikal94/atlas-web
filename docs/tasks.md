@@ -124,8 +124,15 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     small pill, lit when today; each task a row with its dot, its title and its time; "+N more" past three), a week one row of tall
     cards with every task; without weekends the grid is Monday to Friday. On the phone a month is its days in a small grid (the number,
     up to three dots) and then its agenda a day at a time ("Monday 26 · today", "4 things · 2 done", every task a row with its time), a
-    week its agenda alone ("FD_CalendarPhone"). A day number leads to Today's view of it. Calendar events, people lanes ("FD_CalendarPeople")
-    and import ("FD_CalendarImport") come with the calendar events slice.
+    week its agenda alone ("FD_CalendarPhone"). A day number leads to Today's view of it.
+  - **The calendar's people (phase 7, 8 November 2026; "FD_CalendarPeople").** Under the header a "Show" row: the household as chips (you
+    first, then the household's members by name, from the sharing defaults' households) and Everyone; one pressed narrows every view to
+    what that person takes part in (and a rota's task when the turn is theirs). The third view, People (`view=people`, the week's
+    arithmetic), is a week as lanes: a lane per member, each day's tasks as chips in the lane of whoever takes part, a task of anyone's
+    (`participation` anyone or pooled) in the "Anyone · whose turn" lane with the rota's answer ("→ Sam"), a participant outside the
+    household under "Others" (not when the week is narrowed to one person), and "Balance this week" (the count per lane) under the
+    table; on the phone a lane at a time. Handing a task over by dragging it between lanes, calendar events, birthdays and import
+    ("FD_CalendarImport") wait for the calendar events slice and a hand-over command (the backend has neither).
   - **The form (8 November 2026).** The task form is the task's page in edit mode (`form/TaskFormPage.tsx`): the eyebrow heading ("New
     task" / "Edit task"), the name as the large title field, a facts strip of the choices (When, Repeats, Who, Done when, If missed, Seen
     by) whose cells lead to their sections, the save row under the strip (at the bottom of the phone's viewport), then one grouped box

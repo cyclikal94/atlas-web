@@ -4,7 +4,8 @@ import { addDays } from "../model/time";
  * The calendar's pure arithmetic: months, Monday-based weeks, ISO week numbers and the labels of both, all on `YYYY-MM-DD` strings
  * (the contract's dates) and UTC (a date has no zone of its own; the display zone decides which date a task falls on upstream).
  */
-export type CalendarView = "month" | "week";
+/** The month, the week, or the week as lanes of who does what ("people"); the last two share the week's arithmetic. */
+export type CalendarView = "month" | "week" | "people";
 
 const utc = (day: string) => new Date(`${day}T00:00:00Z`);
 const monthFormat = new Intl.DateTimeFormat("en-GB", {
