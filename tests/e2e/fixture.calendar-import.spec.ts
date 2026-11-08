@@ -888,8 +888,13 @@ test.describe("E-IMP7: the in-dialog sync control keeps the import (revision 6, 
       cache: [sourceProjection(SOURCE)],
     });
     await openRow(page);
+    // The window first, the file LAST: an edit made after the choice asks the model while the file is shown, and that alone kept the
+    // model unfinished before revision 37 (MU-5300 survived this case's first order, run 2026-11-08T09-40-03.963Z-7858127c).
+    await page
+      .getByRole("dialog", { name: "Import events" })
+      .getByLabel("From", { exact: true })
+      .fill("2026-01-01");
     const dialog = await chooseFile(page, text(), "retained.ics");
-    await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
     await dialog.locator("button[data-sync-tone]").click();
     await syncScreen(page);
     await expect(dialog).toBeHidden();
