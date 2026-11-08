@@ -137,8 +137,12 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   All-tasks rows (`/tasks?task=`) and list rows (`/tasks/lists?list=`); the person and the list drawn `embedded` inside TaskPane;
   Settings' Appearance a page like the rest, so every section opens the same way. Settings sections inside the container wait for
   the registry to expose each section's screen (today it builds routes only).
-- **Phase 9 — People and Lists on the frames.** Grouped rows with one fact and badges; the person's facts strip and fields box;
-  lists' groups and sharing facts; the list's "Add" pill, who-added avatars, "Ticked · n", "Clear ticked".
+- **Phase 9 — People and Lists on the frames (done in part).** Done: the people grouped as the frame draws them (your household by
+  name, Just you, Shared with you); the "checked at" lines for assistive technology only; a field's Edit and Archive quiet until the
+  row is hovered or focused; the list's "Add" in its header and no caption. Kept as they are, because the summaries' three facts per
+  row (who added them, their account, who can see them) are a documented contract with its own cases: the row's wording. Not done,
+  for want of data: a person's age, birthday and "tasks about"; a list's sharing fact, who added an item, "Ticked · n" and "Clear
+  ticked" (list items are tasks, not ticks).
 - **Phase 10 — Task editors as popovers and dialogs.** Short choices under the pressed cell; consequential editors as the
   centred dialog; Turn / Timer / Follows cells; the phone's Done / Skip / Timer bar; the activity as sentences.
 - **Phase 11 — Create with chips.** The parsing title field (dates, times, "every …", people, #lists as chips); facts as

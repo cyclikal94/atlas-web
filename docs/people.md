@@ -812,3 +812,8 @@ The "Sharing checked at …" note is said once on the person page, under the fie
   (`/people?person=<id>`: a split pane, a side peek or an overlay beside the people, `PersonDetail` drawn without its breadcrumb and with
   the name as an h2), or as the page of their own at `/people/<id>`; the phone always the page. The field editors still open on the
   person's own page (their routes are under it).
+- **The rows' groups (phase 9, 8 November 2026; "FD_People").** On the whole list with no search, the rows are grouped as the frame
+  draws them: the household you are in first (headed by its name from this device's sharing defaults, else "In your home": the people
+  its summary marks `in_home`), then "Just you" (the people you added that only you see), then "Shared with you"; a search or a scope
+  shows one plain list. The "checked at" lines under the list and beside a field are said to assistive technology only, and a field's
+  Edit and Archive show when the row is hovered or focused (from the tablet up; the phone keeps them).

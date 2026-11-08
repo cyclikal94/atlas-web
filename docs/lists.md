@@ -284,3 +284,6 @@ and the page reads no task goals.
 - **How things open (phase 8, 8 November 2026).** From the lists, a row opens the list in the container chosen in Settings · Layout
   (`/tasks/lists?list=<id>`, `ListDetail` drawn `embedded`: no breadcrumb, the name an h2 under the page's heading), or as its own page at
   `/tasks/lists/<id>`; from a list, a task opens the same way (`?task=`); the phone always the page.
+- **The list's header (phase 9, 8 November 2026; "FD_List").** "Add task to list" is the header's primary control beside the search pill
+  and "More" (disabled with its reason when the list cannot take more or you cannot edit it); there is no add row and no caption under
+  the rows.

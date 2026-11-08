@@ -16,6 +16,7 @@ import {
   type CacheRow,
   type DraftWithCommand,
   useDataActions,
+  useSharingDefaults,
   useStatusInputs,
   useVisibleChildren,
 } from "../../../data";
@@ -425,6 +426,13 @@ function CachedRows({
   onPrevious: (() => void) | null;
   onNext: (() => void) | null;
 }) {
+  // The household you are in, named (the primary household of this device's sharing defaults), for the first group's heading.
+  const defaults = useSharingDefaults().record;
+  const home =
+    defaults?.snapshot.households.find(
+      (h: { id: string; name: string | null }) =>
+        h.id === defaults.snapshot.defaults.primary_household_id,
+    )?.name ?? null;
   const inputs = useStatusInputs();
   const summaries = useStepSummaries(env, step, start, archived);
   const read = shownOf(summaries)?.value.read ?? null;
@@ -570,7 +578,12 @@ function CachedRows({
         ) : null
       ) : (
         <GroupedRows
-          groups={groupRows(shown, summaryOf, view === "all" && wanted === "")}
+          groups={groupRows(
+            shown,
+            summaryOf,
+            view === "all" && wanted === "",
+            home,
+          )}
           summaryOf={summaryOf}
           count={(row) =>
             row.projected ? null : <FieldCount personId={row.row.id} />
@@ -790,7 +803,7 @@ function Skeleton() {
 
 /** The rows of a step in the Final design's groups: the people I added, then the people shared with me, then the rest. */
 interface RowGroup {
-  key: "yours" | "shared" | "rest";
+  key: "home" | "yours" | "shared" | "rest";
   heading: string | null;
   rows: ShownRow[];
 }
@@ -799,20 +812,28 @@ function groupRows(
   shown: ShownRow[],
   summaryOf: (row: ShownRow) => PersonSummary | null,
   grouped: boolean,
+  home: string | null,
 ): RowGroup[] {
   if (!grouped) return [{ key: "rest", heading: null, rows: shown }];
+  const inHome: ShownRow[] = [];
   const yours: ShownRow[] = [];
   const shared: ShownRow[] = [];
   const rest: ShownRow[] = [];
   for (const row of shown) {
     const summary = summaryOf(row);
     const attribution = summary === null ? null : attributionOf(summary);
-    if (attribution?.kind === "you" || attribution?.kind === "added_by_you")
+    // The Final design's groups: the household you are in first (the people it can see), then just you, then shared with you.
+    if (summary?.audience.in_home) inHome.push(row);
+    else if (
+      attribution?.kind === "you" ||
+      attribution?.kind === "added_by_you"
+    )
       yours.push(row);
     else if (attribution?.kind === "shared_by") shared.push(row);
     else rest.push(row);
   }
   const groups: RowGroup[] = [
+    { key: "home", heading: copy.GROUP_HOME(home), rows: inHome },
     { key: "yours", heading: copy.GROUP_YOURS, rows: yours },
     { key: "shared", heading: copy.GROUP_SHARED, rows: shared },
     { key: "rest", heading: null, rows: rest },

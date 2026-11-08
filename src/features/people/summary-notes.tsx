@@ -51,7 +51,7 @@ export function SummaryNotes({
       ) : shown === null ? (
         <p className="text-xs text-muted-foreground">{words.checking}</p>
       ) : (
-        <p className="text-xs text-muted-foreground" data-summary-checked="">
+        <p className="sr-only" data-summary-checked="">
           {copy.SUMMARY_AS_OF(timeOf(shown.checkedAt))}
         </p>
       )}

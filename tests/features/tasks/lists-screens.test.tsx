@@ -212,7 +212,8 @@ describe("L8: the detail", () => {
       within(withheld).queryByRole("button", { name: DETAIL.removeWithheld }),
       "a withheld row keeps Remove",
     ).not.toBeNull();
-    expect(screen.getByText(DETAIL.caption)).not.toBeNull();
+    // No caption under the rows (the Final design): what a list changes is said where sharing is set.
+    expect(screen.queryByText(DETAIL.caption)).toBeNull();
     expect((await axe(document.body)).violations).toEqual([]);
   });
 

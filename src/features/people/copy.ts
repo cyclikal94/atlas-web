@@ -98,7 +98,9 @@ export const FACTS = {
 } as const;
 export const FACT_COMPARE = "compare";
 /** The list's row groups (the Final design, 8 November 2026), by who added each person. */
-export const GROUP_YOURS = "Added by you";
+/** The rows' groups (the Final design): the household you are in, named when the sharing defaults know it; then just you; then shared. */
+export const GROUP_HOME = (name: string | null) => name ?? "In your home";
+export const GROUP_YOURS = "Just you";
 export const GROUP_SHARED = "Shared with you";
 export const FACT_LINK_SELF = "To you";
 export const FACT_LINK_OTHER = "To their account";

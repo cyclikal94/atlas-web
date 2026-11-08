@@ -266,6 +266,25 @@ export function ListDetail({
             zone={zone}
             className="min-w-0 flex-1 tablet:w-[260px] tablet:flex-none"
           />
+          {/* The Final design's "Add" beside the search: the picker, or why it cannot open; nothing while the list cannot be read. */}
+          {readable ? (
+            <span data-list-add="">
+              {!editable ? (
+                <Button disabled reason={noEdit}>
+                  {DETAIL.add}
+                </Button>
+              ) : full ? (
+                <Button disabled reason={DETAIL.atLimit}>
+                  {DETAIL.add}
+                </Button>
+              ) : (
+                <Button variant="default" onClick={openFrom("picker")}>
+                  <Plus aria-hidden="true" strokeWidth={2.25} />
+                  {DETAIL.add}
+                </Button>
+              )}
+            </span>
+          ) : null}
           <ActionMenu items={menu} data-list-more="" />
         </>
       }
@@ -310,37 +329,9 @@ export function ListDetail({
           {DETAIL.unreadable}
         </p>
       ) : (
-        // A list is Today's row design (the Final design, 8 November 2026): the way to add a task first, then one row per task, the
-        // withheld ones last; "Remove" is a quiet control at the end of a row, shown on hover and focus from the tablet up.
+        // A list is Today's row design (the Final design, 8 November 2026): one row per task, the withheld ones last; "Remove" is a
+        // quiet control at the end of a row, shown on hover and focus from the tablet up. "Add" is in the header.
         <section className="flex min-w-0 flex-col" data-list-box="">
-          <div data-list-add="" className="-mx-3.5">
-            {!editable ? (
-              <div className="px-3.5 py-1.5">
-                <Button disabled reason={noEdit}>
-                  {DETAIL.add}
-                </Button>
-              </div>
-            ) : full ? (
-              <div className="px-3.5 py-1.5">
-                <Button disabled reason={DETAIL.atLimit}>
-                  {DETAIL.add}
-                </Button>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={openFrom("picker")}
-                className="atlas-transition flex min-h-12 w-full items-center gap-3.5 rounded-[10px] px-3.5 text-left text-[15px] text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              >
-                <Plus
-                  aria-hidden="true"
-                  className="size-[18px] flex-none"
-                  strokeWidth={1.9}
-                />
-                {DETAIL.add}
-              </button>
-            )}
-          </div>
           {rows.length === 0 ? (
             <p className="py-3 text-sm text-muted-foreground">{DETAIL.empty}</p>
           ) : (
@@ -430,12 +421,6 @@ export function ListDetail({
           )}
         </section>
       )}
-      <p
-        className="max-w-[560px] text-xs text-muted-foreground"
-        data-list-caption=""
-      >
-        {DETAIL.caption}
-      </p>
       {dialog === "rename" ? (
         <RenameListDialog
           listId={listId}

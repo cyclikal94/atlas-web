@@ -785,7 +785,7 @@ function FieldRow({
   // the field's sharing editor) and the row's acts at the end; one column on the phone.
   return (
     <li
-      className="list-none px-4 py-2 tablet:px-5"
+      className="group list-none px-4 py-2 tablet:px-5"
       data-field-row={row.id}
       data-steady=""
     >
@@ -817,10 +817,7 @@ function FieldRow({
             </button>
           )}
           {summary === null && read !== undefined && !field.projected ? (
-            <span
-              className="text-xs text-muted-foreground"
-              data-field-checked=""
-            >
+            <span className="sr-only" data-field-checked="">
               {copy.AUDIENCE_CHECKED_AT(timeOf(read.checkedAt))}
             </span>
           ) : null}
@@ -833,7 +830,7 @@ function FieldRow({
             </span>
           ) : null}
         </span>
-        <span className="flex flex-wrap items-start gap-1">
+        <span className="flex flex-wrap items-start gap-1 tablet:opacity-0 tablet:transition-opacity tablet:group-focus-within:opacity-100 tablet:group-hover:opacity-100">
           {!row.can_edit ? (
             <Button variant="ghost" disabled reason={copy.CANNOT_EDIT_FIELD}>
               {copy.EDIT}

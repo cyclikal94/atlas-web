@@ -202,9 +202,8 @@ test.describe("E-LS1: the pane and the detail from the cache (L5, L8, L11, L17)"
     await expect(
       withheld.getByRole("button", { name: "Remove this task" }),
     ).toBeVisible();
-    await expect(page.locator("[data-list-caption]")).toHaveText(
-      "Lists don't change who can see a task. People who can see this list see only the tasks they can already open.",
-    );
+    // The page carries no explanatory caption (the Final design); what a list changes is said where sharing is set.
+    await expect(page.locator("[data-list-caption]")).toHaveCount(0);
     // The hidden task is nowhere in this device's cache (the server never sends it): the picker cannot offer it either.
     const cached = (await page.evaluate(
       (acct) => window.__atlasData?.rows(acct, "cache"),
