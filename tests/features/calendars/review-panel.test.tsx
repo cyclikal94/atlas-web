@@ -27,6 +27,12 @@ import { cacheRow, draftRow } from "../../support/data/rows";
  */
 installMatchMedia({ width: 1440 });
 /** The control asserted present (an assertion, not a query error, when it is missing), then returned to act on. */
+/**
+ * Asserts `element` is shown, then returns it. Q-2 (WEB-13b maintenance merge of accepted main; family
+ * `mutant-oracle-throws-before-asserting`): every jest-dom matcher on `item(…)` takes `present(item(…))`, so that a card a mutant removed
+ * fails by this assertion, not by jest-dom refusing `null` (no assertion origin under main's unit-mutation runner: MU-5243 tainted, MU-5245
+ * crash-only). No matcher is removed or changed.
+ */
 const present = (element: HTMLElement | null): HTMLElement => {
   expect(element).not.toBeNull();
   return element as HTMLElement;
@@ -1179,11 +1185,11 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     const w = await start(initial, { online: false });
     await showAll(w);
     expect(states()).toHaveLength(100);
-    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1099))).toHaveAttribute("data-review-state", "open");
     await w.commit({ put: { store: "cache", rows: [many(999)] } });
     // The displaced review is unchanged in the cache: only the page's boundary moved.
     expect(cached(w, 1099)).toEqual(initial[99]);
-    expect(item(999)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(999))).toHaveAttribute("data-review-state", "open");
     expect(item(1099)).toBeNull();
     expect(gone()).toEqual([]);
     expect(states()).toHaveLength(100);
@@ -1205,7 +1211,7 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
       target_resource_ids: [rid(1099)],
       expected_version: 1,
     });
-    expect(item(1099)).toHaveAttribute("data-review-state", "queued");
+    expect(present(item(1099))).toHaveAttribute("data-review-state", "queued");
     // Back: page one whole again, still claiming nothing of the review now on page two.
     await click(w, words.SHOW_PREVIOUS_REVIEWS);
     expect(states()).toHaveLength(100);
@@ -1285,7 +1291,7 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
       );
     });
     await w.settle();
-    expect(item(1099)).toHaveAttribute("data-review-state", "queued");
+    expect(present(item(1099))).toHaveAttribute("data-review-state", "queued");
     // A queued draft has no overlay yet (it is written when the draft is claimed): the PRODUCTION claim (W5) and receipt (W6), so the
     // merged review says resolved while the published base does not.
     const stored = drafts(w);
@@ -1311,8 +1317,11 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     await w.settle();
     expect(drafts(w)[0]?.status).toBe("acknowledged");
     // The precondition: the card's reading is the overlay's resolved review (an acknowledged card), the cache's base is unresolved.
-    expect(item(1099)).toHaveAttribute("data-review-state", "acknowledged");
-    expect(item(1099)).toHaveTextContent(words.ACKNOWLEDGED);
+    expect(present(item(1099))).toHaveAttribute(
+      "data-review-state",
+      "acknowledged",
+    );
+    expect(present(item(1099))).toHaveTextContent(words.ACKNOWLEDGED);
     expect(parseReview(cached(w, 1099)?.value)?.resolved).toBe(false);
     await click(w, words.SHOW_PREVIOUS_REVIEWS);
     expect(item(1099)).toBeNull();
@@ -1345,12 +1354,12 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     expect(
       document.querySelectorAll(`[data-review="${rid(1099)}"]`),
     ).toHaveLength(1);
-    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1099))).toHaveAttribute("data-review-state", "open");
     await reads.release(rid(1099));
     expect(
       document.querySelectorAll(`[data-review="${rid(1099)}"]`),
     ).toHaveLength(1);
-    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1099))).toHaveAttribute("data-review-state", "open");
     // 999 was shown (all of page one was) and has now left the cache: its deletion is said.
     expect(gone()).toEqual([rid(999)]);
   });
@@ -1394,7 +1403,7 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     expect(states()).toEqual([`${rid(1100)}:open`]);
     await click(w, words.SHOW_PREVIOUS_REVIEWS);
     // Page one: 999 (inserted behind the cursor) is reachable; 1099, shown here and deleted, is said to be gone.
-    expect(item(999)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(999))).toHaveAttribute("data-review-state", "open");
     expect(gone()).toEqual([rid(1099)]);
     expect(
       document.querySelectorAll('[data-review-state="open"]'),
@@ -1428,7 +1437,7 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     }) as never);
     await w.attach();
     expect(views).toBeGreaterThan(0);
-    expect(item(1000)).toHaveAttribute("data-review-state", "loading");
+    expect(present(item(1000))).toHaveAttribute("data-review-state", "loading");
     await w.commit({ remove: [rid(1000)] });
     expect(item(1000)).toBeNull();
     expect(gone()).toEqual([]);
@@ -1476,7 +1485,7 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     await w.attach();
     await screen.findByText(words.REVIEWS_HEADING);
     await w.settle();
-    expect(item(1000)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1000))).toHaveAttribute("data-review-state", "open");
     held = true;
     await w.commit({
       put: { store: "cache", rows: [many(1000, true, { version: 2 })] },
@@ -1493,7 +1502,7 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     // The list now lacks it without ever having shown it resolved: it was settled, not lost.
     expect(item(1000)).toBeNull();
     expect(gone()).toEqual([]);
-    expect(item(1001)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1001))).toHaveAttribute("data-review-state", "open");
   });
 
   test("F27-1 lifetime: what a panel showed does not outlive it (a remount, the cache invalidated and recovered)", async () => {
@@ -1702,7 +1711,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
   const twoPages = async (extra = {}) => {
     const w = await start(range(1000, 100), extra);
     await showAll(w);
-    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1099))).toHaveAttribute("data-review-state", "open");
     await w.commit({ put: { store: "cache", rows: [many(999)] } });
     expect(item(1099)).toBeNull();
     await next(w);
@@ -1748,7 +1757,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
   const threePages = async () => {
     const w = await start(range(100000, 100, 1000));
     await showAll(w);
-    expect(item(X)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(X))).toHaveAttribute("data-review-state", "open");
     await w.commit({ put: { store: "cache", rows: [many(99999)] } });
     await next(w);
     expect(states()).toEqual([`${rid(X)}:open`]);
@@ -1800,7 +1809,10 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
         expect(gone()).toEqual([]);
         // Forward again over the same cursor (page one is unchanged): page two showed X too, and says nothing of it.
         await next(w);
-        expect(item(198001)).toHaveAttribute("data-review-state", "open");
+        expect(present(item(198001))).toHaveAttribute(
+          "data-review-state",
+          "open",
+        );
         expect(gone()).toEqual([]);
         await remove(w, Y);
         await back(w);
@@ -1934,7 +1946,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
     expect(item(1099)).toBeNull();
     expect(gone()).toEqual([]);
     await ctl.release("list:first", `view:${rid(1099)}`);
-    expect(item(999)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(999))).toHaveAttribute("data-review-state", "open");
     expect(item(1099)).toBeNull();
     expect(gone()).toEqual([]);
   });
@@ -1970,7 +1982,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
     });
     await ctl.release("list:*");
     await publish(w, 1000, false, 3);
-    expect(item(1000)).toHaveAttribute("data-review-state", "open");
+    expect(present(item(1000))).toHaveAttribute("data-review-state", "open");
     // A new card for it (next and back) whose reading answers with the older resolution.
     await next(w);
     const views = ctl.made(`view:${rid(1000)}`);
@@ -2005,7 +2017,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       const w = await start([many(100)]);
       const ctl = control(w);
       await w.remount();
-      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(100))).toHaveAttribute("data-review-state", "open");
       expect(ctl.made("list:first")).toBeGreaterThan(0);
       return { w, ctl };
     };
@@ -2015,8 +2027,11 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       ctl.hold(`view:${rid(200)}`);
       await w.commit({ put: { store: "cache", rows: [many(200)] } });
       expect(ctl.made(`view:${rid(200)}`)).toBeGreaterThan(0);
-      expect(item(200)).toHaveAttribute("data-review-state", "loading");
-      expect(item(200)).toHaveAttribute("aria-busy", "true");
+      expect(present(item(200))).toHaveAttribute(
+        "data-review-state",
+        "loading",
+      );
+      expect(present(item(200))).toHaveAttribute("aria-busy", "true");
       return { w, ctl };
     };
 
@@ -2026,7 +2041,10 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       await remove(w, 200);
       expect(ctl.waited("list:first")).toBeGreaterThan(0);
       expect(ctl.waited(`view:${rid(200)}`)).toBeGreaterThan(0);
-      expect(item(200)).toHaveAttribute("data-review-state", "loading");
+      expect(present(item(200))).toHaveAttribute(
+        "data-review-state",
+        "loading",
+      );
       await ctl.release(`view:${rid(200)}`);
       // The held list still names 200 (so its card is mounted), and the card's own first reading says the cache holds no such row.
       expect(listed(ctl, "list:first")).toContain(rid(200));
@@ -2037,7 +2055,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       // Never shown, so never "no longer available": asserted while the list is still held (the window of the defect).
       expect(item(200)).toBeNull();
       expect(gone()).toEqual([]);
-      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(100))).toHaveAttribute("data-review-state", "open");
       expect(drafts(w)).toEqual([]);
       await ctl.release("list:first");
       expect(listed(ctl, "list:first")).not.toContain(rid(200));
@@ -2054,15 +2072,15 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
         status: "ready",
         value: { base: { id: rid(200) } },
       });
-      expect(item(200)).toHaveAttribute("data-review-state", "open");
-      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(200))).toHaveAttribute("data-review-state", "open");
+      expect(present(item(100))).toHaveAttribute("data-review-state", "open");
       expect(drafts(w)).toEqual([]);
     });
 
     test("F29-1 control: a review its card SHOWED, deleted while the list is held, is 'no longer available' at once and after the list arrives", async () => {
       const { w, ctl } = await live();
       await w.commit({ put: { store: "cache", rows: [many(200)] } });
-      expect(item(200)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(200))).toHaveAttribute("data-review-state", "open");
       ctl.hold("list:first");
       await remove(w, 200);
       expect(ctl.waited("list:first")).toBeGreaterThan(0);
@@ -2075,7 +2093,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
         expect(button).toBeDisabled();
       expect(within(card).queryByRole("link")).toBeNull();
       expect(elements(200)).toBe(1);
-      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(100))).toHaveAttribute("data-review-state", "open");
       await ctl.release("list:first");
       expect(listed(ctl, "list:first")).not.toContain(rid(200));
       expect(gone()).toEqual([rid(200)]);
@@ -2110,7 +2128,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       const ctl = control(w);
       await w.remount();
       await showAll(w);
-      expect(item(1099)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(1099))).toHaveAttribute("data-review-state", "open");
       // 999 moves 1099 to page two (its card unmounts); removing 999 brings it back to page one as a NEW card, its first reading held.
       await w.commit({ put: { store: "cache", rows: [many(999)] } });
       expect(item(1099)).toBeNull();
@@ -2118,7 +2136,10 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       ctl.hold(`view:${rid(1099)}`);
       await remove(w, 999);
       expect(ctl.made(`view:${rid(1099)}`)).toBeGreaterThan(views);
-      expect(item(1099)).toHaveAttribute("data-review-state", "loading");
+      expect(present(item(1099))).toHaveAttribute(
+        "data-review-state",
+        "loading",
+      );
       // 999 was shown on page one too (first on it) before it was deleted: genuinely no longer available, the unrelated control.
       expect(gone()).toEqual([rid(999)]);
       ctl.hold("list:first");
@@ -2137,7 +2158,7 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
       const ctl = control(w);
       await w.remount();
       await showAll(w);
-      expect(item(1099)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(1099))).toHaveAttribute("data-review-state", "open");
       await w.commit({ put: { store: "cache", rows: [many(999)] } });
       expect(item(1099)).toBeNull();
       ctl.hold(`view:${rid(1099)}`);
@@ -2185,13 +2206,16 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
     test("F29-1 lifetime: shown by an EARLIER panel, then only loading in a new one, deleted while its list is held: the new panel says nothing", async () => {
       const { w, ctl } = await live();
       await w.commit({ put: { store: "cache", rows: [many(200)] } });
-      expect(item(200)).toHaveAttribute("data-review-state", "open");
+      expect(present(item(200))).toHaveAttribute("data-review-state", "open");
       // A new panel (the screen left and come back to): its card for 200 waits for its first reading.
       ctl.hold(`view:${rid(200)}`);
       const views = ctl.made(`view:${rid(200)}`);
       await w.remount();
       expect(ctl.made(`view:${rid(200)}`)).toBeGreaterThan(views);
-      expect(item(200)).toHaveAttribute("data-review-state", "loading");
+      expect(present(item(200))).toHaveAttribute(
+        "data-review-state",
+        "loading",
+      );
       ctl.hold("list:first");
       await remove(w, 200);
       await ctl.release(`view:${rid(200)}`);

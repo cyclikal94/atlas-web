@@ -77,6 +77,12 @@ async function choose(
   await w.settle();
 }
 
+/**
+ * The file the dialog shows, or null. Q-1 (WEB-13b maintenance merge of accepted main; family `mutant-oracle-throws-before-asserting`):
+ * a `toContain` on it is written `expect(shownFile(d) ?? "")`, so that a missing file fails by a comparison, not by chai's argument check
+ * on `null`, which main's unit-mutation runner admits only as an error beside the assertion (MU-5110, MU-5111, MU-5112 tainted). Each such
+ * assertion fails in exactly the cases it failed before.
+ */
 const shownFile = (dialog: HTMLElement) =>
   dialog.querySelector("[data-import-file]")?.textContent ?? null;
 const field = (dialog: HTMLElement, label: "From" | "Through") =>
@@ -104,7 +110,9 @@ const seen = (w: World, dialog: HTMLElement) => ({
 async function edited(w: World) {
   const dialog = await openRow(w);
   await choose(w, dialog, ICS);
-  await waitFor(() => expect(shownFile(dialog)).toContain("retained.ics"));
+  await waitFor(() =>
+    expect(shownFile(dialog) ?? "").toContain("retained.ics"),
+  );
   setField(dialog, "From", "2026-01-01");
   setField(dialog, "Through", "2026-12-31");
   return dialog;
@@ -275,7 +283,7 @@ describe("R7: what goes on while the import is kept (I5, I8-I11)", () => {
     await w.settle();
     await w.traverse(-1);
     const again = await openRow(w);
-    expect(shownFile(again)).toContain("slow.ics");
+    expect(shownFile(again) ?? "").toContain("slow.ics");
     expect(within(again).queryByText(words.READING)).toBeNull();
     expect(drafts(w)).toHaveLength(0);
   });
@@ -292,14 +300,14 @@ describe("R7: what goes on while the import is kept (I5, I8-I11)", () => {
     const again = await openRow(w);
     // Revision 7: `queryByText` so that a missing message fails this ASSERTION (a throwing `getByText` is an error, which the merged
     // mutation runner rejects beside the expected catch: MU-5110/MU-5111 were invalid). The same requirement: the message is shown.
-    expect(within(again).queryByText(words.READING)).toBeInTheDocument();
+    expect(within(again).queryByText(words.READING)).not.toBeNull();
     fireEvent.submit(present(again.querySelector("form")));
     await w.settle();
     expect(drafts(w)).toHaveLength(0);
     expect(within(again).queryByText(words.FILE_REQUIRED)).toBeNull();
     await act(async () => held.deliver());
     await w.settle();
-    expect(shownFile(again)).toContain("slow.ics");
+    expect(shownFile(again) ?? "").toContain("slow.ics");
   });
 
   for (const order of ["while away", "after it is shown again"] as const)
@@ -408,7 +416,7 @@ describe("R7: what goes on while the import is kept (I5, I8-I11)", () => {
     await act(async () => held.release());
     await w.settle();
     expect(screen.queryByRole("dialog")).toBe(again);
-    expect(shownFile(again)).toContain("next.ics");
+    expect(shownFile(again) ?? "").toContain("next.ics");
     expect(field(again, "From").value).toBe("2026-03-01");
     expect(within(again).queryByText(words.IMPORT_QUEUED_NEWER)).toBeNull();
     // Cancel is not a roll-back: the stored import stays, and is said to be.
@@ -456,7 +464,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
     });
     await w.traverse(-1);
     const again = await openRow(w, "Import events into Weekend chores");
-    expect(shownFile(again)).toContain("retained.ics");
+    expect(shownFile(again) ?? "").toContain("retained.ics");
     expect(field(again, "From").value).toBe("2026-01-01");
     press(again, words.IMPORT);
     await w.settle();
@@ -536,7 +544,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
     // Asserted, not awaited: Browse must show the dialog itself, never the file picker.
     expect(picker).not.toHaveBeenCalled();
     const again = present(screen.queryByRole("dialog"));
-    expect(shownFile(again)).toContain("drop.ics");
+    expect(shownFile(again) ?? "").toContain("drop.ics");
     expect(
       (within(again).getByLabelText(words.SOURCE) as HTMLSelectElement).value,
     ).toBe(rows[100]?.id);
@@ -612,7 +620,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
     });
     await w.settle();
     const again = await shownDialog();
-    await waitFor(() => expect(shownFile(again)).toContain("second.ics"));
+    await waitFor(() => expect(shownFile(again) ?? "").toContain("second.ics"));
     expect(
       (within(again).getByLabelText(words.SOURCE) as HTMLSelectElement).value,
     ).toBe(rows[2]?.id);
@@ -997,7 +1005,7 @@ describe("R7 (revision 7): the kept import across a production controller replac
     });
     await w.settle();
     const dialog = await shownDialog();
-    await waitFor(() => expect(shownFile(dialog)).toContain("drop.ics"));
+    await waitFor(() => expect(shownFile(dialog) ?? "").toContain("drop.ics"));
     setField(dialog, "Through", "2026-12-31");
     await syncFrom(w, dialog);
   }
@@ -1030,7 +1038,7 @@ describe("R7 (revision 7): the kept import across a production controller replac
       } else {
         expect(picker).not.toHaveBeenCalled();
         const again = present(screen.queryByRole("dialog"));
-        expect(shownFile(again)).toContain("drop.ics");
+        expect(shownFile(again) ?? "").toContain("drop.ics");
         expect(field(again, "Through").value).toBe("2026-12-31");
       }
       expect(drafts(w)).toHaveLength(0);
@@ -1134,7 +1142,9 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
   async function keptPending(w: World) {
     const dialog = await openRow(w, PENDING_ROW);
     await choose(w, dialog, ICS);
-    await waitFor(() => expect(shownFile(dialog)).toContain("retained.ics"));
+    await waitFor(() =>
+      expect(shownFile(dialog) ?? "").toContain("retained.ics"),
+    );
     setField(dialog, "From", "2026-01-01");
     setField(dialog, "Through", "2026-12-31");
     await syncFrom(w, dialog);
@@ -1162,7 +1172,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
       const dialog = await openRow(w, PENDING_ROW);
       expect(facts.held()).toBeGreaterThan(0);
       // Waiting: the person's input is there, the source is not shown, and nothing can be saved.
-      expect(shownFile(dialog)).toContain("retained.ics");
+      expect(shownFile(dialog) ?? "").toContain("retained.ics");
       expect(field(dialog, "From").value).toBe("2026-01-01");
       expect(field(dialog, "Through").value).toBe("2026-12-31");
       expect(dialog.querySelector("[data-import-waiting]")?.textContent).toBe(
@@ -1186,7 +1196,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
       } else {
         expect(screen.queryByRole("dialog")).toBe(dialog);
         expect(dialog.querySelector("[data-import-waiting]")).toBeNull();
-        expect(shownFile(dialog)).toContain("retained.ics");
+        expect(shownFile(dialog) ?? "").toContain("retained.ics");
         expect(field(dialog, "Through").value).toBe("2026-12-31");
         expect(
           within(dialog).getByRole("button", { name: words.IMPORT }),
@@ -1231,7 +1241,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
         expect(field(again, "From").value).toBe(fresh.from);
         expect(field(again, "Through").value).toBe(fresh.through);
       } else {
-        expect(shownFile(again)).toContain("retained.ics");
+        expect(shownFile(again) ?? "").toContain("retained.ics");
         expect(field(again, "From").value).toBe("2026-01-01");
         expect(field(again, "Through").value).toBe("2026-12-31");
       }
@@ -1318,7 +1328,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
       expect(dialog.querySelector("[data-import-source]")?.textContent).toBe(
         "—",
       );
-      expect(shownFile(dialog)).toContain("retained.ics");
+      expect(shownFile(dialog) ?? "").toContain("retained.ics");
       expect(
         within(dialog).getByRole("button", { name: words.IMPORT }),
       ).toBeDisabled();
@@ -1436,7 +1446,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
           });
         }
         await waitFor(() =>
-          expect(shownFile(dialog)).toContain("retained.ics"),
+          expect(shownFile(dialog) ?? "").toContain("retained.ics"),
         );
         setField(dialog, "From", "2026-01-01");
         setField(dialog, "Through", "2026-12-31");
@@ -1461,7 +1471,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
         const again = await shownDialog();
         // The showing's read is held: nothing but the old publication, which agrees, is known.
         expect(facts.held()).toBeGreaterThan(0);
-        expect(shownFile(again)).toContain("retained.ics");
+        expect(shownFile(again) ?? "").toContain("retained.ics");
         expect(field(again, "From").value).toBe("2026-01-01");
         expect(field(again, "Through").value).toBe("2026-12-31");
         expect(again.querySelector("[data-import-waiting]")?.textContent).toBe(
@@ -1518,7 +1528,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
         let dialog = await openRow(w, PENDING_ROW);
         await choose(w, dialog, ICS);
         await waitFor(() =>
-          expect(shownFile(dialog)).toContain("retained.ics"),
+          expect(shownFile(dialog) ?? "").toContain("retained.ics"),
         );
         setField(dialog, "From", "2026-01-01");
         setField(dialog, "Through", "2026-12-31");
@@ -1633,7 +1643,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
             });
           }
           await waitFor(() =>
-            expect(shownFile(dialog)).toContain("retained.ics"),
+            expect(shownFile(dialog) ?? "").toContain("retained.ics"),
           );
           setField(dialog, "From", "2026-01-01");
           setField(dialog, "Through", "2026-12-31");
@@ -1674,7 +1684,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
           expect(screen.queryByRole("dialog")).toBe(dialog);
           if (order === "after") await deliver(w, earlier);
           expect(screen.queryByRole("dialog")).toBe(dialog);
-          expect(shownFile(dialog)).toContain("retained.ics");
+          expect(shownFile(dialog) ?? "").toContain("retained.ics");
           expect(field(dialog, "From").value).toBe("2026-01-01");
           expect(field(dialog, "Through").value).toBe("2026-12-31");
           expect(announced()).not.toBe(words.IMPORT_CLOSED_REFRESHING);
@@ -1741,7 +1751,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
             });
           }
           await waitFor(() =>
-            expect(shownFile(dialog)).toContain("retained.ics"),
+            expect(shownFile(dialog) ?? "").toContain("retained.ics"),
           );
           setField(dialog, "From", "2026-01-01");
           setField(dialog, "Through", "2026-12-31");
@@ -1783,7 +1793,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
             expect(spy).not.toHaveBeenCalled();
             expect(importDrafts(w)).toHaveLength(0);
             expect(screen.queryByRole("dialog")).toBe(dialog);
-            expect(shownFile(dialog)).toContain("retained.ics");
+            expect(shownFile(dialog) ?? "").toContain("retained.ics");
             expect(field(dialog, "From").value).toBe("2026-01-01");
             await facts.release();
           }
@@ -1940,7 +1950,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
           const dialog = await openRow(w, PENDING_ROW);
           await choose(w, dialog, ICS);
           await waitFor(() =>
-            expect(shownFile(dialog)).toContain("retained.ics"),
+            expect(shownFile(dialog) ?? "").toContain("retained.ics"),
           );
           setField(dialog, "From", "2026-01-01");
           setField(dialog, "Through", "2026-12-31");
@@ -1975,7 +1985,7 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
           // Only that read went: every live reading is still held, so nothing was published and nothing else rendered the dialog.
           expect(reads.live().length).toBeGreaterThan(0);
           expect(w.env.cacheLifetime.get()?.invalidations ?? null).toBeNull();
-          expect(shownFile(dialog)).toContain("retained.ics");
+          expect(shownFile(dialog) ?? "").toContain("retained.ics");
           expect(field(dialog, "From").value).toBe("2026-01-01");
           expect(field(dialog, "Through").value).toBe("2026-12-31");
           expect(spy).not.toHaveBeenCalled();
