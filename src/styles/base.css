@@ -119,6 +119,14 @@
 /* ---------- Entrances. Never the opacity of content: a fading element reads to a contrast check (and briefly to the eye) as
    lower-contrast text. Content rises a few pixels, and a same-coloured veil over it clears instead (`::after`, which no
    accessibility tree or hit test sees). Nothing an entrance does changes a control's measured size. ---------- */
+@keyframes atlas-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
 @keyframes atlas-rise {
   from {
     transform: translateY(8px);
@@ -148,6 +156,30 @@
     pointer-events: none;
     background: var(--background);
     animation: atlas-veil 280ms ease-out both;
+  }
+  /* A bar that sticks (the phone's compact header): it keeps its own placement and rises in under a veil of the page's colour. */
+  .atlas-bar {
+    animation: atlas-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .atlas-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background: var(--background);
+    animation: atlas-veil 200ms ease-out both;
+  }
+  /* A loading placeholder shimmers: a soft band sweeps across it (the pulse under reduced motion stays a steady block). */
+  .atlas-shimmer {
+    background: linear-gradient(
+      100deg,
+      var(--muted) 20%,
+      color-mix(in srgb, var(--muted) 70%, var(--foreground) 30%) 50%,
+      var(--muted) 80%
+    );
+    background-size: 220% 100%;
+    animation: atlas-shimmer 1.6s ease-in-out infinite;
   }
   /* A popover under the cell that opened it: it keeps its own placement (absolute) and rises in under a veil of its own colour. */
   .atlas-popover {
@@ -243,16 +275,18 @@
     animation: atlas-veil 240ms ease-out both;
   }
   /* Press feedback on pills, buttons and ticks: a touch smaller while held (no layout changes). */
+  /* A press darkens the control a touch and lets it go (never a transform: a pressed control keeps its exact box, so what the
+     pointer is over never moves under it, review 7 finding 3). */
   .atlas-press {
     transition:
-      transform 120ms ease,
+      filter 120ms ease,
       background-color 140ms ease,
       border-color 140ms ease,
       color 140ms ease,
       box-shadow 140ms ease;
   }
   .atlas-press:active:not(:disabled) {
-    transform: scale(0.97);
+    filter: brightness(0.88) saturate(1.08);
   }
 }
 @keyframes atlas-pop {

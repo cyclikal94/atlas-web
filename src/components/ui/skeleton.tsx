@@ -7,7 +7,7 @@ export function Skeleton({ className, ...props }: ComponentProps<"span">) {
     <span
       data-slot="skeleton"
       aria-hidden="true"
-      className={cn("block animate-pulse rounded-md bg-muted", className)}
+      className={cn("atlas-shimmer block rounded-md bg-muted", className)}
       {...props}
     />
   );

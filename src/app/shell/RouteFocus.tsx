@@ -50,8 +50,16 @@ export function RouteFocus() {
             frame = requestAnimationFrame(land);
             return;
           }
+          // <main> stands in, and the heading takes over when a slower lazy screen draws it (within about two seconds), as long as
+          // focus has not moved on from <main> meanwhile.
+          if (document.activeElement !== main) {
+            main?.focus();
+            claimed = false;
+          }
+          if (waited < 120) frame = requestAnimationFrame(land);
+          return;
         }
-        (heading ?? main)?.focus();
+        heading.focus();
       };
       frame = requestAnimationFrame(land);
     });

@@ -112,6 +112,37 @@ const SCROLL_SETTLE_MS = 900;
 const SCROLL_GAP = 6;
 /** The People view's lane column. */
 const LANE_WIDTH = 168;
+/** The glide's length: a short way takes less time, a long one at most this. */
+const GLIDE_MS = 520;
+
+let gliding = 0;
+/**
+ * A scroll of the page's own to `top` (the Final design's motion): an ease-out glide driven by frames, so it settles rather than
+ * stops, and a later glide takes over from where the last one is. Reduced motion jumps.
+ */
+export function glide(top: number): void {
+  const from = window.scrollY;
+  const distance = top - from;
+  if (Math.abs(distance) < 2) {
+    window.scrollTo({ top });
+    return;
+  }
+  const length = Math.min(
+    GLIDE_MS,
+    240 + Math.min(1, Math.abs(distance) / 1600) * (GLIDE_MS - 240),
+  );
+  const started = performance.now();
+  const run = ++gliding;
+  const step = (now: number) => {
+    if (run !== gliding) return;
+    const t = Math.min(1, (now - started) / length);
+    // ease-out quint
+    const eased = 1 - (1 - t) ** 5;
+    window.scrollTo({ top: from + distance * eased });
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 
 interface Lane {
   id: string;
@@ -350,7 +381,7 @@ export function CalendarPage({
         window.scrollTo({
           top: target - Math.sign(distance) * window.innerHeight * 1.5,
         });
-      window.scrollTo({ top: target, behavior: "smooth" });
+      glide(target);
       return true;
     },
     [root, sticky],

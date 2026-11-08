@@ -192,6 +192,22 @@ export function TodayPage({
   const [root, setRoot] = useState<HTMLElement | null>(null);
   const [bar, setBar] = useState<HTMLElement | null>(null);
   const mode = useLayoutMode();
+  // The phone's compact header (the Final design, phase 13): once the big header has scrolled away, a slim bar with the date and
+  // the count sticks at the top; from the tablet up the big header itself stays.
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    if (mode !== "mobile" || bar === null) {
+      setCompact(false);
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      ([entry]) => setCompact(entry ? !entry.isIntersecting : false),
+      { threshold: 0 },
+    );
+    io.observe(bar);
+    return () => io.disconnect();
+  }, [mode, bar]);
   const [zoneOpen, setZoneOpen] = useState(false);
   const zoneRowId = useId();
   const current = useCurrentSection(root, bar);
@@ -571,6 +587,26 @@ export function TodayPage({
           </div>
         </div>
       </div>
+      {compact ? (
+        <div
+          className="atlas-bar sticky top-[var(--shell-inset-top,0px)] z-20 -mx-4 flex items-center gap-3 border-b border-border/70 bg-background/92 px-4 py-2 backdrop-blur"
+          data-today-compact=""
+        >
+          <span className="min-w-0 truncate text-[15px] font-semibold text-foreground">
+            {titleText}
+          </span>
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            {current !== null && current.section === "upcoming"
+              ? (current.summary ?? "")
+              : copy.SUMMARY(
+                  counts.done,
+                  counts.total,
+                  counts.toDo,
+                  counts.notKnown,
+                )}
+          </span>
+        </div>
+      ) : null}
       <div className="flex flex-col gap-4 py-4">
         {/* WEB-10c: the tasks Today's current answer lists in `pending_tasks` are brought up to date automatically (D-10c-5). */}
         <CatchUpBanner pendingTasks={view.pendingTasks} />

@@ -207,11 +207,13 @@ export const SUMMARY_LINE = {
 export const DURATION = (seconds: string): string => {
   const n = Number(seconds);
   if (!Number.isFinite(n)) return `${seconds} s`;
+  if (n === 0) return "0 min";
+  if (n < 60) return `${Math.round(n)} s`;
   const h = Math.floor(n / 3600);
   const m = Math.round((n % 3600) / 60);
+  if (m === 60) return `${h + 1} h`;
   if (h > 0) return m > 0 ? `${h} h ${m} min` : `${h} h`;
-  if (m > 0) return `${m} min`;
-  return `${Math.round(n)} s`;
+  return `${m} min`;
 };
 /** The goal as one short phrase for the facts strip; a goal in seconds (a timer) reads as a duration. */
 export const GOAL_FACT = (goal: Goal): string => {

@@ -211,8 +211,12 @@ export function RailFold({
   onToggle(): void;
 }) {
   return (
-    <div className={cn("relative flex h-14 items-center gap-3", RAIL_INSET)}>
-      <RailLine dotted />
+    <div
+      className={cn("relative flex h-14 items-center gap-3", RAIL_INSET)}
+      data-fold-expanded={expanded ? "" : undefined}
+    >
+      {/* The rail "continuing" (the Final design's motion): dotted while the days ahead are folded, solid once they are revealed. */}
+      <RailLine dotted={!expanded} />
       <button
         type="button"
         aria-expanded={expanded}
@@ -232,7 +236,10 @@ export function RailFold({
       </button>
       <span
         aria-hidden="true"
-        className="h-0 flex-1 border-t border-dashed border-border"
+        className={cn(
+          "atlas-transition h-0 flex-1 border-t border-dashed border-border",
+          expanded ? "opacity-0" : "opacity-100",
+        )}
       />
     </div>
   );

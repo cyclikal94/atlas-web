@@ -126,6 +126,9 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     else finished them (the names live in streams this device may not hold, so the line says "done by someone else"). On the phone the
     order is a row of bars at the top, the four acts sit at the bottom without key caps, and a timed task shows a ring
     (`data-focus-ring`, the share in percent) of its time today against its goal ("23 min of 20 min today").
+  - **The phone's compact header (phase 13, 8 November 2026).** On the phone Today's big header scrolls with the page; once it has
+    scrolled away a slim bar (`data-today-compact`: the date, or the block under it, and the count) sticks at the top. From the tablet
+    up the big header itself stays. The fold's rail line is dotted while the days ahead are folded and solid once revealed.
   - **Timers (phase 12, 8 November 2026, "FD_Timers").** `/tasks/timers` (`timers/TimersPage.tsx`) keeps its rows ("Running now" with
     Stop and Discard, "Earlier") and gains the window pills (Show: This week / This month / All, `windowStart`: Monday of this week,
     the first of the month, or everything; a session counts by when it ended), the summary's total ("1 running · 50 min this week")

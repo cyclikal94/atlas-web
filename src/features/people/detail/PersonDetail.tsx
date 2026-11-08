@@ -822,7 +822,16 @@ function FieldRow({
             </span>
           ) : null}
           {reach !== null ? (
-            <span className="text-xs text-muted-foreground" data-field-reach="">
+            // The Final design: a grey note only where the audience differs from "Only you"; the default's reach is said to screen
+            // readers alone.
+            <span
+              className={
+                audience === copy.ONLY_YOU
+                  ? "sr-only"
+                  : "text-xs text-muted-foreground"
+              }
+              data-field-reach=""
+            >
               {reach}
               {summary?.audience.disclosure === "partial"
                 ? ` ${copy.FIELD_AUDIENCE_PARTIAL}`

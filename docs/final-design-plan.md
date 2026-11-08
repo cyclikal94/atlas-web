@@ -167,10 +167,16 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   default as the fact, leading to the editor on that kind), the intro prose gone. Not done: the phone ring's Pause / Done for today /
   Discard (a running timer's state lives in the task's timer block; the ring shows the day's recorded time), names in "Meanwhile"
   (the others' streams), the Sharing page folded into People (kept as a page).
-- **Phase 13 — Motion and feel (first pass done, pulled forward).** On the stylesheet's veiled entrances and stagger: a tick pops
+- **Phase 13 — Motion and feel (second pass done, 8 November 2026).** On the stylesheet's veiled entrances and stagger: a tick pops
   when it completes; the day's title, the calendar's month and Focus's thing swap in with a rise; the side peek slides in from its
   edge and the split pane rises; the days ahead rise in with their rows one after another; pills, buttons and ticks shrink a touch
-  while pressed. All under reduced-motion guards. Still to come: the fold's own reveal choreography, the calendar's glide easing, the
-  rail's "continuing" line, skeleton shimmer, and the full screen-by-screen Safari pass against all 24 frames.
+  while pressed (a darkening, never a transform: a pressed control keeps its exact box); the calendar's own scrolls are an eased glide driven by frames (`glide`, ease-out, settling rather than stopping); the
+  fold's rail line continues (dotted while the days ahead are folded, solid once revealed, the dashed separator clearing); loading
+  placeholders shimmer; the phone's Today has a compact bar (the date and the count) that sticks once the big header has scrolled
+  away. All under reduced-motion guards. The screen-by-screen Safari pass of 8 November 2026 (every screen at 1440 and 390) found
+  and fixed: a timer's amounts in seconds on the day's rows (now durations), the People row's three default facts (the defaults are
+  for screen readers alone; the eye gets what differs), a person's "Nobody else can see it." under every field (said only where the
+  audience differs), and a person opened from the list leaving focus on <main> (the heading now takes over when the lazy screen draws it). Left as they are: the day's time-zone select (a contract), the Archived checkbox on Lists and Tasks (a
+  contract), the frames' people and birthdays (no data).
 
 Each phase: typecheck, lint, the unit suite, the e2e groups, the budgets, docs, and the Safari capture before it is reported.

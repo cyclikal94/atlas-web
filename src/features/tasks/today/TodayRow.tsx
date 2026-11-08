@@ -282,7 +282,9 @@ export function TodayRow({
                   ? copy.PARTICIPATION.personal
                   : `${copy.PARTICIPATION[participation]} · ${whoLabel(row, me)}`,
                 goal.kind === "numeric" && summary !== null
-                  ? `${summary.amount ?? "0"}${goal.minimum !== null ? ` / ${goal.minimum}` : ""} ${goal.unit}`
+                  ? goal.unit === "seconds"
+                    ? `${copy.DURATION(summary.amount ?? "0")}${goal.minimum !== null ? ` / ${copy.DURATION(goal.minimum)}` : ""}`
+                    : `${summary.amount ?? "0"}${goal.minimum !== null ? ` / ${goal.minimum}` : ""} ${goal.unit}`
                   : null,
                 from,
               ]

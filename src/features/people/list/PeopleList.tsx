@@ -1000,10 +1000,19 @@ function PersonRow({
         </span>
         {attribution !== null || summary !== null || person.archived ? (
           <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs leading-5 text-muted-foreground">
+            {/* The Final design (phase 13): the defaults ("Added by you", "Visible to: Only you") are said to screen readers alone;
+                what the eye gets is the fact that differs. */}
             {attribution !== null ? (
-              <span data-person-attribution="">{attribution}</span>
+              <span
+                data-person-attribution=""
+                className={attribution === copy.ADDED_BY_YOU ? "sr-only" : ""}
+              >
+                {attribution}
+              </span>
             ) : null}
-            {attribution !== null && summary !== null ? (
+            {attribution !== null &&
+            attribution !== copy.ADDED_BY_YOU &&
+            summary !== null ? (
               <span aria-hidden="true">·</span>
             ) : null}
             {summary !== null ? (
@@ -1014,8 +1023,17 @@ function PersonRow({
             ) : null}
             {summary !== null ? (
               <>
-                <span aria-hidden="true">·</span>
-                <span data-person-audience={summary.audience.disclosure}>
+                {audienceText(summary.audience) === copy.ONLY_YOU ? null : (
+                  <span aria-hidden="true">·</span>
+                )}
+                <span
+                  data-person-audience={summary.audience.disclosure}
+                  className={
+                    audienceText(summary.audience) === copy.ONLY_YOU
+                      ? "sr-only"
+                      : ""
+                  }
+                >
                   {copy.VISIBLE_TO(audienceText(summary.audience))}
                 </span>
               </>
