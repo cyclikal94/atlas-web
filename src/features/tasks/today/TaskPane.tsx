@@ -59,7 +59,11 @@ export function TaskPane({
   }, [wrapper, onClose, onStep]);
   if (wrapper === "split")
     return (
-      <section className="min-w-0" data-task-pane="split" aria-label={label}>
+      <section
+        className="atlas-enter min-w-0"
+        data-task-pane="split"
+        aria-label={label}
+      >
         {children}
       </section>
     );
@@ -72,7 +76,7 @@ export function TaskPane({
         tabIndex={-1}
         data-task-pane="peek"
         className={cn(
-          "fixed inset-y-3 right-3 z-40 flex w-[620px] max-w-[calc(100vw-96px)] flex-col overflow-y-auto rounded-[14px] border border-border bg-card p-6 shadow-[0_24px_60px_-20px_rgba(0,0,0,.85)]",
+          "atlas-peek fixed inset-y-3 right-3 z-40 flex w-[620px] max-w-[calc(100vw-96px)] flex-col overflow-y-auto rounded-[14px] border border-border bg-card p-6 shadow-[0_24px_60px_-20px_rgba(0,0,0,.85)]",
         )}
       >
         {children}

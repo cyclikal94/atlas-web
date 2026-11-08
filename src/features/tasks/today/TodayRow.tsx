@@ -162,15 +162,16 @@ export function TodayRow({
             )
           : setLogging((value) => !value)
       }
-      className="flex size-11 flex-none items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-50"
+      className="atlas-press flex size-11 flex-none items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-50"
     >
       {goal.kind === "checkbox" ? (
         <TickGlyph done={done} />
       ) : (
         <span
           aria-hidden="true"
+          data-done={done ? "true" : "false"}
           className={cn(
-            "atlas-transition flex size-7 items-center justify-center rounded-full border-2",
+            "atlas-transition atlas-pop flex size-7 items-center justify-center rounded-full border-2",
             done
               ? "border-success bg-success text-success-foreground"
               : logging

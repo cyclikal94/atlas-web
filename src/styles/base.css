@@ -194,6 +194,71 @@
   .atlas-dialog > :not(header) {
     animation: atlas-rise 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
+  /* A title that changes (the day's header naming the block under it, the calendar's month taking over): the new words rise in
+     under a clearing veil. Keyed on the words, so only a change re-runs it. */
+  .atlas-swap {
+    position: relative;
+    display: inline-block;
+    animation: atlas-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .atlas-swap::after {
+    content: "";
+    position: absolute;
+    inset: -2px -4px;
+    z-index: 1;
+    pointer-events: none;
+    background: var(--background);
+    animation: atlas-veil 200ms ease-out both;
+  }
+  /* A tick that completes: the glyph pops once (it sits inside a 44px control, whose box never changes). */
+  .atlas-pop[data-done="true"] {
+    animation: atlas-pop 380ms cubic-bezier(0.2, 0.9, 0.3, 1.25) both;
+  }
+  /* The side peek slides in from its edge under a clearing veil; the split pane rises like a page. */
+  .atlas-peek {
+    animation: atlas-slide-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .atlas-peek::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    border-radius: inherit;
+    background: var(--card);
+    animation: atlas-veil 240ms ease-out both;
+  }
+  /* Press feedback on pills, buttons and ticks: a touch smaller while held (no layout changes). */
+  .atlas-press {
+    transition:
+      transform 120ms ease,
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease,
+      box-shadow 140ms ease;
+  }
+  .atlas-press:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+}
+@keyframes atlas-pop {
+  0% {
+    transform: scale(0.8);
+  }
+  55% {
+    transform: scale(1.18);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes atlas-slide-in {
+  from {
+    transform: translateX(28px);
+  }
+  to {
+    transform: none;
+  }
 }
 
 /* Forced colours: keep a visible control edge and focus ring using system colours. */

@@ -229,7 +229,7 @@ export function Upcoming({
           }
           sub={block.sub}
         />
-        <List className="flex flex-col">
+        <List className="atlas-stagger flex flex-col">
           {items.map((row) => (
             <TodayRow
               key={row.id}
@@ -276,7 +276,7 @@ export function Upcoming({
       id={id}
       data-upcoming=""
       tabIndex={-1}
-      className="flex flex-col outline-none"
+      className="atlas-enter flex flex-col outline-none"
     >
       {view.loading ? null : (
         <Ahead targets={view.ahead} horizonLabel={dayLabel(horizon)} />

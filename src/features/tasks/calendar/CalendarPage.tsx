@@ -486,7 +486,11 @@ export function CalendarPage({
                 onClick={() => setPicking((open) => !open)}
                 className="atlas-transition -ml-1 flex max-w-full items-center gap-2 rounded-md px-1 text-left text-[30px] font-semibold leading-[1.05] tracking-[-0.035em] text-foreground hover:text-primary tablet:text-[40px]"
               >
-                <span className="whitespace-nowrap" data-calendar-title="">
+                <span
+                  key={title}
+                  className="atlas-swap whitespace-nowrap"
+                  data-calendar-title=""
+                >
                   {title}
                 </span>
                 <ChevronDown

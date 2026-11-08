@@ -261,7 +261,10 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
           )}
           data-focus-title=""
         >
-          {current.title ?? copy.UNTITLED}
+          {/* Keyed on the thing: the next one swaps in with a little motion. */}
+          <span key={current.id} className="atlas-swap">
+            {current.title ?? copy.UNTITLED}
+          </span>
         </p>
         <p className="text-[15px] text-muted-foreground tablet:text-[17px]">
           {line}

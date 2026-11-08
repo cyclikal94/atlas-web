@@ -149,7 +149,10 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   buttons with popovers; "Add" / "Add and another"; drafts kept; no Sync buttons on forms or dialogs.
 - **Phase 12 — Timers, Focus, Sharing.** The goals aside; Focus's Later / Timer / key caps / "Meanwhile" and the phone ring;
   Sharing on the row design or folded into People and "Seen by".
-- **Phase 13 — Motion and feel.** The motion system across every surface, then a full screen-by-screen Safari pass at both
-  widths against all 24 frames.
+- **Phase 13 — Motion and feel (first pass done, pulled forward).** On the stylesheet's veiled entrances and stagger: a tick pops
+  when it completes; the day's title, the calendar's month and Focus's thing swap in with a rise; the side peek slides in from its
+  edge and the split pane rises; the days ahead rise in with their rows one after another; pills, buttons and ticks shrink a touch
+  while pressed. All under reduced-motion guards. Still to come: the fold's own reveal choreography, the calendar's glide easing, the
+  rail's "continuing" line, skeleton shimmer, and the full screen-by-screen Safari pass against all 24 frames.
 
 Each phase: typecheck, lint, the unit suite, the e2e groups, the budgets, docs, and the Safari capture before it is reported.

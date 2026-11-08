@@ -319,6 +319,12 @@ export function TodayPage({
     };
   }, [ahead]);
   usePullToReveal(!ahead && !view.loading, reveal);
+  const titleText =
+    current !== null && current.section === "upcoming"
+      ? current.label
+      : mode === "mobile"
+        ? dayLabel(day)
+        : longDayLabel(day);
   // The navigation follows the reader's scroll (Today and Upcoming are one page): the section under the sticky bar names the address's
   // hash; above every heading it is the day's. Only the reader's scrolling: the first measure (a landing, a layout engine without
   // geometry) and the page's own scrolls move nothing.
@@ -406,11 +412,10 @@ export function TodayPage({
           }
           title={
             <TitleText data-today-date="" data-current-section="">
-              {current !== null && current.section === "upcoming"
-                ? current.label
-                : mode === "mobile"
-                  ? dayLabel(day)
-                  : longDayLabel(day)}
+              {/* Keyed on the words: a new block under the header swaps in with a little motion. */}
+              <span key={titleText} className="atlas-swap">
+                {titleText}
+              </span>
             </TitleText>
           }
           summary={

@@ -63,7 +63,7 @@ export function Chip({
 /** The classes of a pressed pill (a choice among a few: "Skip", "Later", "This week"), 34px and rounded, lit when pressed. */
 export const pillClass = (pressed: boolean) =>
   cn(
-    "atlas-transition inline-flex h-[34px] items-center justify-center gap-1.5 rounded-full border px-3 text-[13px]",
+    "atlas-press inline-flex h-[34px] items-center justify-center gap-1.5 rounded-full border px-3 text-[13px]",
     pressed
       ? "border-primary bg-accent font-semibold text-accent-foreground"
       : "border-border bg-background text-foreground hover:bg-accent hover:text-accent-foreground",

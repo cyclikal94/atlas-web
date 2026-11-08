@@ -289,8 +289,9 @@ export function TickGlyph({ done }: { done: boolean }) {
   return (
     <span
       aria-hidden="true"
+      data-done={done ? "true" : "false"}
       className={cn(
-        "atlas-transition flex size-7 items-center justify-center rounded-full border-2",
+        "atlas-transition atlas-pop flex size-7 items-center justify-center rounded-full border-2",
         done
           ? "border-success bg-success text-success-foreground"
           : "border-input bg-transparent group-hover:border-foreground",

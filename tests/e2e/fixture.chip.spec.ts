@@ -174,11 +174,12 @@ test.describe("sync/offline status chrome (B14, fixture)", () => {
 test.describe("the in-dialog sync control (B14, fixture)", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("is inside the Appearance dialog, reachable in the focus trap, and activating it closes the dialog then opens the destination", async ({
+  test("is inside the Signing in dialog, reachable in the focus trap, and activating it closes the dialog then opens the destination", async ({
     page,
   }) => {
-    await page.goto("/settings/appearance?pending=2");
-    const dialog = page.getByRole("dialog", { name: "Appearance" });
+    // Signing in is the registry's dialog section (Appearance is a page since 8 November 2026).
+    await page.goto("/settings/signing-in?pending=2");
+    const dialog = page.getByRole("dialog", { name: "Signing in" });
     const chip = dialog.getByRole("button", { name: /Open sync queue/ });
     await expect(chip).toBeVisible();
     let reached = false;

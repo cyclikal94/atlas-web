@@ -259,3 +259,8 @@ points into the old account; any account name spoken by the gate or a neutral st
 
 | Date | Tester | Device / OS version | Browser / version (installed app?) | Screen reader / version | Branch (i/ii/iii, open modal?) | t3–t4 result | t5 result | Notes / recording link |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+- **Motion (phase 13, 8 November 2026).** Every entrance is a rise under a clearing veil of the surface's own colour, never a fade of
+  content (`atlas-enter`, `atlas-stagger`, `atlas-dialog`, `atlas-swap` for a title whose words change, `atlas-peek` for the side peek
+  sliding in from its edge); a tick that completes pops once inside its 44 px control (`atlas-pop`), and pills, buttons and ticks are a
+  touch smaller while pressed (`atlas-press`). All of it lives under `prefers-reduced-motion: no-preference`; with reduced motion
+  nothing moves, pops or transitions, and no control's measured size changes either way.
