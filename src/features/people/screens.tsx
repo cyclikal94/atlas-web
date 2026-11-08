@@ -1,7 +1,15 @@
-import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
+import {
+  Outlet,
+  useMatches,
+  useNavigate,
+  useRouterState,
+} from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { useLayoutMode } from "../../app/shell/layout-mode";
+import { effectiveWrapper, useTaskWrapper } from "../../app/shell/preferences";
 import { Eyebrow, PageHeader } from "../../components/ui/page-header";
 import { PageHeading } from "../../components/ui/page-heading";
+import { TaskPane } from "../tasks/today/TaskPane";
 import * as copy from "./copy";
 import { PersonDetail } from "./detail/PersonDetail";
 import { DuplicatesView } from "./duplicates/DuplicatesView";
@@ -55,14 +63,66 @@ function PeopleLayout() {
     )
   )
     return <Outlet />;
-  // The Final design: the people take the page, and a person is a page of their own at every width (the detail draws its breadcrumb;
-  // on the phone the shell's header carries the way back).
+  // The Final design: the people take the page, and a person opens in the chosen container ("How things open", the frame: "Clicking
+  // a row opens the person in the same wrapper as tasks"): beside the people, over them, or as a page of their own at every width (the
+  // detail draws its breadcrumb; on the phone the shell's header carries the way back).
   if (personId !== null) return <Outlet />;
-  return (
-    <div className="flex flex-col gap-5">
+  return <PeopleIndex />;
+}
+
+function PeopleIndex() {
+  const navigate = useNavigate();
+  const opened = useRouterState({
+    select: (state) =>
+      (state.location.search as { person?: string }).person ?? null,
+  });
+  const wrapper = effectiveWrapper(useTaskWrapper(), useLayoutMode());
+  const openPerson =
+    wrapper === "page"
+      ? undefined
+      : (personId: string) => ({
+          to: "/people" as const,
+          search: { person: personId },
+        });
+  const close = () =>
+    void navigate({ to: "/people", search: {}, replace: true });
+  const list = (
+    <div className="flex min-w-0 flex-col gap-5">
       <ListHeader />
-      <PeopleList selectedId={null} />
+      <PeopleList
+        selectedId={wrapper === "page" ? null : opened}
+        {...(openPerson ? { openPerson } : {})}
+      />
     </div>
+  );
+  if (opened === null || wrapper === "page") return list;
+  const person = (
+    <PersonDetail
+      key={opened}
+      personId={opened}
+      asPage={false}
+      slots={peopleSlots}
+    />
+  );
+  if (wrapper === "split")
+    return (
+      <div
+        className="grid items-start gap-8 desktop:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]"
+        data-people-split=""
+      >
+        {list}
+        <TaskPane wrapper="split" label={copy.PERSON_PANE} onClose={close}>
+          {person}
+        </TaskPane>
+      </div>
+    );
+  return (
+    <>
+      {list}
+      <TaskPane wrapper={wrapper} label={copy.PERSON_PANE} onClose={close}>
+        {person}
+      </TaskPane>
+    </>
   );
 }
 

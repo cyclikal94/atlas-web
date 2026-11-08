@@ -104,7 +104,17 @@ const VIEWS: readonly { view: PeopleView; label: string }[] = [
 const normalise = (text: string) =>
   text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
 
-export function PeopleList({ selectedId }: { selectedId: string | null }) {
+export function PeopleList({
+  selectedId,
+  openPerson,
+}: {
+  selectedId: string | null;
+  /** Where a row leads when the person opens beside the people (Settings · Layout, "How things open"). */
+  openPerson?: (personId: string) => {
+    to: "/people";
+    search: { person: string };
+  };
+}) {
   const env = usePeopleEnv();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<PeopleView>("all");
@@ -196,6 +206,7 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
                 onRetry={retry}
                 query={query}
                 view={view}
+                {...(openPerson ? { openPerson } : {})}
                 starts={starts}
                 onStarts={setStarts}
                 selectedId={selectedId}
@@ -211,6 +222,7 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
                 query={query}
                 starts={starts}
                 onStarts={setStarts}
+                {...(openPerson ? { openPerson } : {})}
                 selectedId={selectedId}
               />
             )
@@ -234,10 +246,16 @@ function PeopleSteps({
   onStarts,
   selectedId,
   onNew,
+  openPerson,
 }: {
   env: PeopleEnv;
   changes: Change[];
   outstanding: ChainResult<DraftWithCommand>;
+  /** Where a row leads when the person opens beside the people (Settings · Layout, "How things open"). */
+  openPerson?: (personId: string) => {
+    to: "/people";
+    search: { person: string };
+  };
   onRetry(): void;
   query: string;
   view: "all" | "archived";
@@ -272,6 +290,7 @@ function PeopleSteps({
           env={env}
           step={step}
           start={start}
+          {...(openPerson ? { openPerson } : {})}
           archived={view === "archived"}
           shown={[
             ...step.rows.map((row) => foldOne(row, byId)),
@@ -383,12 +402,18 @@ function CachedRows({
   onNew,
   onPrevious,
   onNext,
+  openPerson,
 }: {
   env: PeopleEnv;
   step: ScanResult;
   start: string | null;
   archived: boolean;
   shown: ShownRow[];
+  /** Where a row leads when the person opens beside the people (Settings · Layout, "How things open"). */
+  openPerson?: (personId: string) => {
+    to: "/people";
+    search: { person: string };
+  };
   /** Whether a person (as shown, unsent changes folded) belongs to this view and search. */
   shows(row: CacheRow): boolean;
   outstanding: ChainResult<DraftWithCommand>;
@@ -551,6 +576,7 @@ function CachedRows({
             row.projected ? null : <FieldCount personId={row.row.id} />
           }
           selectedId={selectedId}
+          {...(openPerson ? { openPerson } : {})}
         />
       )}
       {partial && shown.length > 0 ? (
@@ -607,8 +633,15 @@ function ScopeSteps({
   starts,
   onStarts,
   selectedId,
+  openPerson,
 }: {
   env: PeopleEnv;
+  /** Where a row leads when the person opens beside the people (Settings · Layout, "How things open"). */
+  openPerson?: (personId: string) => {
+    to: "/people";
+    search: { person: string };
+  };
+
   scope: Exclude<SummaryScope, "all">;
   changes: Change[];
   outstanding: ChainResult<DraftWithCommand>;
@@ -707,6 +740,7 @@ function ScopeSteps({
                 </span>
               }
               selected={summary.id === selectedId}
+              {...(openPerson ? { open: openPerson } : {})}
             />
           ))}
         </List>
@@ -794,11 +828,17 @@ function GroupedRows({
   summaryOf,
   count,
   selectedId,
+  openPerson,
 }: {
   groups: RowGroup[];
   summaryOf: (row: ShownRow) => PersonSummary | null;
   count: (row: ShownRow) => ReactNode;
   selectedId: string | null;
+  /** Where a row leads when the person opens beside the people (Settings · Layout, "How things open"). */
+  openPerson?: (personId: string) => {
+    to: "/people";
+    search: { person: string };
+  };
 }) {
   const id = useId();
   return (
@@ -824,6 +864,7 @@ function GroupedRows({
                 summary={summaryOf(row)}
                 count={count(row)}
                 selected={row.row.id === selectedId}
+                {...(openPerson ? { open: openPerson } : {})}
               />
             ))}
           </List>
@@ -901,19 +942,22 @@ function PersonRow({
   summary,
   count,
   selected,
+  open,
 }: {
   row: ShownRow;
   summary: PersonSummary | null;
   count: ReactNode;
   selected: boolean;
+  open?: (personId: string) => { to: "/people"; search: { person: string } };
 }) {
   const person = row.row;
   const attribution = summary === null ? null : attributionText(summary);
   return (
     <li className="list-none">
       <ListRow
-        to="/people/$personId"
-        params={{ personId: person.id }}
+        {...(open
+          ? open(person.id)
+          : { to: "/people/$personId", params: { personId: person.id } })}
         current={selected}
         data-person-row={person.id}
         data-status={selected ? "active" : undefined}

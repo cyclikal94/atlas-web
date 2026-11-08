@@ -75,7 +75,14 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     (`AppShell`'s main: 36 px down, 40 px in from the tablet up; no page sets a narrower column except the row lists, 880 px). The streak
     page draws its figures as the same facts strip and its day-by-day strip in a grouped box; a list's tasks are rows on hairlines
     (`lists/ListDetail.tsx`, docs/lists.md).
-  - **How tasks open (Settings · Layout, 8 November 2026).** The task view is one component and each container is a layout around it
+  - **How things open (Settings · Layout; "How tasks open" until phase 8, 8 November 2026).** The one container setting reaches every
+    list page: a task from the day (`/today?task=&occurrence=`), from a list (`/tasks/lists/<id>?task=`) and from all the tasks
+    (`/tasks?task=`), a person from the people (`/people?person=`, the frame: "Clicking a row opens the person in the same wrapper
+    as tasks"), a list from the lists (`/tasks/lists?list=`), and a task being made; a page, a split pane (the default), a side peek
+    or an overlay, the phone always a page. The opened thing is drawn `embedded` (no breadcrumb, its name an h2 under the page's
+    own heading) inside `TaskPane`, and a row's link names the page's own address with the thing in its search, so Back closes it.
+    Settings' sections are all pages of their own (Appearance was a dialog); opening them in the container waits for the
+    registry to expose each section's screen.  The task view is one component and each container is a layout around it
     (`today/TaskPane.tsx`, `screens.tsx` `TodayScreen`): a page (`/tasks/<id>`), the right half of a **split pane** beside the day (the
     default), a **side peek** floating over the day (Escape closes; ↑ and ↓ move to the previous and next row of the day) or an **overlay**
     centred over it (the dialog pattern). The choice is kept on this device (`atlas.task-wrapper.v1`, `shell/preferences.ts`;

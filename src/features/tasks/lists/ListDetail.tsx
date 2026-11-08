@@ -62,10 +62,13 @@ import {
 export function ListDetail({
   listId,
   openTask,
+  embedded = false,
 }: {
   listId: string;
   /** Where a task row leads when the task opens beside the list (Settings · Layout). */
   openTask?: (taskId: string) => RowOpen;
+  /** Drawn beside or over the lists ("How things open"): no breadcrumb, and the name an h2 under the page's own heading. */
+  embedded?: boolean;
 }) {
   const env = useTasksEnv();
   const actions = useListActions();
@@ -144,15 +147,15 @@ export function ListDetail({
   };
 
   if (value === null) {
-    if (view.noDatabase) return absent();
+    if (view.noDatabase) return absent(null, embedded);
     if (view.error !== null)
       return (
-        <Frame state="error">
+        <Frame state="error" embedded={embedded}>
           <ReadNotice error={view.error} stale={false} retry={view.retry} />
         </Frame>
       );
     return (
-      <Frame state="loading">
+      <Frame state="loading" embedded={embedded}>
         <p aria-busy="true" className="text-sm text-muted-foreground">
           {DETAIL.loading}
         </p>
@@ -170,6 +173,7 @@ export function ListDetail({
           returnFocusRef={opener}
         />
       ) : null,
+      embedded,
     );
 
   const { row } = list;
@@ -234,6 +238,7 @@ export function ListDetail({
       state={listId}
       projected={list.projected}
       articleRef={article}
+      embedded={embedded}
       heading={row.label}
       mark={
         list.pending ? (
@@ -473,6 +478,7 @@ function Frame({
   mark = null,
   summary = null,
   controls = null,
+  embedded = false,
   children,
 }: {
   state: string;
@@ -482,6 +488,7 @@ function Frame({
   mark?: ReactNode;
   summary?: ReactNode;
   controls?: ReactNode;
+  embedded?: boolean;
   children: ReactNode;
 }) {
   const read = state !== "loading" && state !== "error" && state !== "absent";
@@ -492,14 +499,17 @@ function Frame({
       data-list-detail={state === "loading" ? undefined : state}
       data-list-loading={state === "loading" ? "" : undefined}
       data-list-projected={projected ? "" : undefined}
+      data-list-embedded={embedded ? "" : undefined}
     >
-      <Breadcrumb
-        items={[{ label: LISTS_TITLE, to: "/tasks/lists" }]}
-        current={read ? heading : LISTS_TITLE}
-      />
+      {embedded ? null : (
+        <Breadcrumb
+          items={[{ label: LISTS_TITLE, to: "/tasks/lists" }]}
+          current={read ? heading : LISTS_TITLE}
+        />
+      )}
       <PageHeader
         eyebrow={read ? <Eyebrow>{DETAIL.eyebrow}</Eyebrow> : undefined}
-        title={<PageHeading>{heading}</PageHeading>}
+        title={<PageHeading as={embedded ? "h2" : "h1"}>{heading}</PageHeading>}
         summary={
           summary || mark ? (
             <span
@@ -519,9 +529,9 @@ function Frame({
 }
 
 /** A plain element, not a component: the same `Frame` as the other states, so its heading is the same element. */
-function absent(dialog: ReactNode = null) {
+function absent(dialog: ReactNode = null, embedded = false) {
   return (
-    <Frame state="absent">
+    <Frame state="absent" embedded={embedded}>
       <p className="text-sm text-muted-foreground">{DETAIL.absent}</p>
       {dialog}
     </Frame>

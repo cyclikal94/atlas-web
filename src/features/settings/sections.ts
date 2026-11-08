@@ -60,7 +60,7 @@ const SECTIONS: readonly SettingsSection[] = [
     id: "layout",
     label: "Layout",
     description:
-      "How tasks open: a page, a split pane, a side peek or an overlay.",
+      "How things open: a page, a split pane, a side peek or an overlay.",
     route: "layout",
     order: 52,
     owner: "WEB-07",

@@ -12,7 +12,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import { mountTasks, seededTask, TODAY } from "../../support/tasks/world";
 
 /**
- * Settings · Layout, "How tasks open" (the Final design, 8 November 2026): the task view is one component and each container is a
+ * Settings · Layout, "How things open" (the Final design, 8 November 2026): the task view is one component and each container is a
  * layout around it. On the desktop the split pane keeps the day on the left; the side peek floats over it and the overlay is centred;
  * a page replaces it. The phone always opens a page, and the split pane falls back to a page below the desktop width.
  */
@@ -165,5 +165,43 @@ describe("Settings · Layout", () => {
     expect(readTaskWrapper()).toBe("peek");
     expect(localStorage.getItem(TASK_WRAPPER_STORAGE_KEY)).toBe("peek");
     expect(screen.getByText(LAYOUT_COPY.also[2].how)).toBeInTheDocument();
+  });
+});
+
+describe("how things open: all the tasks", () => {
+  test("with the split pane chosen, a row opens the task beside the list at /tasks?task=", async () => {
+    const task = await seededTask({ title: "Take the bins out" });
+    const t = await mountTasks({
+      path: "/tasks",
+      rows: task.rows,
+      env: { online: false },
+      wrapper: "split",
+    });
+    await t.until(
+      () =>
+        document.querySelector(`[data-task-link="${task.taskId}"]`) !== null,
+    );
+    const link = document.querySelector(
+      `[data-task-link="${task.taskId}"]`,
+    ) as HTMLElement;
+    expect(link.getAttribute("href")).toBe(`/tasks?task=${task.taskId}`);
+    fireEvent.click(link);
+    await t.until(
+      () => document.querySelector("[data-task-pane=split]") !== null,
+    );
+    expect(document.querySelector("[data-tasks-split]")).not.toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Tasks" }),
+    ).toBeInTheDocument();
+    const pane = document.querySelector(
+      "[data-task-pane=split]",
+    ) as HTMLElement;
+    await t.until(
+      () =>
+        within(pane).queryByRole("heading", {
+          level: 2,
+          name: "Take the bins out",
+        }) !== null,
+    );
   });
 });

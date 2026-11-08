@@ -313,8 +313,9 @@ test.describe("keyboard and focus (B8)", () => {
     for (const width of [320, 360, 390, 767]) {
       for (const state of states) {
         await setup(page, width, 844);
-        await page.goto(`/settings/appearance?${state}`);
-        const dialog = page.getByRole("dialog", { name: "Appearance" });
+        // Signing in is the registry's dialog section (Appearance is a page since 8 November 2026).
+        await page.goto(`/settings/signing-in?${state}`);
+        const dialog = page.getByRole("dialog", { name: "Signing in" });
         await expect(dialog).toBeVisible();
         const where = `${width}px, ${state}`;
         const close = await dialog
@@ -324,7 +325,7 @@ test.describe("keyboard and focus (B8)", () => {
           .getByRole("button", { name: /Open (sync queue|conflicts)/ })
           .boundingBox();
         const title = await dialog
-          .getByRole("heading", { name: "Appearance" })
+          .getByRole("heading", { name: "Signing in" })
           .boundingBox();
         const box = await dialog.boundingBox();
         if (!close || !chip || !title || !box)
@@ -393,9 +394,9 @@ test.describe("keyboard and focus (B8)", () => {
     page,
   }) => {
     await setup(page, 1440);
-    await page.goto("/settings/appearance");
+    await page.goto("/settings/signing-in");
     await expect(
-      page.getByRole("dialog", { name: "Appearance" }),
+      page.getByRole("dialog", { name: "Signing in" }),
     ).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Primary" })).toHaveCount(
       0,
@@ -494,7 +495,7 @@ test.describe("accessibility with real layout (A4)", () => {
     }
   }
 
-  test("the More sheet and the Appearance dialog have no axe violations, dark and light", async ({
+  test("the More sheet and the Signing in dialog have no axe violations, dark and light", async ({
     browser,
   }) => {
     for (const scheme of ["dark", "light"] as const) {
@@ -511,13 +512,13 @@ test.describe("accessibility with real layout (A4)", () => {
       await expect(page.getByRole("dialog", { name: "More" })).toBeVisible();
       expect(await runAxe(page), `More, ${scheme}`).toEqual([]);
       await page.screenshot({ path: evidencePath(`A4/more-${scheme}.png`) });
-      await page.goto("/settings/appearance?phase=synced&conflicts=1");
+      await page.goto("/settings/signing-in?phase=synced&conflicts=1");
       await expect(
-        page.getByRole("dialog", { name: "Appearance" }),
+        page.getByRole("dialog", { name: "Signing in" }),
       ).toBeVisible();
-      expect(await runAxe(page), `Appearance, ${scheme}`).toEqual([]);
+      expect(await runAxe(page), `Signing in, ${scheme}`).toEqual([]);
       await page.screenshot({
-        path: evidencePath(`A4/appearance-${scheme}.png`),
+        path: evidencePath(`A4/signing-in-${scheme}.png`),
       });
       await context.close();
     }

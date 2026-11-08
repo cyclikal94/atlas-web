@@ -134,15 +134,15 @@ describe("the Settings registry (F-REG)", () => {
     // never for a cold transform of the chunk (about 2 s on a cold cache, measured, against the query's 1 s).
     await import("../../../src/features/people/screens");
     // The calendar page's heading is the wireframe's ("Calendar sources"), under its "Settings · Calendars" eyebrow (WEB-13a).
-    // Settings · Layout's heading is the frame's ("How tasks open"), under its "Settings · Layout" eyebrow (the Final design).
+    // Settings · Layout's heading is the frame's ("How things open"), under its "Settings · Layout" eyebrow (the Final design).
     const headings: Record<string, string> = {
       calendars: "Calendar sources",
-      layout: "How tasks open",
+      layout: "How things open",
     };
     for (const section of settingsSections()) {
       cleanup();
       await mount(`/settings/${section.route}`);
-      if (section.id === "appearance" || section.id === "signing-in")
+      if (section.id === "signing-in")
         expect(
           await screen.findByRole("dialog", { name: section.label }),
         ).toBeInTheDocument();
@@ -161,8 +161,9 @@ describe("the Settings registry (F-REG)", () => {
     await screen.findByRole("heading", { level: 1, name: "Your data" });
     expect(screen.queryByRole("link", { name: "Appearance" })).toBeNull();
     cleanup();
-    await mount("/settings/appearance");
-    await screen.findByRole("dialog", { name: "Appearance" });
+    // Signing in is the registry's dialog section (Appearance is a page since 8 November 2026).
+    await mount("/settings/signing-in");
+    await screen.findByRole("dialog", { name: "Signing in" });
     expect(document.querySelectorAll("[data-settings-link]")).toHaveLength(
       settingsSections().length,
     );

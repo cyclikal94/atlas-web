@@ -34,6 +34,15 @@ export function RouteFocus() {
       const land = () => {
         if (claimed) return;
         const main = document.getElementById("main");
+        // A page that has already placed focus inside itself (Appearance on its selected choice) keeps it: nothing to land.
+        const active = document.activeElement;
+        if (
+          active !== null &&
+          active !== document.body &&
+          active !== main &&
+          main?.contains(active)
+        )
+          return;
         const heading = main?.querySelector<HTMLElement>("[data-page-heading]");
         if (heading === null || heading === undefined) {
           waited += 1;

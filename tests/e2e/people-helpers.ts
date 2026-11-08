@@ -561,6 +561,14 @@ export async function bootAt(
   route: string,
   query = "",
 ): Promise<Page> {
+  // These cases open a person as a page (Settings · Layout, "How things open"); the containers have their own cases.
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("atlas.task-wrapper.v1", "page");
+    } catch {
+      // No storage: the default container applies.
+    }
+  });
   const page = await context.newPage();
   await page.goto(`/__session?route=${encodeURIComponent(route)}${query}`);
   await page.waitForFunction(

@@ -133,8 +133,10 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   the household's chips and Everyone, narrowing every view to one person; the People lanes view (`view=people`) with the "Anyone ·
   whose turn" lane, "Others" and the weekly balance, a lane at a time on the phone. Not done, for want of data: the Task /
   Calendar event / Birthday chips (no events, no birthday field kind), "Sources · n / Import a file", dragging between lanes.
-- **Phase 8 — One container everywhere.** "How things open" applied to people rows, All-tasks rows, list rows and settings
-  sections; the person and the list drawn as `embedded` inside TaskPane; Settings' Appearance as a page like the rest.
+- **Phase 8 — One container everywhere (done, bar the settings).** "How things open" applied to people rows (`/people?person=`),
+  All-tasks rows (`/tasks?task=`) and list rows (`/tasks/lists?list=`); the person and the list drawn `embedded` inside TaskPane;
+  Settings' Appearance a page like the rest, so every section opens the same way. Settings sections inside the container wait for
+  the registry to expose each section's screen (today it builds routes only).
 - **Phase 9 — People and Lists on the frames.** Grouped rows with one fact and badges; the person's facts strip and fields box;
   lists' groups and sharing facts; the list's "Add" pill, who-added avatars, "Ticked · n", "Clear ticked".
 - **Phase 10 — Task editors as popovers and dialogs.** Short choices under the pressed cell; consequential editors as the

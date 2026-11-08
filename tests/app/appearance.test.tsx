@@ -52,18 +52,17 @@ async function mount(path: string) {
   return router;
 }
 
+// Appearance is a page of its own (8 November 2026: every Settings section opens the same way), not a dialog over the home.
 async function open(path = "/settings/appearance") {
   const router = await mount(path);
-  return {
-    router,
-    dialog: await screen.findByRole("dialog", { name: "Appearance" }),
-  };
+  await screen.findByRole("heading", { level: 1, name: "Appearance" });
+  return { router, page: screen.getByRole("main") };
 }
 
 const radio = (name: string) => screen.getByRole("radio", { name });
 
 describe("WF-SETTINGS-05 Appearance", () => {
-  test("opens over Settings with Match system selected by default", async () => {
+  test("opens as a page with Match system selected by default", async () => {
     await open();
     expect(radio("Match system")).toBeChecked();
     expect(radio("Dark")).not.toBeChecked();
@@ -108,7 +107,7 @@ describe("WF-SETTINGS-05 Appearance", () => {
     expect(localStorage.getItem(APPEARANCE_STORAGE_KEY)).toBeNull();
   });
 
-  test("Auto follows a change of the device preference while the dialog is open", async () => {
+  test("Auto follows a change of the device preference while the page is open", async () => {
     await open();
     act(() => media.set({ prefersLight: true }));
     await waitFor(() =>
@@ -136,7 +135,7 @@ describe("WF-SETTINGS-05 Appearance", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
-  test("when storage is unavailable the choice still applies, and the dialog says it will not last", async () => {
+  test("when storage is unavailable the choice still applies, and the page says it will not last", async () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("quota", "QuotaExceededError");
     });
@@ -152,60 +151,41 @@ describe("WF-SETTINGS-05 Appearance", () => {
   });
 
   test("uses the accepted copy and not the designer's annotation (finding F7)", async () => {
-    const { dialog } = await open();
+    const { page } = await open();
     expect(
-      within(dialog).getByText(
+      within(page).getByText(
         "Saved for this browser only, so a shared computer doesn't inherit your choice.",
       ),
     ).toBeInTheDocument();
-    expect(dialog.textContent).not.toMatch(
+    expect(page.textContent).not.toMatch(
       /replaces the|dark mode is deferred|variable swap/i,
     );
   });
 
-  test("Escape closes to /settings", async () => {
-    const { router, dialog } = await open();
-    fireEvent.keyDown(dialog, { key: "Escape" });
+  test("the Settings link leads back to the home, where the Appearance row is", async () => {
+    const { router, page } = await open();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(within(page).getByRole("link", { name: "Settings" }));
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/settings"),
     );
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  });
-
-  test("the in-dialog sync control and the close icon are inside the dialog", async () => {
-    const { dialog } = await open();
     expect(
-      within(dialog).getByRole("button", { name: /Open sync queue/ }),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole("button", { name: "Close" }),
+      await screen.findByRole("link", { name: "Appearance" }),
     ).toBeInTheDocument();
   });
 
-  test("closing after opening from the Settings link returns focus to that link", async () => {
+  test("from the Settings home the Appearance row opens the page, which is a page like the other sections", async () => {
     const router = await mount("/settings");
     fireEvent.click(screen.getByRole("link", { name: "Appearance" }));
-    const dialog = await screen.findByRole("dialog", { name: "Appearance" });
-    fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/settings"),
+      expect(router.state.location.pathname).toBe("/settings/appearance"),
     );
-    await waitFor(() =>
-      expect(screen.getByRole("link", { name: "Appearance" })).toHaveFocus(),
-    );
-  });
-
-  test("closing after a cold load of the deep link, with no opener, focuses the page heading", async () => {
-    const { router, dialog } = await open("/settings/appearance");
-    fireEvent.keyDown(dialog, { key: "Escape" });
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/settings"),
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { level: 1, name: "Settings" }),
-      ).toHaveFocus(),
-    );
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Appearance" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The home list has given way to the page (as Layout and Sessions do), not stayed behind it.
+    expect(screen.queryByRole("link", { name: "Layout" })).toBeNull();
   });
 
   test("has no axe violations, dark and light", async () => {

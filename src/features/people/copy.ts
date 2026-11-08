@@ -71,6 +71,8 @@ export const ARCHIVED_TAG = "Archived";
 export const YOU = "You";
 export const SELECT_PERSON = "Choose someone to see their details."; // PROVISIONAL (desktop detail pane before a selection)
 export const BACK_TO_PEOPLE = "People";
+/** The pane a person opens in beside the people (Settings · Layout, "How things open"). */
+export const PERSON_PANE = "Person";
 
 // ---- linkage (D-11a-2) ------------------------------------------------------------------------------------------------------------------
 export const LINK_SELF = "This is you — you control this profile";

@@ -12,6 +12,7 @@ import { QUEUED_KINDS } from "../model/commands";
 import { todayIn } from "../model/time";
 import { TASKS_TITLE } from "../titles";
 import { SearchPill } from "../today/CommandPalette";
+import type { RowOpen } from "../today/TodayRow";
 import { patched } from "../view";
 
 export const LIST_COPY = {
@@ -33,7 +34,12 @@ export const LIST_COPY = {
  * The Tasks list pane (WF-TASK-01, on the Final design's rows): the cached tasks a page of 100 at a time (Q9), with my outstanding
  * creates first (projected, "Not sent yet") and an "Archived" filter (the cross-kind "Archived items" ledger is a Settings follow-up).
  */
-export function TaskList() {
+export function TaskList({
+  openTask,
+}: {
+  /** Where a row leads when the task opens beside the list (Settings · Layout, "How things open"). */
+  openTask?: (taskId: string) => RowOpen;
+} = {}) {
   const heading = useId();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [archived, setArchived] = useState(false);
@@ -138,8 +144,9 @@ export function TaskList() {
             return (
               <li key={row.id} className="list-none">
                 <ListRow
-                  to="/tasks/$taskId"
-                  params={{ taskId: row.id }}
+                  {...(openTask
+                    ? openTask(row.id)
+                    : { to: "/tasks/$taskId", params: { taskId: row.id } })}
                   data-task-link={row.id}
                   fact={
                     row.archived

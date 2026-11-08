@@ -280,3 +280,7 @@ name finds one control).
 the title, "since 18:17" or the start and end, the elapsed time in mono, Stop and Discard as pills), with a summary line under the
 heading. The design's "This week / This month / All" control and its "Goals" column are not drawn: the sessions are read by state only,
 and the page reads no task goals.
+
+- **How things open (phase 8, 8 November 2026).** From the lists, a row opens the list in the container chosen in Settings · Layout
+  (`/tasks/lists?list=<id>`, `ListDetail` drawn `embedded`: no breadcrumb, the name an h2 under the page's heading), or as its own page at
+  `/tasks/lists/<id>`; from a list, a task opens the same way (`?task=`); the phone always the page.

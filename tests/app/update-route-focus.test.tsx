@@ -159,7 +159,8 @@ describe("R26/R27: RouteFocus is a fallback after a navigation", () => {
     const { router } = await mount("/today");
     await act(async () => {
       await router.navigate({ to: "/settings" });
-      router.history.push("/settings/appearance");
+      // Signing in is the registry's dialog section (Appearance is a page since 8 November 2026).
+      router.history.push("/settings/signing-in");
     });
     const dialog = await screen.findByRole("dialog");
     await frames();

@@ -208,3 +208,35 @@ describe("the people list", () => {
     }
   });
 });
+
+describe("how things open: a person in the chosen container", () => {
+  test("with the split pane chosen, a row opens the person beside the people at /people?person=; the people keep their heading", async () => {
+    const w = peopleWorld();
+    const [a] = ids(1);
+    w.setCache([person({ id: a, label: "Ada" })]);
+    await w.mount("/people", { wrapper: "split" });
+    const row = await waitFor(() => {
+      const found = document.querySelector(`[data-person-row="${a}"]`);
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(row.getAttribute("href")).toBe(`/people?person=${a}`);
+    fireEvent.click(row);
+    await waitFor(() =>
+      expect(document.querySelector("[data-task-pane=split]")).not.toBeNull(),
+    );
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-person-detail="${a}"]`),
+      ).not.toBeNull(),
+    );
+    expect(document.querySelector("[data-people-list]")).not.toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "People" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Ada" }),
+    ).toBeInTheDocument();
+    expect(document.querySelector("[data-breadcrumb]")).toBeNull();
+  });
+});

@@ -1,13 +1,4 @@
-import {
-  DARK,
-  expect,
-  expectFocusLoop,
-  focusedLabel,
-  LIGHT,
-  pressTab,
-  runAxe,
-  test,
-} from "./helpers";
+import { DARK, expect, LIGHT, runAxe, test } from "./helpers";
 
 const KEY = "atlas.appearance.v1";
 
@@ -194,66 +185,41 @@ test.describe("WF-SETTINGS-05 Appearance (B15, fixture)", () => {
     await expect(page.getByText(/dark mode is deferred/)).toHaveCount(0);
   });
 
-  test("deep link and close: Escape returns to Settings and focuses the page heading (no opener)", async ({
+  test("a page of its own: the Settings link leads back and the home's heading takes the focus", async ({
     page,
   }) => {
+    // Appearance is a page like every other Settings section (8 November 2026), not a dialog over the home.
     await page.goto("/settings/appearance");
-    await page.keyboard.press("Escape");
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Appearance" }),
+    ).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page
+      .getByRole("main")
+      .getByRole("link", { name: "Settings" })
+      .click();
     await expect(page).toHaveURL(/\/settings$/);
     await expect(
       page.getByRole("heading", { level: 1, name: "Settings" }),
     ).toBeFocused();
   });
 
-  test("opened from the Settings link, closing returns focus to that link", async ({
+  test("opened from the Settings link, the selected choice takes the focus; Tab leaves the page's controls in order", async ({
     page,
   }) => {
     await page.goto("/settings");
     await page.getByRole("link", { name: "Appearance" }).click();
     await expect(
-      page.getByRole("dialog", { name: "Appearance" }),
+      page.getByRole("heading", { level: 1, name: "Appearance" }),
     ).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("link", { name: "Appearance" })).toBeFocused();
-  });
-
-  test("keyboard loop: Tab and Shift+Tab stay inside the dialog on every engine, and Escape returns focus to the opener", async ({
-    page,
-    browserName,
-  }, testInfo) => {
-    await page.goto("/settings");
-    await page.getByRole("link", { name: "Appearance" }).click();
-    const dialog = page.getByRole("dialog", { name: "Appearance" });
-    await expect(dialog).toBeVisible();
-    // Playwright's Firefox does not run a microtask between a keydown listener and Tab's default action (a plain-DOM control page
-    // shows it, with no React or Radix involved), so Radix's Shift+Tab escape from the radio group, which relies on a React state
-    // update committed in that gap, cannot complete there. The Shift+Tab traversal is therefore checked in full on Chromium and
-    // WebKit, and on Firefox only where it does not start from the radio (the wrap from the first control to the last).
-    const fullReverse = browserName !== "firefox";
-    if (!fullReverse)
-      testInfo.annotations.push({
-        type: "harness limitation",
-        description:
-          "Playwright Firefox: no microtask before Tab's default action; Shift+Tab out of a Radix roving-focus group is not exercised",
-      });
-    const ring = await expectFocusLoop(page, dialog, { reverse: fullReverse });
-    expect(ring.join(" | ")).toContain("Close");
-    expect(ring.join(" | "), "the radio group is one tab stop").toContain(
-      "Match system",
-    );
-    expect(ring).toHaveLength(3);
-    if (!fullReverse) {
-      // Focus is back on the radio (where it started). Tab wraps to the first stop, Shift+Tab wraps back to the last.
-      await pressTab(page);
-      expect(await focusedLabel(page)).toBe(ring[0]);
-      await pressTab(page, { shift: true });
-      expect(
-        await focusedLabel(page),
-        "Shift+Tab from the first control wraps to the last",
-      ).toBe(ring.at(-1));
-    }
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("link", { name: "Appearance" })).toBeFocused();
+    await expect(
+      page.getByRole("radio", { name: "Match system" }),
+    ).toBeFocused();
+    // The radio group is one tab stop; Shift+Tab reaches the way back.
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      page.getByRole("main").getByRole("link", { name: "Settings" }),
+    ).toBeFocused();
   });
 
   test("choosing a theme is not colour alone: a ring and a dot mark the selection", async ({

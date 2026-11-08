@@ -269,7 +269,7 @@ edit `SettingsHome`, `settingsRoute` or another entry. The typed router delibera
 in the application); `sectionPath` is the one place that says so. The "Your data" screen exposes the `calendarLine` slot in `your-data/slots.ts`; replace that constant
 (WF-SETTINGS-06 tags the line "owner: WEB-13"). The section descriptions are static: they need no request.
 
-The Final design (8 November 2026) added **Layout** (`id: "layout"`, `owner: "WEB-07"`, order 52, a page: `settings/layout/LayoutPage.tsx`, "How tasks open":
+The Final design (8 November 2026) added **Layout** (`id: "layout"`, `owner: "WEB-07"`, order 52, a page: `settings/layout/LayoutPage.tsx`, "How things open":
 a page, a split pane, a side peek or an overlay, kept on this device as `atlas.task-wrapper.v1`; see docs/tasks.md).
 
 WEB-08b added one registry entry, **Signing in** (`id: "signing-in"`, `owner: "WEB-08"`, order 20), a dialog route like Appearance, and the **account card** at the top of the home list

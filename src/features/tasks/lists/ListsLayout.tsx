@@ -14,7 +14,11 @@ import {
   useState,
 } from "react";
 import { useLayoutMode } from "../../../app/shell/layout-mode";
-import { usePinnedLists, useTaskWrapper } from "../../../app/shell/preferences";
+import {
+  effectiveWrapper,
+  usePinnedLists,
+  useTaskWrapper,
+} from "../../../app/shell/preferences";
 import { Button, buttonVariants } from "../../../components/ui/button";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { List } from "../../../components/ui/list";
@@ -30,7 +34,6 @@ import { useTasksEnv } from "../env";
 import { keptKey, useKeptRecovery } from "../kept-input";
 import type { ComposedList } from "../model/list-view";
 import { todayIn } from "../model/time";
-import { effectiveWrapper } from "../screens";
 import { LISTS_TITLE } from "../titles";
 import { SearchPill } from "../today/CommandPalette";
 import { PANE_COPY, TaskPane } from "../today/TaskPane";
@@ -60,6 +63,11 @@ export function ListsLayout() {
     select: (state) =>
       (state.location.search as { task?: string }).task ?? null,
   });
+  // A list opened beside all the lists (`?list=`), in the chosen container.
+  const openedList = useRouterState({
+    select: (state) =>
+      (state.location.search as { list?: string }).list ?? null,
+  });
   // A task from the list opens in the chosen container (Settings · Layout), as it does from the day.
   const wrapper = effectiveWrapper(useTaskWrapper(), useLayoutMode());
   const close = useCallback(() => {
@@ -79,15 +87,55 @@ export function ListsLayout() {
           params: { listId },
           search: { task: taskId },
         });
-  // The Final design: all the lists take the page, and a list is a page of its own (its breadcrumb leads back).
-  if (listId === null)
+  // The Final design: all the lists take the page, and a list opens in the chosen container ("How things open"): beside them, over
+  // them, or as a page of its own (its breadcrumb leads back).
+  if (listId === null) {
+    const openList =
+      wrapper === "page"
+        ? undefined
+        : (id: string) => ({
+            to: "/tasks/lists" as const,
+            search: { list: id },
+          });
+    const closeList = () =>
+      void navigate({ to: "/tasks/lists", search: {}, replace: true });
+    const pane = (
+      <nav aria-label={LISTS.pane} className="mt-1 min-w-0">
+        <ListsPane
+          selected={wrapper === "page" ? null : openedList}
+          {...(openList ? { openList } : {})}
+        />
+      </nav>
+    );
+    if (openedList === null || wrapper === "page")
+      return (
+        <div className="flex min-w-0 flex-col" data-lists-layout="">
+          {pane}
+        </div>
+      );
+    const opened = <ListDetail key={openedList} listId={openedList} embedded />;
+    if (wrapper === "split")
+      return (
+        <div
+          className="grid items-start gap-8 desktop:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]"
+          data-lists-layout=""
+          data-lists-split=""
+        >
+          {pane}
+          <TaskPane wrapper="split" label={LISTS.paneLabel} onClose={closeList}>
+            {opened}
+          </TaskPane>
+        </div>
+      );
     return (
       <div className="flex min-w-0 flex-col" data-lists-layout="">
-        <nav aria-label={LISTS.pane} className="mt-1 min-w-0">
-          <ListsPane selected={null} />
-        </nav>
+        {pane}
+        <TaskPane wrapper={wrapper} label={LISTS.paneLabel} onClose={closeList}>
+          {opened}
+        </TaskPane>
       </div>
     );
+  }
   const page = (
     <ListDetail
       key={listId}
@@ -132,7 +180,14 @@ export function ListsLayout() {
  * the lists created here and not received yet first, as rows (a colour, the name, a short fact, the count), the ones pinned to the
  * sidebar in their own group; an "Archived" filter; the search pill and "New list" at the head. A read that failed is never "No lists yet".
  */
-function ListsPane({ selected }: { selected: string | null }) {
+function ListsPane({
+  selected,
+  openList,
+}: {
+  selected: string | null;
+  /** Where a row leads when the list opens beside the lists (Settings · Layout). */
+  openList?: (id: string) => { to: "/tasks/lists"; search: { list: string } };
+}) {
   const env = useTasksEnv();
   const heading = useId();
   const [archived, setArchived] = useState(false);
@@ -183,8 +238,9 @@ function ListsPane({ selected }: { selected: string | null }) {
         return (
           <li key={id} className="list-none">
             <ListRow
-              to="/tasks/lists/$listId"
-              params={{ listId: id }}
+              {...(openList
+                ? openList(id)
+                : { to: "/tasks/lists/$listId", params: { listId: id } })}
               data-list-link={id}
               current={current}
               leading={<ColourDot id={id} />}

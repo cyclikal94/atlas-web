@@ -4,6 +4,8 @@
  * UK English.
  */
 export const LISTS = {
+  /** The pane a list opens in beside the lists (Settings · Layout). */
+  paneLabel: "List",
   pane: "Lists",
   newList: "New list",
   /** The empty pane's call to action (distinct from the header's "New list", 8 November 2026). */

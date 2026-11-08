@@ -66,10 +66,19 @@ function PeopleLayout() {
   );
 }
 
+const PERSON_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export const peopleRoute = (parent: AnyRoute) => {
   const people = createRoute({
     getParentRoute: () => parent,
     path: "people",
+    // A person opened beside the people in the chosen container (Settings · Layout, "How things open"): `?person=<id>`.
+    validateSearch: (search: Record<string, unknown>): { person?: string } => ({
+      ...(typeof search.person === "string" && PERSON_ID.test(search.person)
+        ? { person: search.person }
+        : {}),
+    }),
     component: PeopleLayout,
   });
   const index = createRoute({ getParentRoute: () => people, path: "/" });

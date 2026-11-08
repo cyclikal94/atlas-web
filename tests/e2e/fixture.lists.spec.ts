@@ -64,6 +64,14 @@ async function bootAt(
     colorScheme?: "light" | "dark";
   } = {},
 ): Promise<Page> {
+  // These cases open a list as a page (Settings · Layout, "How things open"); the containers have their own cases.
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem("atlas.task-wrapper.v1", "page");
+    } catch {
+      // No storage: the default container applies.
+    }
+  });
   const page = await context.newPage();
   if (look.viewport) await page.setViewportSize(look.viewport);
   if (look.colorScheme)

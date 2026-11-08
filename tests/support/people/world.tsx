@@ -638,7 +638,11 @@ export interface PeopleWorld {
   readonly gated: Record<string, unknown>[];
   /** The sync engine applied a page of changes (`sync_state.applied_revision` moves): the summaries' invalidation signal. */
   advanceRevision(): void;
-  mount(path: string): Promise<{ router: ReturnType<typeof createAppRouter> }>;
+  /** `wrapper`: how things open (Settings · Layout); a page unless the test is about the containers. */
+  mount(
+    path: string,
+    options?: { wrapper?: "page" | "split" | "peek" | "overlay" },
+  ): Promise<{ router: ReturnType<typeof createAppRouter> }>;
 }
 
 /** The instant every write of the world is made at. */
@@ -1713,7 +1717,8 @@ export function peopleWorld(
       appliedRevision += 1;
       act(() => notify());
     },
-    async mount(path) {
+    async mount(path, options = {}) {
+      localStorage.setItem("atlas.task-wrapper.v1", options.wrapper ?? "page");
       router = createAppRouter({ initialPath: path });
       const view = render(tree());
       rerender = (ui) => view.rerender(ui);

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import type { LayoutMode } from "./layout-mode";
 
 /**
  * Two preferences of the shell, kept on this device only (like the appearance choice, `design/theme.ts`): whether the sidebar is
@@ -155,4 +156,16 @@ export function writeTaskWrapper(value: TaskWrapper) {
 }
 export function useTaskWrapper(): TaskWrapper {
   return useSyncExternalStore(subscribe, readTaskWrapper, () => "split");
+}
+/**
+ * The container a thing (a task, a person, a list) opens in at this width: the phone is always a page, and a split pane needs the
+ * desktop's width (below it the choice falls back to a page). "How things open", Settings · Layout.
+ */
+export function effectiveWrapper(
+  wrapper: TaskWrapper,
+  mode: LayoutMode,
+): TaskWrapper {
+  if (mode === "mobile") return "page";
+  if (wrapper === "split" && mode !== "desktop") return "page";
+  return wrapper;
 }

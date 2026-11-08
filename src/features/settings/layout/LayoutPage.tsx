@@ -12,9 +12,9 @@ import { cn } from "../../../lib/utils";
 /** Settings · Layout (the Final design): how a task opens from a list. Copy from the frame "Setting · how tasks open". */
 export const LAYOUT_COPY = {
   eyebrow: "Settings · Layout",
-  title: "How tasks open",
-  lead: "Pick what happens when you open a task. The task itself looks the same in all four; only the container changes. You can switch any time.",
-  legend: "How tasks open",
+  title: "How things open",
+  lead: "Pick what happens when you open a task, a person or a list. The thing itself looks the same in all four; only the container changes. You can switch any time.",
+  legend: "How things open",
   options: {
     page: {
       label: "Full page",
@@ -36,8 +36,11 @@ export const LAYOUT_COPY = {
   alsoHeading: "Also applies to",
   also: [
     { what: "Creating a task", how: "same container as opening one" },
-    { what: "A task in a list", how: "same container as from the day" },
-    { what: "People and lists", how: "their own page" },
+    {
+      what: "A task in a list, or in all the tasks",
+      how: "the same container",
+    },
+    { what: "People and lists", how: "beside their lists, in the same way" },
     { what: "On the phone", how: "always full page" },
   ],
   narrow:

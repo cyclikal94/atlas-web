@@ -108,6 +108,12 @@ export const tasksRoute = (parent: AnyRoute) => {
   const tasks = createRoute({
     getParentRoute: () => parent,
     path: "tasks",
+    // A task opened beside all the tasks in the chosen container ("How things open"): `?task=<id>`.
+    validateSearch: (search: Record<string, unknown>): { task?: string } => ({
+      ...(typeof search.task === "string" && UUID.test(search.task)
+        ? { task: search.task }
+        : {}),
+    }),
     component: TasksLayout,
   });
   const index = createRoute({ getParentRoute: () => tasks, path: "/" });
@@ -200,6 +206,12 @@ export const listsRoute = (parent: AnyRoute) => {
   const lists = createRoute({
     getParentRoute: () => parent,
     path: "tasks/lists",
+    // A list opened beside the lists in the chosen container (Settings · Layout, "How things open"): `?list=<id>`.
+    validateSearch: (search: Record<string, unknown>): { list?: string } => ({
+      ...(typeof search.list === "string" && UUID.test(search.list)
+        ? { list: search.list }
+        : {}),
+    }),
     component: ListsLayout,
   });
   // The detail is drawn by the lazy layout from the matched id (no second lazy screen in the routes' first load).

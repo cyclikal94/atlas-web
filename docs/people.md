@@ -807,3 +807,8 @@ the primary colour, the archived fields' disclosure and the held changes; "Share
 which takes the activity column beside the person, `frame="aside"`, only when the person is the whole page on a desktop width: beside the
 list there is no room for it); and "New fields start as". No width cap on the page: the facts and the box take the page's width.
 The "Sharing checked at …" note is said once on the person page, under the fields (not again under "Shared with").
+
+- **How things open (phase 8, 8 November 2026).** From the people, a row opens the person in the container chosen in Settings · Layout
+  (`/people?person=<id>`: a split pane, a side peek or an overlay beside the people, `PersonDetail` drawn without its breadcrumb and with
+  the name as an h2), or as the page of their own at `/people/<id>`; the phone always the page. The field editors still open on the
+  person's own page (their routes are under it).

@@ -424,3 +424,30 @@ describe("L8: the detail", () => {
     expect(copy.PENDING.queued).toBe("Not sent yet");
   });
 });
+
+describe("how things open: a list in the chosen container", () => {
+  test("with the split pane chosen, a row opens the list beside the lists at /tasks/lists?list=, its name an h2 under the page's heading", async () => {
+    const a = listId();
+    const t = await mountTasks({
+      path: "/tasks/lists",
+      rows: [listRow(a, "Weekly groceries", [])],
+      wrapper: "split",
+    });
+    await t.until(paneReady);
+    const link = document.querySelector(
+      `[data-list-link="${a}"]`,
+    ) as HTMLElement;
+    expect(link.getAttribute("href")).toBe(`/tasks/lists?list=${a}`);
+    fireEvent.click(link);
+    await t.until(
+      () => document.querySelector("[data-task-pane=split]") !== null,
+    );
+    await t.until(detailReady(a));
+    expect(document.querySelector("[data-list-embedded]")).not.toBeNull();
+    expect(h1()).toEqual(["Lists"]);
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Weekly groceries" }),
+    ).toBeInTheDocument();
+    expect(document.querySelector("[data-breadcrumb]")).toBeNull();
+  });
+});

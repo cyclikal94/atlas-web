@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLayoutMode } from "../../app/shell/layout-mode";
-import { type TaskWrapper, useTaskWrapper } from "../../app/shell/preferences";
+import { effectiveWrapper, useTaskWrapper } from "../../app/shell/preferences";
 import { getPageDataHost } from "../../data";
 import { CalendarPage } from "./calendar/CalendarPage";
 import {
@@ -51,18 +51,7 @@ export interface TodayScreenSearch {
   new?: boolean;
 }
 
-/**
- * The container a task opens in from this page, for this width (Settings · Layout): the phone always opens a page, and a split pane
- * needs the desktop width (below it the setting falls back to a page). The peek and the overlay fit from the tablet up.
- */
-export function effectiveWrapper(
-  wrapper: TaskWrapper,
-  mode: "desktop" | "tablet" | "mobile",
-): TaskWrapper {
-  if (mode === "mobile") return "page";
-  if (wrapper === "split" && mode !== "desktop") return "page";
-  return wrapper;
-}
+export { effectiveWrapper } from "../../app/shell/preferences";
 
 export function TodayScreen(props: { search: TodayScreenSearch }) {
   return (
@@ -275,20 +264,68 @@ function TasksLayoutInner() {
   // directly opened detail, the list or the account's timers finds a runner for the displayed identity.
   useCatchUpService();
   const matchRoute = useMatchRoute();
+  const navigate = useNavigate();
   const child =
     matchRoute({ to: "/tasks/$taskId", fuzzy: true }) !== false ||
     matchRoute({ to: "/tasks/new" }) !== false;
-  // The Final design: the tasks take the page, and a task (or the form) is a page of its own.
+  // A task opened beside all the tasks (`?task=`), in the chosen container ("How things open").
+  const opened = useRouterState({
+    select: (state) =>
+      (state.location.search as { task?: string }).task ?? null,
+  });
+  const wrapper = effectiveWrapper(useTaskWrapper(), useLayoutMode());
+  const close = useCallback(
+    () => void navigate({ to: "/tasks", search: {}, replace: true }),
+    [navigate],
+  );
+  if (child)
+    return (
+      <div className="flex min-w-0 flex-col" data-tasks-layout="">
+        <Outlet />
+      </div>
+    );
+  // The Final design: the tasks take the page; a task opens beside them, over them, or as a page of its own.
+  const openTask =
+    wrapper === "page"
+      ? undefined
+      : (taskId: string): RowOpen => ({
+          to: "/tasks",
+          search: { task: taskId },
+        });
+  // The destination's eyebrow heading is the route's (`route.tsx`), outside the cache gate and this lazy screen.
+  const list = (
+    <div className="mt-1">
+      <TaskList {...(openTask ? { openTask } : {})} />
+    </div>
+  );
+  if (opened === null || wrapper === "page")
+    return (
+      <div className="flex min-w-0 flex-col" data-tasks-layout="">
+        {list}
+      </div>
+    );
+  const content = (
+    <TaskDetail key={opened} taskId={opened} embedded onClose={close} />
+  );
+  if (wrapper === "split")
+    return (
+      <div
+        className="grid items-start gap-8 desktop:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]"
+        data-tasks-layout=""
+        data-tasks-split=""
+      >
+        {list}
+        <TaskPane wrapper="split" label={PANE_COPY.label} onClose={close}>
+          {content}
+        </TaskPane>
+      </div>
+    );
   return (
     <div className="flex min-w-0 flex-col" data-tasks-layout="">
-      {child ? (
-        <Outlet />
-      ) : (
-        // The destination's eyebrow heading is the route's (`route.tsx`), outside the cache gate and this lazy screen.
-        <div className="mt-1">
-          <TaskList />
-        </div>
-      )}
+      {list}
+      <TaskPane wrapper={wrapper} label={PANE_COPY.label} onClose={close}>
+        {content}
+      </TaskPane>
     </div>
   );
 }
