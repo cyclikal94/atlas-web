@@ -39,7 +39,23 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     as labelled cells. The day's work follows: the record card, then ONE grouped box (`components/ui/grouped.tsx`, `DayWork.tsx`) of
     disclosure sections on hairlines: WEB-10c's "What needs doing first" (a warning dot while a prerequisite is open, the count beside the
     heading), the timer (a green dot while one runs), and the turns of an Anyone task. The timers page draws its running and earlier
-    sessions as the same grouped sections, with rows on hairlines. The app update prompt (WEB-14a) sits in the sidebar above the sync
+    sessions as the same grouped sections, with rows on hairlines. Since 8 November 2026 the same box holds the rest of the day's
+    reference: "Recent entries" (`EntryHistory`, with "Full history"), "Who's on this" (with "Your settings" and "Who sees my progress")
+    and "This day" (the closure and the streak exclusion), and the timer section exists only for a task measured in time. On the phone
+    the record card comes before the facts strip (the primary action on the first screen) and the header's controls fold behind one
+    "Actions" disclosure (`components/ui/page-actions.tsx`); the streak cell links as "View". The streak page draws its figures as the
+    same facts strip and its day-by-day strip in a grouped box; a list's tasks are rows on hairlines in one box with "Add task to list"
+    as its last row (`lists/ListDetail.tsx`).
+  - **The form kit (8 November 2026).** The task form's choices ("What counts as done", "If a day gets missed", "Who takes part", "Who
+    gets this task") are one control, `components/ui/choice-cards.tsx`: a fieldset of native radios drawn as cards, each with its label
+    and one line of meaning (the radio is named by its label alone, `aria-labelledby`, and described by the line), the chosen one marked by
+    its ring's dot, the primary border and the accent tint. A locked choice (an edit cannot change who takes part) disables the cards and
+    says why under a lock glyph; the hint under Repeats says the same without "Locked —". The card is read as sections by hairlines and
+    a small "When" label over the timing fields; on the phone the Save row stays at the bottom of the viewport. Today has a "New task"
+    button (a plus) beside its date controls; the Tasks pane's "Your timers" is a button like "Lists"; the Lists pane's "New list" is a
+    plain button with a plus (no dashed outline). The sidebar marks ONE item: a pinned list that matches the address, else "All lists";
+    pinned lists carry a pin glyph, and the group is headed "Lists" until something is pinned. The timers page's empty state is the
+    shared `EmptyState`. Copy: the shared-result lines no longer repeat their heading ("Not known yet"). The app update prompt (WEB-14a) sits in the sidebar above the sync
     status while the sidebar is open, else at the top of the page.
 - **Tasks (`/tasks`, `/tasks/new`, `/tasks/<id>?occurrence=<id>`, `/tasks/<id>/edit`, WF-TASK-01/02/03).** The list (100 a page, an
   Archived filter), the detail (record card for every goal kind, history with corrections, participation and the joint line, enrolment,

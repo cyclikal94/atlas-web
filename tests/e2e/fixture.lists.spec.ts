@@ -313,7 +313,7 @@ test.describe("E-LS2: create offline, then sent (L2, L6, L14)", () => {
     context,
   }, info) => {
     const { page, net, reads } = await setup(context, LISTS_ROUTE, [], []);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     // Mounting the dialog reads the defaults (online) into this device's record; only then is the act made offline.
     await expect
       .poll(() =>
@@ -371,7 +371,7 @@ test.describe("E-LS2: create offline, then sent (L2, L6, L14)", () => {
       };
     });
     await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     await dialog(page).getByLabel("Name").fill("Unsure audience");
     await dialog(page).getByRole("button", { name: "Create list" }).click();
     await expect(dialog(page)).toHaveCount(0);
@@ -535,7 +535,7 @@ test.describe("E-LS4: remove, rename, read-only (L2, L7, L8)", () => {
   }) => {
     const { page } = await setup(context, LISTS_ROUTE, [], []);
     await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     await dialog(page).getByLabel("Name").fill("Draft name");
     await dialog(page).getByRole("button", { name: "Create list" }).click();
     await expect(detail(page)).toBeVisible();
@@ -707,14 +707,14 @@ test.describe("E-LS7: input kept through the sync control (L16)", () => {
     await expect(dialog(page).getByLabel("Name")).toHaveValue("Kept");
     await page.keyboard.press("Escape");
     await navigateInApp(page, LISTS_ROUTE);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     await dialog(page).getByLabel("Name").fill("Unsaved");
     // A reload keeps nothing (page memory only; Q4 is WEB-14a's).
     await page.goto(`/__session?route=${encodeURIComponent(LISTS_ROUTE)}`);
     await page.waitForFunction(() => window.__atlasData !== undefined);
     await untilTreeSettled(page);
     await expect(dialog(page)).toHaveCount(0);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     await expect(dialog(page).getByLabel("Name")).toHaveValue("");
   });
 });
@@ -999,7 +999,7 @@ test.describe("E-LS7b: a save answered while the person is at Sync (L6, L16)", (
   }) => {
     const { page } = await setup(context, LISTS_ROUTE, [], []);
     await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     await dialog(page).getByLabel("Name").fill("Answered while away");
     const release = await holdDraftWrites(page);
     await dialog(page).getByRole("button", { name: "Create list" }).click();
@@ -1051,7 +1051,7 @@ test.describe("E-LS8: another tab (L7, L15)", () => {
   }) => {
     const { page } = await setup(context, LISTS_ROUTE, [], []);
     await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     await dialog(page).getByLabel("Name").fill("Original");
     await dialog(page).getByRole("button", { name: "Create list" }).click();
     await expect(detail(page)).toBeVisible();
@@ -1367,7 +1367,7 @@ test.describe("E-LS9: keyboard only (L17)", () => {
     const a = buildTask({ n: 15, title: "Keyboard task" });
     const { page } = await setup(context, LISTS_ROUTE, [a], []);
     await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "+ New list" }).focus();
+    await page.getByRole("button", { name: "New list" }).focus();
     await page.keyboard.press("Enter");
     await expect(dialog(page)).toBeVisible();
     await page.keyboard.type("By keys");
@@ -1500,7 +1500,7 @@ test.describe("E-LS11: an answer lost after the write (review 2 R1, R2)", () => 
       await loseCommittedAnswers(context);
       const { page } = await setup(context, LISTS_ROUTE, [], []);
       await goOfflineAtBoundary(page);
-      await page.getByRole("button", { name: "+ New list" }).click();
+      await page.getByRole("button", { name: "New list" }).click();
       await dialog(page).getByLabel("Name").fill("Original");
       await loseNextAnswer(page);
       await dialog(page).getByRole("button", { name: "Create list" }).click();
@@ -1631,7 +1631,7 @@ test.describe("E-LS12: an earlier outcome this device cannot establish (revision
       await loseCommittedAnswers(context);
       const { page } = await setup(context, LISTS_ROUTE, [], []);
       await goOfflineAtBoundary(page);
-      await page.getByRole("button", { name: "+ New list" }).click();
+      await page.getByRole("button", { name: "New list" }).click();
       await dialog(page).getByLabel("Name").fill("Original");
       await loseNextAnswer(page);
       await dialog(page).getByRole("button", { name: "Create list" }).click();

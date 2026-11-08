@@ -11,7 +11,6 @@ import {
 } from "../model/summary";
 import { Avatar } from "../parts";
 import { readOne, shownOf, useSummary } from "../summaries";
-import { SummaryNotes } from "../summary-notes";
 
 /**
  * WF-PEOPLE-02's "Shared with" (finding 8), from `GET /people/{id}/summary` while online (`summaries.tsx`): the owner, then each account
@@ -100,7 +99,7 @@ export function SharedWithSection({ personId }: { personId: string }) {
           ) : null}
         </>
       )}
-      {rail !== null ? <SummaryNotes view={view} partial={false} /> : null}
+      {/* The page says when sharing was checked once, under its fields (8 November 2026): not again here. */}
     </GroupedSection>
   );
 }

@@ -86,9 +86,10 @@ function PeopleLayout() {
   if (personId !== null)
     return (
       <div className="flex flex-col gap-3">
+        {/* On the phone the shell's header carries the way back (`shell/mobile-back.ts`). */}
         <Link
           to="/people"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
         >
           <ArrowLeft aria-hidden="true" size={16} />
           {copy.BACK_TO_PEOPLE}

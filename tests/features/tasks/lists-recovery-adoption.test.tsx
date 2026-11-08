@@ -108,7 +108,7 @@ describe("create (CreateListDialog, opened again by the Lists pane)", () => {
     async () => {
       const t = await mountTasks({ path: "/tasks/lists" });
       await t.until(() => document.querySelector("[data-new-list]") !== null);
-      press("+ New list");
+      press("New list");
       await t.settle();
       expect(contextsOf(pageFormRegistry.all())).toContain(CONTEXT);
       expect(contextsOf(pageFormRegistry.dirty())).not.toContain(CONTEXT);
@@ -142,7 +142,7 @@ describe("create (CreateListDialog, opened again by the Lists pane)", () => {
     async () => {
       const t = await mountTasks({ path: "/tasks/lists" });
       await t.until(() => document.querySelector("[data-new-list]") !== null);
-      press("+ New list");
+      press("New list");
       await t.settle();
       fireEvent.change(nameField(), { target: { value: "Weekend groceries" } });
       expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
@@ -167,7 +167,7 @@ describe("create (CreateListDialog, opened again by the Lists pane)", () => {
     async () => {
       const t = await mountTasks({ path: "/tasks/lists" });
       await t.until(() => document.querySelector("[data-new-list]") !== null);
-      press("+ New list");
+      press("New list");
       await t.settle();
       fireEvent.change(nameField(), { target: { value: "Weekend groceries" } });
       await flushDirty(pageFormRegistry);

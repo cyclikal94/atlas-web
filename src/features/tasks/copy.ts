@@ -109,6 +109,10 @@ export const ZONE_HINT = (zone: string) => `Times are shown in ${zone}.`;
 export const PREVIOUS_DAY = "Previous day";
 export const NEXT_DAY = "Next day";
 export const BACK_TO_TODAY = "Back to today";
+/** The phone's toggle for the time zone control (the Final design, 8 November 2026). */
+export const ZONE_TOGGLE = "Change the time zone";
+/** Today's way to a new task (the Final design, 8 November 2026). */
+export const NEW_TASK = "New task";
 export const FROM_DAY = (label: string) => `From ${label}`;
 export const UNTITLED = "Untitled task";
 export const UNREADABLE = "This item can't be shown on this device.";
@@ -245,9 +249,10 @@ export const JOINT = {
   withheld:
     "Withheld — Shared total hidden: someone's part isn't shared with you",
   anyoneUnknown: "No one has finished it yet that you can see",
-  notKnown: "Shared result not known yet",
+  notKnown: "Not known yet",
   offline: "Not available offline",
   server: (outcome: Outcome, at: string) => `${OUTCOME[outcome]} (as of ${at})`,
+  // Said after the "Shared result" heading, so it does not repeat it (8 November 2026).
   lastChecked: (outcome: Outcome, at: string) =>
-    `Shared result: ${OUTCOME[outcome]}, last checked ${at}`,
+    `${OUTCOME[outcome]}, last checked ${at}`,
 } as const;

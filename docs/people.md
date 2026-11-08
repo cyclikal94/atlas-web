@@ -782,3 +782,15 @@ PostgreSQL, HTTPS, device or manual screen-reader evidence (WEB-09d), no copy or
 
 Every string in `activity/copy.ts` is provisional; the People 02 mock's sharing row ("narrowed … to only you") is deliberately absent. The
 rename sentence says "changed the name of {current label}" (or "renamed this person") and never presents the label shown as the earlier one.
+
+## The Final design on the person page (8 November 2026)
+
+Under the name and the linkage line, the header's controls (Manage sharing, Ask to link, Possible duplicates, Rename, Archive) sit in
+one row from the tablet up and fold behind one "Actions" disclosure on the phone (`components/ui/page-actions.tsx`). A **facts strip**
+(`detail/PersonFacts.tsx`) follows: who the profile is linked to, who can see the person, how many fields and who added them, from the
+viewer-safe summary (`GET /people/{id}/summary`, the read "Shared with" makes too), so it appears once that read has answered and says
+nothing before; an unsent person has none. The grouped box of fields, "Shared with", "Recent changes" and the defaults panel is
+unchanged. The detail is capped at 760 px of reading width; on the phone the shell's header carries the way back ("People") and the
+tab bar is away (`src/app/shell/mobile-back.ts`). A field's name wraps anywhere, and an unsent field shows no audience sentence (its
+pending mark beside the name says so; Edit says why it waits).
+The "Sharing checked at …" note is said once on the person page, under the fields (not again under "Shared with").

@@ -894,14 +894,16 @@ test.describe("E-SH8: viewports (A13)", () => {
           name: c.getAttribute("aria-label") ?? c.textContent?.trim() ?? "",
           h: c.getBoundingClientRect().height,
         }))
-        .filter((c) => c.h < 44),
+        // A 44 px control measured at 43.99997 px (the centred dialog's half-pixel translate) is a 44 px control: half a pixel of
+        // tolerance, never a whole one.
+        .filter((c) => c.h < 43.5),
     );
     return { box, overflow, small };
   };
   /**
    * Below the desktop breakpoint (1280 px) the sharing editors are FULL-BLEED sheets, as the accepted tablet frames draw them at 834×1112
    * and 1112×834 (WEB-05.5 `tablet/sharing-portrait.html`, `sharing-landscape.html`, Q14) and the mobile sheet at 390 (WEB-12a R6); from
-   * it, the centred 440 px dialog.
+   * it, the centred dialog (460 px since the shadcn/ui rebuild of 26 October 2026, `components/ui/dialog.tsx`).
    */
   const expectPlacement = (
     box: { x: number; y: number; width: number; height: number } | null,
@@ -915,7 +917,7 @@ test.describe("E-SH8: viewports (A13)", () => {
       expect(Math.round(box?.width ?? 0)).toBe(width);
       expect(Math.round(box?.height ?? 0)).toBe(height);
     } else {
-      expect(Math.round(box?.width ?? 0)).toBe(440);
+      expect(Math.round(box?.width ?? 0)).toBe(460);
       expect(Math.round((box?.x ?? 0) + (box?.width ?? 0) / 2)).toBe(
         Math.round(width / 2),
       );

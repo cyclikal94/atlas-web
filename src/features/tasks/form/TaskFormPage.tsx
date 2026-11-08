@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { Button } from "../../../components/ui/button";
+import { ChoiceCards } from "../../../components/ui/choice-cards";
 import { Input, inputClass } from "../../../components/ui/input";
 import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -104,6 +105,7 @@ export const FORM_COPY = {
   item: (n: number) => `Item ${n}`,
   addItem: "Add an item",
   removeItem: (n: number) => `Remove item ${n}`,
+  when: "When",
   carry: "If a day gets missed",
   who: "Who takes part",
   exclusions: "Let people skip a day without breaking their streak",
@@ -112,8 +114,14 @@ export const FORM_COPY = {
   sharingDefaultsUnknown: "Use my defaults",
   sharingOnlyMe: "Only me",
   sharingLater: "To choose people, save first, then use Sharing on the task.",
-  locked: "Locked — switching to a one-off needs a new task",
-  lockedWho: "Locked — changing who takes part needs a new task",
+  /** One line under each goal kind (the Final design's choice cards, 8 November 2026; provisional). */
+  goalLine: {
+    checkbox: "Tick it off when it's done.",
+    numeric: "Log an amount, with a minimum or a maximum.",
+    checklist: "Tick off each item on the day.",
+  } as Record<GoalKind, string>,
+  locked: "Switching to a one-off needs a new task",
+  lockedWho: "Changing who takes part needs a new task",
   save: "Save",
   cancel: "Cancel",
   saved: "Saved on this device. Not sent yet.",
@@ -281,6 +289,23 @@ interface FormInput {
 }
 
 const select = inputClass;
+
+/** A hairline between the form's parts (the Final design, 8 November 2026): the card reads as sections without folding anything. */
+function Divider() {
+  return <div aria-hidden="true" className="h-px bg-border" />;
+}
+
+/** The small label over a group of fields ("When"), in the facts strip's voice. */
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <Divider />
+      <p className="-mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        {children}
+      </p>
+    </>
+  );
+}
 
 function Field({
   id,
@@ -602,6 +627,7 @@ function TaskForm({
             onChange={(e) => set({ title: e.target.value })}
           />
         </Field>
+        <SectionLabel>{FORM_COPY.when}</SectionLabel>
         <div className="grid gap-3 tablet:grid-cols-2">
           <Field
             id={fid("repeat")}
@@ -731,27 +757,22 @@ function TaskForm({
             />
           </Field>
         </div>
-        <fieldset className="flex flex-col gap-2">
-          <legend className="text-sm font-medium text-foreground">
-            {FORM_COPY.done}
-          </legend>
-          <div className="flex flex-wrap gap-3">
-            {(["checkbox", "numeric", "checklist"] as const).map((kind) => (
-              <label
-                key={kind}
-                className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
-              >
-                <input
-                  type="radio"
-                  name={fid("goal")}
-                  checked={state.goalKind === kind}
-                  onChange={() => set({ goalKind: kind })}
-                  className="size-4"
-                />
-                {FORM_COPY.goal[kind]}
-              </label>
-            ))}
-          </div>
+        <Divider />
+        <div className="flex flex-col gap-4" data-form-section="goal">
+          <ChoiceCards
+            legend={FORM_COPY.done}
+            name={fid("goal")}
+            value={state.goalKind}
+            onChange={(goalKind) => set({ goalKind })}
+            columns={3}
+            options={(["checkbox", "numeric", "checklist"] as const).map(
+              (kind) => ({
+                value: kind,
+                label: FORM_COPY.goal[kind],
+                description: FORM_COPY.goalLine[kind],
+              }),
+            )}
+          />
           {show.numeric ? (
             <div className="grid gap-3 tablet:grid-cols-2">
               <Field
@@ -852,77 +873,42 @@ function TaskForm({
               ) : null}
             </div>
           ) : null}
-        </fieldset>
-        <fieldset className="flex flex-col gap-2">
-          <legend className="text-sm font-medium text-foreground">
-            {FORM_COPY.carry}
-          </legend>
-          {CARRIES.map((carry: Carry) => (
-            <label
-              key={carry}
-              className="flex min-h-11 items-start gap-2 text-sm text-foreground"
-            >
-              <input
-                type="radio"
-                name={fid("carry")}
-                checked={state.carry === carry}
-                onChange={() => set({ carry })}
-                className="mt-0.5 size-4"
-              />
-              <span className="flex flex-col">
-                <span>{copy.CARRY[carry].label}</span>{" "}
-                <span className="text-xs text-muted-foreground">
-                  {copy.CARRY[carry].line}
-                </span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-        <fieldset
-          className="flex flex-col gap-2"
-          aria-describedby={
-            errors.participation ? fid("participation-error") : undefined
-          }
-        >
-          <legend className="text-sm font-medium text-foreground">
-            {FORM_COPY.who}
-          </legend>
-          {PARTICIPATIONS.filter(
+        </div>
+        <Divider />
+        <ChoiceCards
+          legend={FORM_COPY.carry}
+          name={fid("carry")}
+          value={state.carry}
+          onChange={(carry) => set({ carry })}
+          data-form-section="carry"
+          options={CARRIES.map((carry: Carry) => ({
+            value: carry,
+            label: copy.CARRY[carry].label,
+            description: copy.CARRY[carry].line,
+          }))}
+        />
+        <Divider />
+        <ChoiceCards
+          legend={FORM_COPY.who}
+          name={fid("who")}
+          value={state.participation}
+          onChange={(participation) => set({ participation })}
+          data-form-section="who"
+          options={PARTICIPATIONS.filter(
             (p) => !editing || p === initial.participation,
-          ).map((p: Participation) => (
-            <label
-              key={p}
-              className="flex min-h-11 items-start gap-2 text-sm text-foreground"
-            >
-              <input
-                type="radio"
-                name={fid("who")}
-                checked={state.participation === p}
-                onChange={() => set({ participation: p })}
-                className="mt-0.5 size-4"
-              />
-              <span className="flex flex-col">
-                <span>{copy.PARTICIPATION[p]}</span>{" "}
-                <span className="text-xs text-muted-foreground">
-                  {copy.PARTICIPATION_LINE[p]}
-                </span>
-              </span>
-            </label>
-          ))}
-          {editing ? (
-            <p className="text-xs text-muted-foreground">
-              {FORM_COPY.lockedWho}
-            </p>
-          ) : null}
-          {errors.participation ? (
-            <p
-              id={fid("participation-error")}
-              className="text-xs text-destructive"
-            >
-              {errors.participation}
-            </p>
-          ) : null}
-        </fieldset>
+          ).map((p: Participation) => ({
+            value: p,
+            label: copy.PARTICIPATION[p],
+            description: copy.PARTICIPATION_LINE[p],
+          }))}
+          {...(editing ? { locked: FORM_COPY.lockedWho } : {})}
+          {...(errors.participation
+            ? {
+                error: errors.participation,
+                errorId: fid("participation-error"),
+              }
+            : {})}
+        />
         <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
           <input
             type="checkbox"
@@ -932,32 +918,21 @@ function TaskForm({
           />
           {FORM_COPY.exclusions}
         </label>
+        {mode.kind === "new" ? <Divider /> : null}
         {mode.kind === "new" ? (
-          <fieldset className="flex flex-col gap-2">
-            <legend className="text-sm font-medium text-foreground">
-              {FORM_COPY.sharing}
-            </legend>
-            {(["defaults", "only_me"] as const).map((choice) => (
-              <label
-                key={choice}
-                className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
-              >
-                <input
-                  type="radio"
-                  name={fid("sharing")}
-                  checked={state.sharing === choice}
-                  onChange={() => set({ sharing: choice })}
-                  className="size-4"
-                />
-                {choice === "defaults"
-                  ? defaultsSummary
-                  : FORM_COPY.sharingOnlyMe}
-              </label>
-            ))}
-            <p className="text-xs text-muted-foreground">
-              {FORM_COPY.sharingLater}
-            </p>
-          </fieldset>
+          <ChoiceCards
+            legend={FORM_COPY.sharing}
+            name={fid("sharing")}
+            value={state.sharing}
+            onChange={(sharing) => set({ sharing })}
+            data-form-section="sharing"
+            columns={2}
+            options={[
+              { value: "defaults" as const, label: defaultsSummary },
+              { value: "only_me" as const, label: FORM_COPY.sharingOnlyMe },
+            ]}
+            hint={FORM_COPY.sharingLater}
+          />
         ) : null}
       </fieldset>
       {errors.definition ? (
@@ -968,7 +943,11 @@ function TaskForm({
           {notice}
         </p>
       ) : null}
-      <div className="flex flex-wrap gap-2">
+      {/* On the phone the save row stays in reach at the bottom of the viewport (the tab bar is away on this screen). */}
+      <div
+        className="sticky bottom-0 z-20 -mx-4 flex flex-wrap gap-2 border-t border-border/70 bg-background/95 px-4 pt-3 pb-[max(12px,env(safe-area-inset-bottom))] backdrop-blur tablet:static tablet:mx-0 tablet:border-0 tablet:bg-transparent tablet:p-0 tablet:backdrop-blur-none"
+        data-form-actions=""
+      >
         {!env.writable ? (
           <Button disabled reason={copy.NOT_WRITABLE}>
             {FORM_COPY.save}

@@ -482,8 +482,9 @@ describe("Shared with (finding 8)", () => {
       /Home\s*4 members in the household · me, mo \(can't see it\)\s*can view$/,
     );
     expect(section).toHaveTextContent("Excluded: mo");
+    // The Final design (8 November 2026): the person page says when sharing was checked ONCE, under its fields, not here.
+    expect(section).not.toHaveTextContent(/Sharing checked at/);
     expect(section).not.toHaveTextContent("may have shared it more widely");
-    expect(section).toHaveTextContent(/Sharing checked at/);
     expect(reads(w, "readPersonSummary")).toEqual([
       { op: "readPersonSummary", args: [ada] },
     ]);

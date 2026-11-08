@@ -125,7 +125,7 @@ describe("L6: create", () => {
       env: { online: false },
     });
     await t.until(() => document.querySelector("[data-new-list]") !== null);
-    press("+ New list");
+    press("New list");
     await t.settle();
     expect(nameField().getAttribute("placeholder")).toBe(CREATE.placeholder);
     expect(screen.getByText(CREATE.caption)).not.toBeNull();
@@ -154,7 +154,7 @@ describe("L6: create", () => {
       env: { online: false },
     });
     await t.until(() => document.querySelector("[data-new-list]") !== null);
-    press("+ New list");
+    press("New list");
     await t.settle();
     typeName("\u0085 ");
     press(CREATE.submit, dialog() as HTMLElement);
@@ -186,7 +186,7 @@ describe("L6: create", () => {
       }
       return undefined;
     });
-    press("+ New list");
+    press("New list");
     await t.settle();
     typeName("Chores");
     press(CREATE.submit, dialog() as HTMLElement);
@@ -206,7 +206,7 @@ describe("L6: create", () => {
       env: { online: false },
     });
     await t.until(() => document.querySelector("[data-new-list]") !== null);
-    press("+ New list");
+    press("New list");
     await t.settle();
     typeName("  half typed ");
     await toSyncByChip(t);
@@ -222,7 +222,7 @@ describe("L6: create", () => {
     });
     await t.settle();
     expect(dialog()).toBeNull();
-    press("+ New list");
+    press("New list");
     await t.settle();
     expect(nameField().value).toBe("");
     expect(t.drafts()).toEqual([]);
@@ -236,7 +236,7 @@ describe("L6: create", () => {
     await t.until(() => document.querySelector("[data-new-list]") !== null);
     const gate = held();
     aroundEnqueue(t, () => gate.promise);
-    press("+ New list");
+    press("New list");
     await t.settle();
     typeName("Later");
     press(CREATE.submit, dialog() as HTMLElement);
@@ -258,14 +258,14 @@ describe("L6: create", () => {
       env: { online: false },
     });
     await t.until(() => document.querySelector("[data-new-list]") !== null);
-    press("+ New list");
+    press("New list");
     await t.settle();
     typeName("Mine");
     await toSyncByChip(t);
     t.rerender(tasksEnv(t.api, { identity: `${ME}:2`, online: false }));
     await back(t, "/tasks/lists");
     expect(dialog()).toBeNull();
-    press("+ New list");
+    press("New list");
     await t.settle();
     expect(nameField().value).toBe("");
   });

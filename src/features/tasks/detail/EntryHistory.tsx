@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { Button } from "../../../components/ui/button";
+import { GroupedSection } from "../../../components/ui/grouped";
 import { Input } from "../../../components/ui/input";
 import { useFormRecoveryPort } from "../../../data";
 import { headingFocus } from "../../../lib/form-recovery/focus";
@@ -1330,23 +1331,20 @@ export function EntryHistory({
     );
   const fixShown = fix !== null && shown.some((s) => s.id === fix.entry.id);
   return (
-    <section
-      ref={historyRef}
+    <GroupedSection
+      sectionRef={historyRef}
       aria-labelledby={heading}
-      className="flex flex-col gap-2"
       data-entry-history=""
-      data-journal-requests={requests}
+      data-journal-requests={String(requests)}
       // Native barriers (revision 6, R18): the stream's committed version this history renders, and the version its window was read at.
-      data-stream-version={row.progressVersion ?? ""}
-      data-journal-version={journal?.version ?? ""}
+      data-stream-version={String(row.progressVersion ?? "")}
+      data-journal-version={String(journal?.version ?? "")}
+      heading={
+        <h2 ref={headingRef} id={heading}>
+          {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
+        </h2>
+      }
     >
-      <h2
-        ref={headingRef}
-        id={heading}
-        className="text-[15px] font-medium text-foreground"
-      >
-        {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
-      </h2>
       <RecoveryNotice
         firstFieldRef={restoredFocus}
         discardFocus={discardFocus}
@@ -1507,7 +1505,7 @@ export function EntryHistory({
           </Button>
         ) : null}
       </span>
-    </section>
+    </GroupedSection>
   );
 }
 

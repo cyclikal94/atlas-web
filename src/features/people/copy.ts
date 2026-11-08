@@ -86,6 +86,16 @@ export const LINK_UNKNOWN_REASON = {
   refused: "Atlas can't check this person for you.",
   pending: "It's checked once this person has reached the server.",
 } as const; // PROVISIONAL
+/** The facts strip of a person's page (the Final design, 8 November 2026). */
+export const FACTS = {
+  linked: "Linked",
+  visibleTo: "Visible to",
+  fields: "Fields",
+  added: "Added",
+} as const;
+export const FACT_LINK_SELF = "To you";
+export const FACT_LINK_OTHER = "To their account";
+export const FACT_LINK_NONE = "Not linked";
 export const ROW_LINK_SELF = "Linked to your account";
 export const ROW_LINK_OTHER = "Linked · they control their name";
 export const ROW_LINK_NONE = "Not linked to an account";

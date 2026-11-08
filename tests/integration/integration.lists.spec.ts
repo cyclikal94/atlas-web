@@ -358,7 +358,7 @@ test.describe("I-LS1: create, add, rename and remove through the UI (L2, L6, L7,
     await untilCached(page, id.account_id, t1);
     await untilCached(page, id.account_id, t2);
     await page
-      .getByRole("button", { name: "+ New list" })
+      .getByRole("button", { name: "New list" })
       .click({ timeout: 60_000 });
     await page.getByRole("dialog").getByLabel("Name").fill(`I-LS1 ${stamp}`);
     await page
@@ -632,7 +632,7 @@ test.describe("I-LS4: offline create and add, the create's answer lost (L14)", (
     await untilCached(page, id.account_id, t1);
     // The defaults are read online when the dialog mounts, then the act is offline.
     await page
-      .getByRole("button", { name: "+ New list" })
+      .getByRole("button", { name: "New list" })
       .click({ timeout: 60_000 });
     await expect
       .poll(
@@ -896,7 +896,7 @@ test.describe("I-LS8: a real defaults_changed for a queued create (L2, L6)", () 
     const { page, id } = await bootAs(context, main);
     const stamp = Date.now() % 100_000;
     await page
-      .getByRole("button", { name: "+ New list" })
+      .getByRole("button", { name: "New list" })
       .click({ timeout: 60_000 });
     await expect
       .poll(

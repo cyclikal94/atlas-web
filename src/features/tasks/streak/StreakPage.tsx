@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
+import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type CacheRow,
@@ -625,19 +626,20 @@ function Tiles({
           </span>
         </div>
       ) : (
-        <dl className="m-0 flex flex-wrap gap-2">
+        // The figures as a facts strip (the Final design, 8 November 2026): the same labelled cells as the task page's.
+        <dl className="m-0 grid grid-cols-2 gap-px overflow-hidden rounded-[14px] border border-border bg-border">
           {(["current", "longest"] as const).map((kind) => (
             <div
               key={kind}
-              className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-card p-3"
+              className="flex min-h-[72px] min-w-0 flex-col justify-center gap-1 bg-card px-4 py-3"
               data-streak-figure={kind}
             >
-              <dt className="text-xs text-muted-foreground">
+              <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                 {kind === "current"
                   ? STREAK_COPY.currentName
                   : STREAK_COPY.longestName}
               </dt>
-              <dd className="m-0 text-[15px] font-medium text-foreground">
+              <dd className="m-0 text-sm font-medium text-foreground">
                 <FigureText
                   figure={figureOf(read.streak[kind], scope)}
                   unit={unit}
@@ -727,7 +729,7 @@ export function StreakPage({ taskId }: { taskId: string }) {
           to="/tasks/$taskId"
           params={{ taskId }}
           search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
         >
           {STREAK_COPY.back(title ?? copy.UNTITLED)}
         </Link>
@@ -782,74 +784,76 @@ export function StreakPage({ taskId }: { taskId: string }) {
           tryAgain={figures.tryAgain}
         />
       )}
-      <section aria-labelledby={stripHeading} className="flex flex-col gap-2">
-        <h2 id={stripHeading} className="text-sm font-medium text-foreground">
-          {STREAK_COPY.dayByDay}
-          {env.online ? "" : ` · ${STREAK_COPY.onDevice}`}
-        </h2>
-        {stale ? (
-          // The kept strip is what was last read, not the current one (revision 20, review R42): its own Try again reads the strip again; the
-          // figures' Try again is theirs.
-          <div className="flex flex-col gap-1" data-streak-stale={localError}>
-            <p className="text-sm text-muted-foreground">
-              {localError === "unstable"
-                ? copy.LOCAL_UNSTABLE
-                : copy.LOCAL_FAILED}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {copy.SHOWING_LAST_READ}
-            </p>
-            <span>
-              <Button onClick={retryLocal}>{copy.TRY_AGAIN}</Button>
-            </span>
-          </div>
-        ) : null}
-        {noDatabase || failed ? null : value === null ? (
-          <div aria-busy="true" className="flex flex-wrap gap-1">
-            <span className="sr-only">{STREAK_COPY.loading}</span>
-            {[0, 1, 2, 3, 4, 5].map((n) => (
-              <div key={n} className="size-9 rounded-md bg-card" />
-            ))}
-          </div>
-        ) : cells.length === 0 ? (
-          // Unknown is not empty: a kept empty strip whose re-read failed says so above, never "Nothing to show yet." (as Today, R9).
-          stale ? null : (
-            <p className="text-sm text-muted-foreground" data-streak-empty="">
-              {STREAK_COPY.nothing}
-            </p>
-          )
-        ) : (
-          <>
-            <p className="text-sm text-foreground" data-streak-tally="">
-              {STREAK_COPY.lastN(
-                unit(STRIP_PERIODS),
-                counts.done,
-                counts.total,
-                counts.missed,
-              )}
-            </p>
-            <ol
-              className="m-0 flex list-none flex-wrap gap-1 p-0"
-              data-streak-strip=""
-            >
-              {cells.map((cell) => {
-                const label = `${cell.date === null ? STREAK_COPY.undated : dayLabel(cell.date)}: ${STREAK_COPY.state[cell.state]}`;
-                return (
-                  <li
-                    key={cell.id}
-                    title={label}
-                    data-strip-state={cell.state}
-                    className={`flex size-9 items-center justify-center rounded-md text-xs ${TONE[cell.state]}`}
-                  >
-                    <span aria-hidden="true">{MARK[cell.state]}</span>
-                    <span className="sr-only">{label}</span>
-                  </li>
-                );
-              })}
-            </ol>
-          </>
-        )}
-      </section>
+      <GroupedBox data-streak-box="">
+        <GroupedSection
+          aria-labelledby={stripHeading}
+          heading={<h2 id={stripHeading}>{STREAK_COPY.dayByDay}</h2>}
+          summary={env.online ? undefined : STREAK_COPY.onDevice}
+        >
+          {stale ? (
+            // The kept strip is what was last read, not the current one (revision 20, review R42): its own Try again reads the strip again; the
+            // figures' Try again is theirs.
+            <div className="flex flex-col gap-1" data-streak-stale={localError}>
+              <p className="text-sm text-muted-foreground">
+                {localError === "unstable"
+                  ? copy.LOCAL_UNSTABLE
+                  : copy.LOCAL_FAILED}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {copy.SHOWING_LAST_READ}
+              </p>
+              <span>
+                <Button onClick={retryLocal}>{copy.TRY_AGAIN}</Button>
+              </span>
+            </div>
+          ) : null}
+          {noDatabase || failed ? null : value === null ? (
+            <div aria-busy="true" className="flex flex-wrap gap-1">
+              <span className="sr-only">{STREAK_COPY.loading}</span>
+              {[0, 1, 2, 3, 4, 5].map((n) => (
+                <div key={n} className="size-9 rounded-md bg-card" />
+              ))}
+            </div>
+          ) : cells.length === 0 ? (
+            // Unknown is not empty: a kept empty strip whose re-read failed says so above, never "Nothing to show yet." (as Today, R9).
+            stale ? null : (
+              <p className="text-sm text-muted-foreground" data-streak-empty="">
+                {STREAK_COPY.nothing}
+              </p>
+            )
+          ) : (
+            <>
+              <p className="text-sm text-foreground" data-streak-tally="">
+                {STREAK_COPY.lastN(
+                  unit(STRIP_PERIODS),
+                  counts.done,
+                  counts.total,
+                  counts.missed,
+                )}
+              </p>
+              <ol
+                className="m-0 flex list-none flex-wrap gap-1 p-0"
+                data-streak-strip=""
+              >
+                {cells.map((cell) => {
+                  const label = `${cell.date === null ? STREAK_COPY.undated : dayLabel(cell.date)}: ${STREAK_COPY.state[cell.state]}`;
+                  return (
+                    <li
+                      key={cell.id}
+                      title={label}
+                      data-strip-state={cell.state}
+                      className={`flex size-9 items-center justify-center rounded-md text-xs ${TONE[cell.state]}`}
+                    >
+                      <span aria-hidden="true">{MARK[cell.state]}</span>
+                      <span className="sr-only">{label}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+            </>
+          )}
+        </GroupedSection>
+      </GroupedBox>
     </article>
   );
 }

@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { Button } from "../../../components/ui/button";
+import { GroupedSection } from "../../../components/ui/grouped";
 import { type CacheRow, type Policy, useSharingDefaults } from "../../../data";
 // The sharing feature's public chooser, from its own module (see `sharing/index.ts`).
 import { AudienceChooser } from "../../sharing/AudienceChooser";
@@ -140,17 +141,13 @@ export function ClosureControls({
     row.attention !== null &&
     ["resolve", "exclude"].includes(row.attention.kind);
   return (
-    <section
+    <GroupedSection
       aria-labelledby={heading}
-      className="flex flex-col gap-2"
       data-closure=""
+      dot={data.resolved ? "warning" : "muted"}
+      summary={data.resolved ? copy.DAY_CLOSED : undefined}
+      heading={<h2 id={heading}>{CONTROLS_COPY.closureHeading}</h2>}
     >
-      <h2
-        id={heading}
-        className="text-base font-semibold tracking-tight text-foreground"
-      >
-        {CONTROLS_COPY.closureHeading}
-      </h2>
       <div className="flex flex-wrap items-start gap-2">
         {!writable || !row.canEdit ? (
           <Button
@@ -187,7 +184,7 @@ export function ClosureControls({
           {CONTROLS_COPY.conflict}
         </p>
       ) : null}
-    </section>
+    </GroupedSection>
   );
 }
 
@@ -246,10 +243,13 @@ export function Participation({
   row,
   joint,
   progressRows,
+  sharing,
 }: {
   row: RowModel;
   joint: JointAnswer | null;
   progressRows: readonly CacheRow[];
+  /** The way to "Who sees my progress" (the task page's sharing editor), drawn at the end of the section. */
+  sharing?: ReactNode;
 }) {
   const env = useTasksEnv();
   const heading = useId();
@@ -302,17 +302,12 @@ export function Participation({
         : "—";
   const shared = data.definition.participation !== "personal";
   return (
-    <section
+    <GroupedSection
       aria-labelledby={heading}
-      className="flex flex-col gap-2"
       data-participation=""
+      summary={whoLabel(row, env.accountId)}
+      heading={<h2 id={heading}>{CONTROLS_COPY.whoHeading}</h2>}
     >
-      <h2
-        id={heading}
-        className="text-base font-semibold tracking-tight text-foreground"
-      >
-        {CONTROLS_COPY.whoHeading}
-      </h2>
       <p className="text-sm text-foreground">
         {copy.PARTICIPATION[data.definition.participation]} ·{" "}
         {whoLabel(row, env.accountId)}
@@ -329,7 +324,8 @@ export function Participation({
         </p>
       ) : null}
       {shared ? <EnrolmentSettings taskId={data.task_id} /> : null}
-    </section>
+      {sharing}
+    </GroupedSection>
   );
 }
 

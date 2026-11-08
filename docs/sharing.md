@@ -96,3 +96,10 @@ Reached from the `/sync` queue's defaults-review rows ("Review sharing"). It sho
 ## Not claimed
 
 No PostgreSQL, HTTPS deployment, production leader, real device, real Safari or real assistive technology evidence (WEB-15, WEB-09d). The I-SH journeys run against the released backend the contract pin names (`v0.28.0-rc.1` since revision 7; earlier revisions ran `v0.27.0-rc.1`) on disposable SQLite with the fixture leader: they are focused real-backend evidence for a fixture-stage task, **not** integration acceptance, and `integration_passed` stays false.
+
+## The Final design on the Sharing page (8 November 2026)
+
+`/sharing` is one grouped box (`components/ui/grouped.tsx`) of three sections on hairlines: "Sharing defaults" (the intro, "Edit
+defaults", the resolved templates as rows on hairlines, the as-of line), "Sharing a single item" and "Your households"
+(`HouseholdsMinimal`, its subset note first). Nothing about the editors, their routes or the call rules changed.
+The defaults' as-of line reads "Checked at 12:04" / "Checked on 3 Oct at 12:04" (`AS_OF` over `formatWhen`; it read "As of at …").

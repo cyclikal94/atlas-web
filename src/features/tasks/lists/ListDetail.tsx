@@ -14,6 +14,7 @@ import {
 } from "../../../app/shell/preferences";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
+import { PageActions } from "../../../components/ui/page-actions";
 import { PageHeading } from "../../../components/ui/page-heading";
 import { ResourcePolicyEditor } from "../../sharing";
 import * as copy from "../copy";
@@ -200,7 +201,7 @@ export function ListDetail({ listId }: { listId: string }) {
               {DETAIL.archivedNote}
             </p>
           ) : null}
-          <div className="flex flex-wrap items-start gap-2">
+          <PageActions>
             {editable ? (
               <Button onClick={openFrom("rename")}>{DETAIL.rename}</Button>
             ) : (
@@ -235,7 +236,7 @@ export function ListDetail({ listId }: { listId: string }) {
                 {row.archived ? DETAIL.restore : DETAIL.archive}
               </Button>
             )}
-          </div>
+          </PageActions>
         </>
       }
     >
@@ -279,11 +280,17 @@ export function ListDetail({ listId }: { listId: string }) {
           {DETAIL.unreadable}
         </p>
       ) : (
-        <section className="flex flex-col gap-3">
+        // The list's tasks as rows on hairlines in one box (the Final design, 8 November 2026), with the way to add one as its last row.
+        <section
+          className="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-card"
+          data-list-box=""
+        >
           {rows.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{DETAIL.empty}</p>
+            <p className="px-4 py-3 text-sm text-muted-foreground">
+              {DETAIL.empty}
+            </p>
           ) : (
-            <List className="flex flex-col">
+            <List className="flex flex-col divide-y divide-border">
               {rows.map((item, index) => {
                 const next = rows[index + 1]?.id ?? "add";
                 const title = item.kind === "task" ? item.title : null;
@@ -292,7 +299,7 @@ export function ListDetail({ listId }: { listId: string }) {
                     key={item.id}
                     data-list-row={item.kind}
                     data-list-task={item.id}
-                    className="flex min-h-11 list-none items-center gap-3 border-t border-border py-1"
+                    className="flex min-h-12 list-none items-center gap-3 px-2 py-1"
                   >
                     {item.kind === "task" ? (
                       <Link
@@ -339,6 +346,7 @@ export function ListDetail({ listId }: { listId: string }) {
                     {editable ? (
                       <Button
                         variant="ghost"
+                        className="text-muted-foreground"
                         data-list-remove={item.id}
                         aria-label={
                           title === null
@@ -355,7 +363,7 @@ export function ListDetail({ listId }: { listId: string }) {
               })}
             </List>
           )}
-          <div data-list-add="">
+          <div data-list-add="" className="px-3 py-2.5">
             {!editable ? (
               <Button disabled reason={noEdit}>
                 {DETAIL.add}
@@ -449,7 +457,7 @@ function BackLink() {
   return (
     <Link
       to="/tasks/lists"
-      className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
+      className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
     >
       {DETAIL.back}
     </Link>

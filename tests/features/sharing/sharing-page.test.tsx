@@ -161,7 +161,7 @@ describe("the households subset (A8)", () => {
       sharing: { online: false },
     });
     expect(await screen.findByText("Home")).toBeInTheDocument();
-    expect(screen.getByText(/As of/)).toBeInTheDocument();
+    expect(screen.getByText(/Checked /)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: copy.CREATE_BUTTON }),
     ).toBeDisabled();

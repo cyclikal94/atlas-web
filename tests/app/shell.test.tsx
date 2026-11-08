@@ -86,7 +86,7 @@ describe("layout modes render exactly one primary navigation", () => {
     "Settings",
   ];
 
-  test("desktop shows the 240px sidebar with text labels in its groups, and the Pinned lists heading", async () => {
+  test('desktop shows the 240px sidebar with text labels in its groups, and the lists group\'s heading ("Lists" until something is pinned)', async () => {
     await mount();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     for (const label of RAIL_LABELS) {
@@ -94,7 +94,9 @@ describe("layout modes render exactly one primary navigation", () => {
         label,
       );
     }
-    expect(within(nav).getByText("Pinned lists")).toBeInTheDocument();
+    // The Final design (8 November 2026): the group is headed "Pinned lists" only once a list is pinned on this device.
+    expect(within(nav).getByText("Lists")).toBeInTheDocument();
+    expect(within(nav).queryByText("Pinned lists")).toBeNull();
     expect(nav.parentElement?.className).toContain("w-[240px]");
     expect(
       screen.getByRole("button", { name: "Collapse sidebar" }),

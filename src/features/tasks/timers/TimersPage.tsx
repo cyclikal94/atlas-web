@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { Timer } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -8,6 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { Button } from "../../../components/ui/button";
+import { EmptyState } from "../../../components/ui/empty-state";
 import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
@@ -655,16 +657,16 @@ export function TimersPage() {
         <Link
           to="/tasks"
           search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
         >
           {TIMERS_COPY.back}
         </Link>
         <PageHeading>{TIMERS_COPY.title}</PageHeading>
       </div>
       {nothing ? (
-        <p className="text-sm text-muted-foreground" data-timers-empty="">
+        <EmptyState icon={Timer} data-timers-empty="">
           {TIMERS_COPY.empty}
-        </p>
+        </EmptyState>
       ) : (
         <GroupedBox data-timers-sections="">
           <GroupedSection

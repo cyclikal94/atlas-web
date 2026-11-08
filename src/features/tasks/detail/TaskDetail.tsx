@@ -7,6 +7,7 @@ import { Button } from "../../../components/ui/button";
 import { GroupedSection } from "../../../components/ui/grouped";
 import { Label } from "../../../components/ui/label";
 import { NativeSelect } from "../../../components/ui/native-select";
+import { PageActions } from "../../../components/ui/page-actions";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type DraftWithCommand,
@@ -185,10 +186,11 @@ export function TaskDetail({
       data-task-detail={task.id}
     >
       <div className="flex flex-col gap-2">
+        {/* On the phone the shell's header carries the way back (`shell/mobile-back.ts`). */}
         <Link
           to="/tasks"
           search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm font-medium text-muted-foreground hover:text-primary"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm font-medium text-muted-foreground hover:text-primary max-tablet:hidden"
         >
           {DETAIL_COPY.back}
         </Link>
@@ -229,7 +231,7 @@ export function TaskDetail({
             {copy.CARRY[row.data.definition.carry].line}
           </p>
         ) : null}
-        <div className="flex flex-wrap items-start gap-2">
+        <PageActions data-task-actions="">
           {!editable(task, view.execution) ? (
             <Button disabled reason={DETAIL_COPY.editDenied}>
               {DETAIL_COPY.edit}
@@ -272,7 +274,7 @@ export function TaskDetail({
               (d) => d.kind === "archive" && d.index_targets.includes(task.id),
             )}
           />
-        </div>
+        </PageActions>
       </div>
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
@@ -396,47 +398,68 @@ export function TaskDetail({
               writable={env.writable}
             />
           ) : null}
-          <Facts row={row} taskId={task.id} me={env.accountId} />
           <DayWork
             key={`day:${row.id}`}
             row={row}
+            facts={<Facts row={row} taskId={task.id} me={env.accountId} />}
             actions={actions}
             now={view.now}
             zone={zone}
             writable={env.writable}
             focus={focusRecord === true || choseAgain}
             extra={
-              row.data.definition.participation === "anyone" ? (
-                <GroupedSection
-                  aria-labelledby={rotaId}
-                  data-rota-section=""
-                  heading={<h2 id={rotaId}>{ROTA_COPY.heading}</h2>}
-                >
-                  <RotaPanel
-                    key={`rota:${task.id}`}
-                    row={row}
-                    canEditOrder={view.execution?.can_edit === true}
-                    days={view.occurrences.flatMap((o) =>
-                      o.data === null ? [] : [{ id: o.id, data: o.data }],
-                    )}
-                    definition={row.data.definition}
-                  />
-                </GroupedSection>
-              ) : null
+              // The rest of the day's reference, in the same box (the Final design, 8 November 2026): the turns, the entries, who is on
+              // it and the day's closure, each a section on a hairline.
+              <>
+                {row.data.definition.participation === "anyone" ? (
+                  <GroupedSection
+                    aria-labelledby={rotaId}
+                    data-rota-section=""
+                    heading={<h2 id={rotaId}>{ROTA_COPY.heading}</h2>}
+                  >
+                    <RotaPanel
+                      key={`rota:${task.id}`}
+                      row={row}
+                      canEditOrder={view.execution?.can_edit === true}
+                      days={view.occurrences.flatMap((o) =>
+                        o.data === null ? [] : [{ id: o.id, data: o.data }],
+                      )}
+                      definition={row.data.definition}
+                    />
+                  </GroupedSection>
+                ) : null}
+                <EntryHistory
+                  key={`history:${row.id}`}
+                  row={row}
+                  actions={actions}
+                  zone={zone}
+                  writable={env.writable}
+                  current={view.current}
+                />
+                <Participation
+                  row={row}
+                  joint={view.joint}
+                  progressRows={view.progressRows}
+                  sharing={
+                    row.streamPresent && view.synced ? (
+                      <span>
+                        <Button
+                          variant="ghost"
+                          onClick={() => setSharing(row.progressId)}
+                        >
+                          {DETAIL_COPY.sharingProgress}
+                        </Button>
+                      </span>
+                    ) : null
+                  }
+                />
+                <ClosureControls
+                  row={row}
+                  actions={actions}
+                  writable={env.writable}
+                />
+              </>
             }
-          />
-          <EntryHistory
-            key={`history:${row.id}`}
-            row={row}
-            actions={actions}
-            zone={zone}
-            writable={env.writable}
-            current={view.current}
-          />
-          <Participation
-            row={row}
-            joint={view.joint}
-            progressRows={view.progressRows}
           />
           {row.streamPresent && view.synced && sharing === null ? (
             // Revision 37 (WEB-14a R40): a sharing draft left by the page before an update reopens its editor.
@@ -446,21 +469,6 @@ export function TaskDetail({
               onOpen={setSharing}
             />
           ) : null}
-          {row.streamPresent && view.synced ? (
-            <span>
-              <Button
-                variant="ghost"
-                onClick={() => setSharing(row.progressId)}
-              >
-                {DETAIL_COPY.sharingProgress}
-              </Button>
-            </span>
-          ) : null}
-          <ClosureControls
-            row={row}
-            actions={actions}
-            writable={env.writable}
-          />
           {correcting === null ? (
             // Revision 37 (WEB-14a R40): a correction left by the page before an update is restored and its dialog opened again.
             <CorrectionRecoveryHost

@@ -3834,6 +3834,9 @@ test.describe("E-P35: a header action and a list row keep their place through an
           await expect(
             detail(page).locator('[data-linkage="unknown"]'),
           ).toBeVisible();
+          // On the phone the header's controls fold behind "Actions" (the Final design, 8 November 2026): opened first.
+          const fold = detail(page).getByRole("button", { name: "Actions" });
+          if (await fold.isVisible()) await fold.click();
           const target = detail(page).locator(
             '[data-people-action="archive-person"]',
           );

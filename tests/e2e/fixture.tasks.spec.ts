@@ -721,7 +721,9 @@ test.describe("E-T12: display zone and the gap explainer (A6)", () => {
     await expect(rowOf(page, a.occurrenceId)).toContainText(
       "This task is scheduled in Europe/Vienna.",
     );
-    await page.getByLabel("Time zone").selectOption("America/New_York");
+    await page
+      .getByLabel("Time zone", { exact: true })
+      .selectOption("America/New_York");
     await expect(page).toHaveURL(/tz=America%2FNew_York/);
     await expect(rowOf(page, anyDay.occurrenceId)).toBeVisible();
     // 01:30Z is 21:30 on the 28th in New York: not on the 29th there.
@@ -1060,6 +1062,9 @@ test.describe("E-T13: axe and layout of the forms and dialogs (A19; R7 of revisi
         await expect(page.locator("[data-record-card]")).toBeVisible();
         expect(await runAxe(page), "the task detail").toEqual([]);
         expect(await overflow()).toBeLessThanOrEqual(0);
+        // On the phone the header's controls fold behind "Actions" (the Final design, 8 November 2026): opened first.
+        const fold = page.getByRole("button", { name: "Actions" });
+        if (await fold.isVisible()) await fold.click();
         await page.getByRole("button", { name: "Correct this day" }).click();
         await expect(page.getByRole("dialog")).toBeVisible();
         expect(await runAxe(page), "the correction dialog").toEqual([]);

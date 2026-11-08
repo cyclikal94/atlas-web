@@ -15,7 +15,8 @@ export const DEFAULTS_EDIT = "Edit defaults";
 export const DEFAULTS_NONE_YET =
   "These defaults haven't been loaded on this device yet.";
 export const DEFAULTS_LOADING = "Loading your sharing defaults…";
-export const AS_OF = (when: string) => `As of ${when}`;
+/** `when` is "at 12:04" or "on 3 Oct at 12:04" (`formatWhen`), so the sentence reads "Checked at 12:04" (8 November 2026: it read "As of at"). */
+export const AS_OF = (when: string) => `Checked ${when}`;
 export const ITEM_SHARING_HEADING = "Sharing a single item";
 export const ITEM_SHARING_BODY =
   "Each item you own has its own sharing, opened from the item itself. Its policy overrides these defaults.";

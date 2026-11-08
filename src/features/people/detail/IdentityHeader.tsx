@@ -11,6 +11,7 @@ import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
+import { PageActions } from "../../../components/ui/page-actions";
 import { PageHeading } from "../../../components/ui/page-heading";
 import type { DraftWithCommand } from "../../../data";
 import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
@@ -172,7 +173,7 @@ export function IdentityHeader({
           {copy.ARCHIVED_PERSON}
         </p>
       ) : null}
-      <div className="flex flex-wrap items-start gap-2">
+      <PageActions data-person-actions="">
         {shown.projected ? (
           <Button disabled reason={copy.WAIT_FOR_SYNC_PERSON}>
             {copy.MANAGE_SHARING}
@@ -211,7 +212,7 @@ export function IdentityHeader({
           }}
         />
         <ArchiveEntry shown={shown} />
-      </div>
+      </PageActions>
       {renaming ? (
         <RenameForm
           shown={shown}

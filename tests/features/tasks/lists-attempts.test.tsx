@@ -135,7 +135,7 @@ async function openCreate() {
   return t;
 }
 async function createFirst(t: Mounted, name: string) {
-  press("+ New list");
+  press("New list");
   await t.settle();
   typeName(name);
   press(CREATE.submit, dialog() as HTMLElement);
@@ -615,7 +615,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
     );
     const gate = held();
     const { asked } = answers(t, { 1: "lost-after-commit" });
-    press(kind === "create" ? "+ New list" : DETAIL.rename);
+    press(kind === "create" ? "New list" : DETAIL.rename);
     await t.settle();
     typeName("Original");
     press(label(kind), dialog() as HTMLElement);
@@ -698,7 +698,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
       await t.settle();
       expect(dialog(), "nothing reopens").toBeNull();
       expect(t.router.state.location.pathname).toBe(at);
-      press(kind === "create" ? "+ New list" : DETAIL.rename);
+      press(kind === "create" ? "New list" : DETAIL.rename);
       await t.settle();
       expect(nameField().value, "a fresh session").toBe(
         kind === "create" ? "" : "Original",
@@ -1254,7 +1254,7 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     await t.settle();
     expect(dialog()).toBeNull();
     expect(t.drafts()).toEqual([]);
-    press("+ New list");
+    press("New list");
     await t.settle();
     expect(nameField().value).toBe("");
     expect(decision(CREATE.again)).toBeNull();
@@ -1358,7 +1358,7 @@ describe("D1 (revision 3): create, an earlier outcome this device cannot establi
     });
     await t.settle();
     expect(dialog()).toBeNull();
-    press("+ New list");
+    press("New list");
     await t.settle();
     expect(nameField().value).toBe("");
     expect(decision(CREATE.again)).toBeNull();

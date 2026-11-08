@@ -257,3 +257,11 @@ Integration acceptance (`integration_passed` stays false), PostgreSQL, HTTPS, th
 installed PWA, manual screen-reader passes (T22 is WEB-09d's; WEB-15 collects them), copy and visual sign-off (WEB-15), measurements or
 budgets beyond the figures above (WEB-09c), exhaustive mutation and stress (WEB-17), recording from a list (E-10b-1), list-filtered Today
 views, the Settings "Archived items" ledger and household management (WEB-12b).
+
+## The Final design on a list's page (8 November 2026)
+
+The list's tasks are rows on hairlines in one box (`data-list-box`), with "Add task to list" as its last row; "Remove" is a muted ghost
+control at the end of a row. The header's controls (Rename, Sharing, Pin to sidebar, Archive) sit in one row from the tablet up and
+fold behind one "Actions" disclosure on the phone (`components/ui/page-actions.tsx`); on the phone the shell's header carries the way
+back ("Lists") and the tab bar is away (`src/app/shell/mobile-back.ts`), so the pane's own "‹ Lists" is for the wider layouts.
+The pane's empty state offers "Create a list" (distinct from the header's "New list", so a query by name finds one control).

@@ -5,8 +5,9 @@
  */
 export const LISTS = {
   pane: "Lists",
-  newList: "+ New list",
-  newListEmpty: "New list",
+  newList: "New list",
+  /** The empty pane's call to action (distinct from the header's "New list", 8 November 2026). */
+  newListEmpty: "Create a list",
   archivedFilter: "Archived",
   more: "More lists",
   first: "First page",

@@ -15,9 +15,12 @@ const ITEM =
 export function RailItem({
   destination,
   collapsed,
+  active: override,
 }: {
   destination: Destination;
   collapsed: boolean;
+  /** The caller's answer for the active state (a pinned list that matches the address keeps "All lists" quiet). */
+  active?: boolean;
 }) {
   const Icon = destination.icon;
   const label = destination.railLabel ?? destination.label;
@@ -35,9 +38,11 @@ export function RailItem({
       to={destination.to}
       label={label}
       collapsed={collapsed}
-      {...(nested
-        ? { active: destinationFor(pathname)?.id === destination.id }
-        : {})}
+      {...(override !== undefined
+        ? { active: override }
+        : nested
+          ? { active: destinationFor(pathname)?.id === destination.id }
+          : {})}
       icon={
         <Icon
           aria-hidden="true"

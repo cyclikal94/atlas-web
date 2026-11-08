@@ -1,4 +1,5 @@
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useRouterState } from "@tanstack/react-router";
+import { PanelLeftClose, PanelLeftOpen, Pin } from "lucide-react";
 import type { ReactNode } from "react";
 import { AtlasLockup } from "../../components/ui/brand";
 import { List } from "../../components/ui/list";
@@ -19,6 +20,8 @@ export const RAIL_COPY = {
   workspace: "Workspace",
   primary: "Primary",
   pinned: "Pinned lists",
+  /** The same group's label while nothing is pinned yet. */
+  lists: "Lists",
   collapse: "Collapse sidebar",
   expand: "Expand sidebar",
 } as const;
@@ -64,13 +67,26 @@ export function Rail({
   const env = useShellEnv();
   const collapsed = useRailCollapsed(mode);
   const pinned = usePinnedLists();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  // A pinned list that matches the address is the active item; "All lists" then stays quiet (one active item, never two).
+  const pinnedActive = pinned.some(
+    (list) => pathname === `/tasks/lists/${list.id}`,
+  );
   const group = (id: Destination["group"]) => (
     <List className="flex flex-col gap-0.5">
       {destinations
         .filter((destination) => destination.group === id)
         .map((destination) => (
           <li key={destination.id} className="list-none">
-            <RailItem destination={destination} collapsed={collapsed} />
+            <RailItem
+              destination={destination}
+              collapsed={collapsed}
+              {...(destination.id === "lists" && pinnedActive
+                ? { active: false }
+                : {})}
+            />
           </li>
         ))}
     </List>
@@ -130,7 +146,7 @@ export function Rail({
           divider
         ) : (
           <p className="mt-5 mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            {RAIL_COPY.pinned}
+            {pinned.length > 0 ? RAIL_COPY.pinned : RAIL_COPY.lists}
           </p>
         )}
         {pinned.length > 0 && !collapsed ? (
@@ -144,12 +160,11 @@ export function Rail({
                   collapsed={false}
                   exact
                   icon={
-                    <span
+                    <Pin
                       aria-hidden="true"
-                      className="flex w-[18px] flex-none justify-center"
-                    >
-                      <span className="size-2 rounded-full bg-chart-2 group-data-[status=active]:bg-primary" />
-                    </span>
+                      className="size-[18px] flex-none group-data-[status=active]:text-primary"
+                      strokeWidth={1.9}
+                    />
                   }
                 />
               </li>

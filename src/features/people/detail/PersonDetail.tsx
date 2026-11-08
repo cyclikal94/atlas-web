@@ -67,6 +67,7 @@ import { SummaryNotes, timeOf } from "../summary-notes";
 import { FieldValueView } from "./FieldValueView";
 import { HeldChanges } from "./HeldChanges";
 import { IdentityHeader } from "./IdentityHeader";
+import { PersonFacts } from "./PersonFacts";
 import { SharedWithSection } from "./SharedWith";
 import { useSteadyWhilePressed } from "./steady";
 
@@ -217,7 +218,7 @@ function PersonRead({
         return (
           <div
             ref={root}
-            className="flex min-w-0 flex-col gap-6"
+            className="flex min-w-0 max-w-[760px] flex-col gap-6"
             data-person-detail={personId}
           >
             {/* Everything above the fields whose height depends on a read: one steady box. */}
@@ -238,6 +239,7 @@ function PersonRead({
               ) : null}
               <Conflicts ids={[personId]} />
             </div>
+            <PersonFacts personId={personId} projected={shown.projected} />
             <GroupedBox data-person-sections="">
               <FieldsSection
                 person={shown}

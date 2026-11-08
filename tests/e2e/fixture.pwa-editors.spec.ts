@@ -307,7 +307,7 @@ test.describe("R40: the production new-task editor across an accepted update", (
     });
     await workerActive(page);
     await reloadQuietly(page);
-    await page.getByRole("button", { name: "+ New list" }).click();
+    await page.getByRole("button", { name: "New list" }).click();
     const listName = page
       .getByRole("dialog")
       .getByLabel("Name", { exact: true });

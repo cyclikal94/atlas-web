@@ -18,7 +18,9 @@ export function PageHeading({
     <h1
       data-page-heading=""
       tabIndex={-1}
+      // Route focus lands here: the ring hugs the words (`w-fit`), not the whole column.
       className={cn(
+        "w-fit max-w-full rounded-sm",
         eyebrow
           ? "text-xs font-semibold uppercase tracking-[0.08em] text-primary"
           : "text-2xl font-semibold leading-tight tracking-tight text-foreground tablet:text-3xl",

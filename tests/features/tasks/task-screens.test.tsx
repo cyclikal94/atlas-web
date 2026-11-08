@@ -399,16 +399,15 @@ describe("the task form (WF-TASK-02; A10)", () => {
     expect(
       (screen.getByLabelText(FORM_COPY.name) as HTMLInputElement).value,
     ).toBe("Shared persistent chore");
-    // Each choice is named by its label and its consequence line.
+    // The Final design's choice cards name a radio by its label alone; its consequence line is its description.
     expect(
-      screen.getByRole("radio", {
-        name: `${copy.PARTICIPATION.everyone} ${copy.PARTICIPATION_LINE.everyone}`,
-      }),
+      screen.getByRole("radio", { name: copy.PARTICIPATION.everyone }),
     ).toBeChecked();
     expect(
-      screen.getByRole("radio", {
-        name: `${copy.CARRY.retain_one.label} ${copy.CARRY.retain_one.line}`,
-      }),
+      screen.getByRole("radio", { name: copy.CARRY.retain_one.label }),
+    ).toHaveAccessibleDescription(copy.CARRY.retain_one.line);
+    expect(
+      screen.getByRole("radio", { name: copy.CARRY.retain_one.label }),
     ).toBeChecked();
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
+import { GroupedSection } from "../../components/ui/grouped";
 import { Input } from "../../components/ui/input";
 import { List } from "../../components/ui/list";
 import { type SnapshotHousehold, useSharingDefaults } from "../../data";
@@ -374,19 +375,15 @@ export function HouseholdsMinimal() {
     defaults.record?.snapshot.defaults.primary_household_id ?? null;
 
   return (
-    <section
+    <GroupedSection
       aria-labelledby={ids.heading}
-      className="flex flex-col gap-4"
       data-households=""
+      data-sharing-section="households"
+      heading={<h2 id={ids.heading}>{copy.HOUSEHOLDS_HEADING}</h2>}
     >
-      <div className="flex flex-col gap-1">
-        <h2 id={ids.heading} className="text-lg font-medium text-foreground">
-          {copy.HOUSEHOLDS_HEADING}
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          {copy.HOUSEHOLDS_SUBSET_NOTE}
-        </p>
-      </div>
+      <p className="text-xs text-muted-foreground">
+        {copy.HOUSEHOLDS_SUBSET_NOTE}
+      </p>
       {problem ? (
         <Banner
           message={problem.message}
@@ -561,7 +558,7 @@ export function HouseholdsMinimal() {
           </p>
         )}
       </section>
-    </section>
+    </GroupedSection>
   );
 }
 

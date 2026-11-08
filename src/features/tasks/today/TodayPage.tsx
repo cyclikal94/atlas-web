@@ -1,5 +1,13 @@
-import { CalendarX2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import {
+  CalendarX2,
+  ChevronLeft,
+  ChevronRight,
+  Globe,
+  Plus,
+} from "lucide-react";
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useLayoutMode } from "../../../app/shell/layout-mode";
 import {
   useUpcomingFold,
   writeUpcomingFold,
@@ -17,6 +25,7 @@ import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import {
   compareRows,
+  dayLabel,
   GROUP_ORDER,
   type Group,
   groupOf,
@@ -145,6 +154,9 @@ export function TodayPage({
   const upcomingId = useId();
   const [root, setRoot] = useState<HTMLElement | null>(null);
   const [bar, setBar] = useState<HTMLElement | null>(null);
+  const mode = useLayoutMode();
+  const [zoneOpen, setZoneOpen] = useState(false);
+  const zoneRowId = useId();
   const current = useCurrentSection(root, bar);
   const zones = useMemo(knownZones, []);
   const today = todayIn(zone, view.now);
@@ -243,8 +255,9 @@ export function TodayPage({
             )}
           </p>
         </div>
+        {/* One row on the phone: the arrows and the date, with the time zone behind a toggle; from the tablet up the zone sits inline. */}
         <div
-          className="flex flex-wrap items-center gap-1"
+          className="flex w-full flex-wrap items-center gap-1 tablet:w-auto"
           data-today-controls=""
         >
           <Button
@@ -266,7 +279,10 @@ export function TodayPage({
             onChange={(event) => {
               if (event.target.value) onChange({ day: event.target.value });
             }}
-            className={cn(inputClass, "w-auto font-num")}
+            className={cn(
+              inputClass,
+              "min-w-0 flex-1 font-num tablet:w-auto tablet:flex-none",
+            )}
           />
           <Button
             variant="ghost"
@@ -276,28 +292,58 @@ export function TodayPage({
           >
             <ChevronRight aria-hidden="true" />
           </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="tablet:hidden"
+            aria-label={copy.ZONE_TOGGLE}
+            aria-expanded={zoneOpen}
+            aria-controls={zoneRowId}
+            data-zone-toggle=""
+            onClick={() => setZoneOpen((open) => !open)}
+          >
+            <Globe aria-hidden="true" />
+          </Button>
           {dayGiven && !isToday ? (
             <Button variant="ghost" onClick={() => onChange({ day: today })}>
               {copy.BACK_TO_TODAY}
             </Button>
           ) : null}
-          <label className="sr-only" htmlFor={zoneId}>
-            {copy.ZONE_LABEL}
-          </label>
-          <NativeSelect
-            id={zoneId}
-            value={zone}
-            onChange={(event) => onChange({ zone: event.target.value })}
-            className="w-[180px]"
-            wrapperClassName="w-auto"
-            aria-description={copy.ZONE_HINT(zone)}
+          {/* Quick add (the Final design, 8 November 2026): a new task from the day itself. */}
+          <Button asChild variant="default" size="icon">
+            <Link
+              to="/tasks/new"
+              aria-label={copy.NEW_TASK}
+              data-today-new-task=""
+            >
+              <Plus aria-hidden="true" strokeWidth={2.25} />
+            </Link>
+          </Button>
+          <div
+            id={zoneRowId}
+            className={cn(
+              "w-full tablet:block tablet:w-auto",
+              zoneOpen ? "block" : "hidden",
+            )}
           >
-            {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
-              <option key={z} value={z}>
-                {z}
-              </option>
-            ))}
-          </NativeSelect>
+            <label className="sr-only" htmlFor={zoneId}>
+              {copy.ZONE_LABEL}
+            </label>
+            <NativeSelect
+              id={zoneId}
+              value={zone}
+              onChange={(event) => onChange({ zone: event.target.value })}
+              className="w-full tablet:w-[180px]"
+              wrapperClassName="w-full tablet:w-auto"
+              aria-description={copy.ZONE_HINT(zone)}
+            >
+              {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
+                <option key={z} value={z}>
+                  {z}
+                </option>
+              ))}
+            </NativeSelect>
+          </div>
         </div>
       </header>
       <div
@@ -309,9 +355,9 @@ export function TodayPage({
           className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground"
           data-current-section=""
         >
-          {current ?? longDayLabel(day)}
+          {current ?? (mode === "mobile" ? dayLabel(day) : longDayLabel(day))}
         </p>
-        <fieldset className="flex flex-wrap gap-1.5">
+        <fieldset className="flex max-w-full gap-1.5 overflow-x-auto [scrollbar-width:none] tablet:flex-wrap">
           <legend className="sr-only" id={filterName}>
             {copy.FILTERS_NAME}
           </legend>

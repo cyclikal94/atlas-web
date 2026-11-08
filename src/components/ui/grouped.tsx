@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { type ReactNode, useId, useState } from "react";
+import { type ReactNode, type Ref, useId, useState } from "react";
 import { cn } from "../../lib/utils";
 
 /**
@@ -53,6 +53,8 @@ export interface GroupedSectionProps {
   dot?: "muted" | "primary" | "success" | "warning" | "destructive";
   open?: boolean;
   children: ReactNode;
+  /** The section element itself, for a caller that scrolls to it or measures it. */
+  sectionRef?: Ref<HTMLElement>;
   "aria-labelledby"?: string;
   "aria-label"?: string;
   className?: string;
@@ -65,13 +67,18 @@ export function GroupedSection({
   dot = "muted",
   open: initiallyOpen = true,
   children,
+  sectionRef,
   className,
   ...rest
 }: GroupedSectionProps) {
   const [open, setOpen] = useState(initiallyOpen);
   const bodyId = useId();
   return (
-    <section {...rest} className={cn("flex flex-col", className)}>
+    <section
+      {...rest}
+      ref={sectionRef}
+      className={cn("flex flex-col", className)}
+    >
       <div className="flex min-h-[52px] items-center gap-3.5 px-4 text-sm font-semibold text-foreground tablet:px-5">
         <span
           aria-hidden="true"

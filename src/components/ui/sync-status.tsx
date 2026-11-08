@@ -162,9 +162,10 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
     );
   }
 
-  // In a dialog that is up to date the control is a quiet dot (its name still says so): the header is the title's, and the pill grows
-  // its words only while it has something to say (offline, sending, waiting, a decision). The Final design, 8 November 2026.
-  if (variant === "dialog" && view.tone === "ok")
+  // In a dialog, and in the phone's top bar, a control that is up to date is a quiet dot (its name still says so): the header is the
+  // title's, and the pill grows its words only while it has something to say (offline, sending, waiting, a decision). The Final design,
+  // 8 November 2026. The sidebar keeps the full chip.
+  if ((variant === "dialog" || variant === "topbar") && view.tone === "ok")
     return (
       <button
         type="button"

@@ -1,7 +1,7 @@
 import { Link, useMatchRoute } from "@tanstack/react-router";
-import { ListTodo } from "lucide-react";
+import { ListTodo, Plus } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
-import { Button } from "../../../components/ui/button";
+import { Button, buttonVariants } from "../../../components/ui/button";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { List } from "../../../components/ui/list";
 import * as copy from "../copy";
@@ -86,8 +86,9 @@ function ListsPane({ selected }: { selected: string | null }) {
       type="button"
       onClick={() => setCreating(true)}
       data-new-list=""
-      className="atlas-transition inline-flex min-h-11 items-center gap-1.5 rounded-md border border-dashed border-primary/25 px-4 text-sm font-medium text-primary hover:border-primary hover:bg-accent"
+      className={buttonVariants({ variant: "outline" })}
     >
+      <Plus aria-hidden="true" strokeWidth={2.25} />
       {label}
     </button>
   );
