@@ -866,6 +866,11 @@ test.describe("E-SH7: keyboard only (A12)", () => {
     await dialog.getByRole("textbox", { name: "Exact username" }).focus();
     await page.keyboard.type("jamie");
     await page.keyboard.press("Enter");
+    // The lookup is answered asynchronously: wait for its result before Tabbing to it (WEB-14a revision 14: the Tab loop ran out before
+    // the answer in one Chromium run; forced with a delayed lookup, deterministic). Waiting is not an input: the case stays keyboard-only.
+    await expect(
+      dialog.getByRole("button", { name: "Choose: jamie" }),
+    ).toBeVisible();
     await focusOn(/^Choose: jamie$/);
     await page.keyboard.press("Enter");
     await focusOn(/^Replace policy$/);
@@ -1332,8 +1337,12 @@ test.describe("E-SH14: an unresolved household create is kept across the browser
       .getByRole("button", { name: "Try again", exact: true });
     // Precondition: the households and invitations have been read, so going offline cannot interrupt a read still under way
     // (WebKit fails such a read, campaign 1 of revision 3; nothing here is about reads).
+    // WEB-12b adaptation (D-12b-1): "Invitations for you" is the header-level Invitations dialog and the create is the route-addressed
+    // New household dialog; the precondition is read where they are shown, and the create opened from the header. Every assertion kept.
     await expect(page.locator("[data-household]")).toHaveCount(1);
+    await navigateInApp(page, "/sharing/invitations");
     await expect(page.getByText("No pending invitations")).toBeVisible();
+    await navigateInApp(page, "/sharing/new");
     await page
       .getByLabel("Household name", { exact: true })
       .fill("Review household");
@@ -1356,8 +1365,11 @@ test.describe("E-SH14: an unresolved household create is kept across the browser
     await expect.poll(() => served.management.length).toBe(2);
     expect(served.management[1]).toEqual(original);
     await expect(retry).toHaveCount(0);
-    await expect(create).toBeEnabled();
+    // WEB-12b adaptation: the receipt shows the household it made, so New household is opened again; its name is not kept for another
+    // create (Decision H), so "Create is free" is observed once a name is typed (it is no longer held by the unresolved attempt).
+    await navigateInApp(page, "/sharing/new");
     await page.getByLabel("Household name", { exact: true }).fill("Another");
+    await expect(create).toBeEnabled();
     await create.click();
     await expect.poll(() => served.management.length).toBe(3);
     expect(served.management[2]?.key).not.toBe(original?.key);

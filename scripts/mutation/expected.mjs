@@ -1,8 +1,8 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2929;
-export const EXPECTED_ENGINE = 335;
+export const EXPECTED_UNIT = 3433;
+export const EXPECTED_ENGINE = 349;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
@@ -21,6 +21,10 @@ export const EXPECTED_ENGINE = 335;
 // WEB-11a revision 25 (review 25, R25.1): +15 unit (MU-2923..MU-2937).
 // WEB-11a revision 26 (review 26, R26.1/R26.2): +16 unit (MU-2938..MU-2953); MU-2933 and MU-2936 re-anchored.
 // WEB-11a revision 27 (review 28, R28.1): +4 real-engine (MU-2954..MU-2957) over S-GATE "R28.1" and "visible: the gate STAYS UP".
+// Accepted WEB-10b merge: retain WEB-14a's 321 unit / 5 engine additions and WEB-10b's 73 unit / 11 engine additions over the common base.
+// Accepted WEB-08d merge: another 105 unit and 5 engine entries, combined 2163 unit / 265 engine.
+
+// WEB-14a integration with accepted WEB-11a: 2235 + 321 unit; 296 + 5 engine. Both complete parent catalogues retained.
 // WEB-10c: +73 unit and +3 real-engine entries, retained alongside WEB-10b.
 // WEB-10c revision 3 (review 3 R14-R18, design assessment DA-T3): +17 unit (MU-3085..MU-3101); MU-3012, MU-3016, MU-3038, MU-3061, MU-3072,
 // MU-3079..MU-3082 re-anchored (the same faults over the moved guards).
@@ -104,12 +108,21 @@ export const EXPECTED_ENGINE = 335;
 // Base merge of accepted main 2c4e7fb (revision 34): no catalogue change. Review 41 O-2: the eight live WEB-13b unit IDs that were also
 // IDs of WEB-11a's RETIRED entries (MU-2710..MU-2712, MU-2714..MU-2718) moved to MU-5257..MU-5264 (`web13b-retired-id-map-20261105.json`);
 // a rename only, counts unchanged.
+// WEB-14a revision 55 base merge of accepted main (WEB-09c, WEB-11b): 2298 + 321 unit; 308 + 5 engine. Both complete parent catalogues retained.
 // WEB-19 (the People activity timeline): +17 unit (MU-6101..MU-6117) and +3 real-engine (MU-6151..MU-6153 over E-AC8, E-AC4, E-AC5) in
 // `catalogue-web19.mjs`.
 // WEB-19 revision 1 (review 1, R-1: a refresh remounted the timeline): +8 unit (MU-6118..MU-6125) and +1 real-engine (MU-6154 over E-AC9);
 // MU-6114 and MU-6152 re-anchored (the same defect: the withholding test now sits two spaces further in, in the one flat list).
 // WEB-10c maintenance merge of accepted main 2c4e7fb (5 November 2026): base a7e0b7d (2235 unit, 296 engine) plus WEB-10c (343 unit, 11 engine) plus
 // WEB-11b (63 unit, 12 engine) = 2641 unit, 319 engine, counted from the merged catalogue; IDs do not overlap (MU-3001..MU-3368 against MU-4101..MU-4178).
+// WEB-12b: +24 unit (MU-6201..MU-6221, MU-6223..MU-6225; MU-6222 not catalogued, reason in `catalogue-web12b.mjs`) and +5 real-engine
+// (MU-6301..MU-6305) in `catalogue-web12b.mjs`; WEB-12a's MU-1174, MU-1178..MU-1183, MU-1293, MU-1294 and the real-engine MU-1188 re-anchored
+// (HouseholdsMinimal replaced by the household screens; the same defects over the moved code).
+// WEB-12b revision 1 (review 1, F-R1-1 failed reads, F-R1-2 Try again completion, F-R1-3 capacity wording, F-R1-4 desktop prompt):
+// +13 unit (MU-6226..MU-6238) and +1 real-engine (MU-6306 over E-HH12) in `catalogue-web12b.mjs`.
+// WEB-18: +33 unit (MU-7001..MU-7025, MU-7027..MU-7034; MU-7026 not created: identical to MU-3017) and +3 real-engine (MU-7101..MU-7103) in
+// `catalogue-web18.mjs`; WEB-10c's MU-3018 re-anchored (the same fault over the editor's new start).
+// WEB-18 revision 1 (review 1, F-R2..F-R4): +6 unit (MU-7036..MU-7041; MU-7035 was withdrawn in Running and is not reused).
 // WEB-19 maintenance merge of accepted main 3f8fdf94 (5 November 2026): base 2c4e7fb (2298 unit, 308 engine) plus WEB-19 (25 unit, 4 engine) plus
 // WEB-10c (343 unit, 11 engine) = 2666 unit, 323 engine, counted from the merged catalogue; IDs do not overlap (MU-6101..MU-6154 against MU-3001..MU-3368).
 // Base merge of accepted main 74b0bac (WEB-10c, WEB-19) into WEB-13b (6 November 2026, REVISION-BASE-INTEGRATION-20261105): 2,666 + 257
@@ -119,3 +132,34 @@ export const EXPECTED_ENGINE = 335;
 // F42-3 corrections change tests and one expectation (MU-2661), never a count.
 // WEB-13b revision 36 (review 43 F43-1; design assessment 4062d86c DA-1): +6 unit (MU-5266..MU-5271) and +4 real-engine (MU-5272..MU-5275)
 // in `catalogue-web13b-r36.mjs`; MU-5265 re-anchored to the shared `HeldHeight` primitive (same id and expectation). 2,929 unit, 335 engine.
+// WEB-18 revision 2 base merge of accepted main 74b0bac (6 November 2026): base 74b0bac (2666 unit, 323 engine) plus WEB-18 (39 unit,
+// 3 engine) = 2705 unit, 326 engine, counted from the merged catalogue; IDs do not overlap (MU-7001..MU-7103 against MU-6101..MU-6154).
+// WEB-14a maintenance merge of accepted main 74b0baca (6 November 2026): base 2c4e7fb (2298 unit, 308 engine) plus WEB-14a (321
+// unit, 5 engine) plus WEB-10c (343 unit, 11 engine) plus WEB-19 (25 unit, 4 engine) = 2987 unit, 328 engine, counted from the merged catalogue.
+// WEB-14a's MU-3001..MU-3024 collided with WEB-10c's and become MU-4001..MU-4024 (`id-migrations.json`; patches and tests unchanged); no other
+// ID overlaps (MU-4001..MU-4024 against MU-4101..MU-4178 and MU-6101..MU-6154).
+// WEB-14a merge correction D-1 (6 November 2026; WEB-10c's dependency editor and turn order dialog recoverable around an app update): +10 unit
+// (MU-3801..MU-3810) = 2997 unit, 328 engine.
+// WEB-14a revision 57 (Review 57, F-R57-1: a restored editor's focus target is never inside a recovery surface): +6 unit (MU-3811..MU-3816)
+// = 3003 unit, 328 engine.
+// WEB-18 maintenance merge of accepted main 2f42ac35 (7 November 2026): base 74b0baca (2666 unit, 323 engine) plus WEB-18 (39 unit,
+// 3 engine) plus WEB-14a with D-1 and revision 57 (337 unit, 5 engine) = 3042 unit, 331 engine, counted from the merged catalogue; IDs do not
+// overlap (MU-7001..MU-7103 against MU-1296..MU-4024 and MU-3801..MU-3816).
+// WEB-18 merge correction (Kieran, 7 November 2026; D-1's dependency-editor recovery v2, (a)(b)(c)): +5 unit (MU-3817..MU-3821);
+// MU-3804 and MU-3805 re-anchored (the same faults over codec v2) = 3047 unit, 331 engine.
+// WEB-12b maintenance merge of accepted main 480f508 (7 November 2026): main 480f508 (3047 unit, 331 engine) plus WEB-12b (37 unit,
+// 6 engine) = 3084 unit, 337 engine, counted from the merged catalogue; no ID overlaps (MU-6201..MU-6238 and MU-6301..MU-6306 against
+// MU-3801..MU-3821, MU-4001..MU-4024, MU-6101..MU-6154 and MU-7001..MU-7103).
+// WEB-12b merge correction M-1 (Kieran, 6 November 2026, "Fix in the second merge"; the household dialogs' app-update recovery): +12 unit
+// (MU-6239..MU-6248, MU-6250, MU-6251; MU-6249 not catalogued, reason in `catalogue-web12b.mjs`) = 3096 unit, 337 engine.
+// WEB-12b revision 2 (Review 3 F-R3-1; M-1's submission rules per household input, test-only): +17 unit (MU-6252..MU-6268)
+// = 3113 unit, 337 engine.
+// WEB-12b revision 3 (Review 4 F-R4-1; the cells of M-1's submission rules, their writers and exits, test-only): +57 unit (MU-6269..MU-6299,
+// MU-6307..MU-6332; MU-62xx is full, so the unit IDs go on after WEB-12b's real-engine MU-6301..MU-6306) = 3170 unit, 337 engine.
+// WEB-13b maintenance merge of accepted main 480f508 (WEB-14a, WEB-18; 7 November 2026): main 480f508 (3047 unit, 331 engine) plus
+// WEB-13b (263 unit, 12 engine) = 3310 unit, 343 engine, counted from the merged catalogue. No ID overlaps and no ID moves: WEB-13b's
+// MU-5001..MU-5275 against main's additions over 74b0baca (MU-1296..MU-1299, MU-1708..MU-2000, MU-3701..MU-3707, MU-3801..MU-3821,
+// MU-4001..MU-4024, MU-7001..MU-7103; WEB-14a's earlier moves in `id-migrations.json` stay as they are); nothing live in RETIRED.
+// The same merge layered onto accepted main 8f33792 (WEB-12b's integration; 7 November 2026, Kieran's plan: one WEB-13b merge after WEB-12b):
+// main 8f33792 (3170 unit, 337 engine) plus WEB-13b (263 unit, 12 engine) = 3433 unit, 349 engine, counted from the merged catalogue; no ID
+// overlaps (WEB-13b's MU-5001..MU-5275 against WEB-12b's MU-6201..MU-6251 and MU-6301..MU-6306).

@@ -9,6 +9,7 @@ import {
   useDataActions,
   useOutstanding,
 } from "../../data";
+import { useRecoveryHost } from "../../lib/form-recovery/editor";
 import type { Dialog } from "./CalendarSources";
 import {
   CAUSE_CONNECTION,
@@ -52,6 +53,7 @@ import {
   pendingStatus,
   sourceStatus,
 } from "./model/status";
+import { manageContext, useCalendarRecoveryIdentity } from "./recovery";
 import type { RefreshController } from "./refresh-controller";
 import { type CalendarSourceView, calendarRowActions } from "./row-actions";
 
@@ -278,6 +280,12 @@ export function SourceRow({
   }, [observed, label, announcer]);
   const manage = (extra: Partial<Extract<Dialog, { kind: "manage" }>> = {}) =>
     onDialog({ kind: "manage", row: row.merged, cached: true, ...extra });
+  // Revision 37 (WEB-14a R40): settings left unsaved by the page before an update are restored, and Manage opened again on them.
+  useRecoveryHost({
+    identity: useCalendarRecoveryIdentity(),
+    context: manageContext(id),
+    open: () => manage(),
+  });
   return (
     <li
       data-source-row={id}
@@ -384,6 +392,12 @@ export function PendingRow({
   onDialog(dialog: Dialog): void;
 }) {
   const status = pendingStatus({ draft, env: environment });
+  // Revision 37 (WEB-14a R40): as `SourceRow`, for a source still waiting to be sent.
+  useRecoveryHost({
+    identity: useCalendarRecoveryIdentity(),
+    context: manageContext(row.id),
+    open: () => onDialog({ kind: "manage", row, cached: false }),
+  });
   return (
     <li
       data-pending-source={row.id}

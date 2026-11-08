@@ -76,6 +76,8 @@ export interface BootOptions {
    * own test leader and the evidence recorded with it keep their meaning (two engines must never issue `/sync` on one page).
    */
   dataLeader?: boolean;
+  /** Fixture-only content mounted in the protected tree. Production passes none. */
+  protectedExtra?: () => ReactNode;
   /**
    * WEB-09c (R23-PAIR): DIAGNOSTIC ONLY. The development-pair page tells the production leader its server segments. `main.tsx` never passes
    * it (a static test asserts it); only the fixture session harness does, and only when the page asks (`?segmented=`).
@@ -110,6 +112,10 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     rememberInvitation(next.invitation);
     if (next.oidc && live && finishLanding) void finishLanding(live, next.oidc);
   });
+  // TEST BUILDS ONLY (WEB-14a): scripts/build-pwa-generations.mjs builds generations that differ by this label, so each has its own hashed
+  // files. The production build has none, and this is then removed by the bundler.
+  const label = import.meta.env.VITE_ATLAS_BUILD_LABEL;
+  if (label) document.documentElement.dataset.atlasBuild = label;
   const reactRoot = createRoot(options.neutralRoot);
   const render = (node: ReactNode) =>
     reactRoot.render(
@@ -198,8 +204,8 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     },
   );
   live = session;
-  renderTree = createProtectedTree(session);
-  // Before `start`: an indeterminate attempt found at boot (begun before a reload or in another tab, T5/T8) is resolved during it.
+  renderTree = createProtectedTree(session, options.protectedExtra);
+  // Resolve indeterminate attempts found during boot before start publishes their outcome.
   lifecycle.startAttemptEndWatcher(session);
   const leads = options.dataLeader !== false;
   // Before the session starts: the protected tree may be mounted during `start`, and its provider must then wait for the PAGE's runtime
@@ -210,6 +216,17 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
       <SessionRoot />
     </SessionProvider>,
   );
+  // WEB-14a: the service worker and the update coordinator, in the builds that ship a worker (production and the PWA test build), loaded
+  // lazily as the session starts so the initial chunk carries only this import. Never in development, Vitest or the fixture build. The
+  // import is asked for here and resolves no earlier than a later turn, so `startBrowserAppUpdates` always runs after `session.start`
+  // below has been called (base merge of 5 November 2026: the start is awaited in place, as WEB-09c's `boot_leads_by_default` reads it).
+  if (
+    import.meta.env.MODE === "production" ||
+    import.meta.env.MODE === "pwa-fixture"
+  )
+    void import("../lib/pwa/start")
+      .then(({ startBrowserAppUpdates }) => startBrowserAppUpdates(session))
+      .catch(() => undefined);
   await session.start({ beforeStart: options.beforeStart });
   const leader = leads
     ? dataLeader.start(session, options.trace, options.dataLeaderDiagnostic)

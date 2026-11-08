@@ -80,6 +80,16 @@ may-create predicate holds, inside the session's own per-account `atlas-delete:`
 facts read synchronously, and both fail closed. No code path creates a database after a confirmed wipe (`tests/e2e/fixture.data-wipe.spec.ts`, E-W5, which holds a stale store
 handle and fires a late strict write, a draft write and a form-recovery save at the wiped account in three engines). A caller that has gone (`abandoned`, above) starts none either, and `tests/data/runtime-disposal.test.ts` shows it at each phase of an open, over the double of IndexedDB. **The predicate is read at the creating boundary, not only when the call is made (R36, revision 21):** after the wait for the lock, after the listing made under it, in the step that starts the creating open, and once more inside the creating upgrade itself (`permit`, asked by the opener's `populate` hook in the versionchange transaction that would create the database), so a fact that changed while a listing was pending or the request was queued in the engine creates nothing; a refused creation leaves no database and deletes none (removing a database is the wipe's decision), and the answer names the reason (`identity`, `operation_pending`, `closed`, `abandoned`).
 
+### A newer schema in another tab (WEB-14a, declared-then-probe)
+
+`createDexieOpener` reads the version the engine actually opened (`IDBDatabase.version`). Dexie 4 opens a database that a newer build raised past this build's
+declared version (`DECLARED_IDB_VERSION`, schema version 2 = IndexedDB 20) without an error, so the adapter checks: a newer one makes the open fail
+`StoreFailure("closed")` before anything is read (the callers answer `refused: closed`), latches the account `upgrade_pending`, reports `upgraded` once to
+`onVersionChange` (the browser runtime raises the app-update coordinator's `data_superseded`), and every later open of that account on the page (per registry)
+is refused the same way. An upgrading `versionchange` while the page holds the database does the same. The test double mirrors it (`FakeIdb.upgradeTo`);
+`tests/data/schema-probe.test.ts` and `tests/e2e/fixture.data-schema-probe.spec.ts` (real engines, with mutants MU-1817 and MU-1818) test it. No migration ships
+with WEB-14a; the first card that raises `SCHEMA_VERSION` owns the migration-failure handling (`docs/pwa.md`, OD-P1).
+
 ## The store port and the plans
 
 Every read and write goes through a **plan**: a read phase that may await only `Reader` methods, a pure `decide`, and an apply phase, all in **one** transaction. A plan
@@ -97,7 +107,7 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W6 | `admitReceipt` | INC, CLS, EPO |
 | W7 | `recordOutcome` | INC, CLS, EPO |
 | W8 | `recordFailureOfSend`, `resumeDrafts` | INC |
-| W9 | `saveFormRecovery`, `claimFormWriter`, `saveFormOperation` (WEB-11a review 4: several conditional copies, all or none) | INC, CLS |
+| W9 | `saveFormRecovery`, `claimFormWriter`, `saveFormOperation` (People conditional copies remain atomic) (and the readonly `loadFormRecovery` and, since WEB-14a, `listFormRecovery`: every non-terminal copy of one form, newest first, walked in pages of 50 index rows inside one readonly transaction (revision 1, R5: complete, no answer bound), read through `FormRecoveryPort.list` and the public `useFormRecoveryPort()`; since WEB-14a revision 8 (R16), `saveFormRecovery` with `expect`: the removal of ONE capture another page wrote, only while the row still holds it (`capture_id`), compared and decided in one strict transaction before anything of the row changes (no claim of its writer first), the terminal row's generation issued as a claim's would be, never creating a row (`FormRecoveryPort.discard(form, tab, capture)`; answers `resolved` or `changed` and writes nothing otherwise); a row also carries, optionally and versioned, its control state (`controls`, R17: in `content_digest` when present, so a row without it digests as before), its capture's identity (`capture_id`) and an update hand-off's lineage (`lineage`, the exact copies its page owed the removal of), the last two metadata that move only with the order record; after another tab's newer build upgraded the database, the four W9 plans, and only they, also run through the recovery connection `store/recovery-store.ts`, revision 1, R7) | INC, CLS |
 | W10 | the draft fence: `summariseWork`, `readBaseline`, `setDraftFence`, `setClosing`, `releaseFence`, `reconcileStaleFence` | INC |
 | W11 | the retry state: `recordReadOutcome`, `resumeReadCaller`, `resumeReadCallerOnOnline`, `resumeAllReadCallers`, `recordLocalWriteOutcome` | INC (the first also CLS, EPO) |
 | W12 | `writeProfile` | INC, CLS, EPO |
@@ -1295,6 +1305,16 @@ proxy injects (`rewrite_status` for a bare status, `replace_response` for an Atl
 
 The guards are shown to fail on their removal by a mutation catalogue run on **copies** of the source (`pnpm test:data-mutants`: 982 unit mutants (WEB-09b review cycle 1; 966 at WEB-09b's first candidate; 932 at revision 38; 914 at revision 37, 903 at revision 36, 888 at revision 35, 884 at revision 34, 875 at revision 33, 857 at revision 32), each with an unmutated control,
 the count asserted; `pnpm test:engine-mutants`: 151 mutants through a real engine (WEB-09b review cycle 1; 141 at revision 38; 140 at revision 37, 137 at revision 36, 136 at revision 35, 134 at revision 34, 132 at revision 33, 123 at revision 32)). A mutant is **caught** only by an `AssertionError` (a crash, a timeout or a suite that does not load is classified and is not evidence), and every mutant added since revision 12 carries an `expect` pattern: the test written for the defect must be among the failures (in every engine, for a real-engine mutant). An earlier mutant caught by crashes alone is reported in the results (`crash_only_legacy`), never counted as an assertion catch. It never uses `tests/.mutants`, which regenerates from the current source.
+
+**The unit runner's per-test time limit** (7 November 2026, Kieran's decision MUTATION-RUNNER-TIMEOUT-20261107). Every child of `pnpm test:data-mutants`, each
+unmutated control and each mutant alike, runs every test under **20 s** (`MUTANT_TEST_TIMEOUT_MS` in `scripts/mutation/unit-runner.mjs`) instead of Vitest's 5 s
+default, so a test that a loaded controller (load averages of 30 to 100) makes slow on a mutated path is judged by its assertions instead of ending `crash_only` or
+`tainted` by a time-out. The limit is fixed (never derived from a measured run), carried in each child's request (`testTimeoutMs`), applied as Vitest's
+`testTimeout`, recorded for every project (`origin.projects[].testTimeout`, a project that resolves to another limit is refused) and for every test
+(`witness.tests[].timeout`) in its envelope, and in the account (`test_timeout_ms`). It is a default only: a test's or suite's own explicit timeout (for example a
+file's `SLOW`) is kept as written, larger or smaller. A time-out is still never an assertion, so a test that hangs ends `crash_only` or `tainted`, at 20 s.
+Ordinary runs (`pnpm test`, `vitest.config.ts`) and the real-engine runner keep their limits. Tests: `scripts/validation/unit-runner-time-limit.test.mjs` (the
+real supervised child over a fixture) and `scripts/validation/unit-runner.test.mjs`.
 
 ## Seams
 

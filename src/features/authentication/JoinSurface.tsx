@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { Button } from "../../components/ui/button";
 import { NeutralStatus } from "../../components/ui/neutral-status";
 import {
@@ -16,6 +10,8 @@ import { register } from "./controller";
 import { authFeedback } from "./feedback";
 import { formatExpiry } from "./format";
 import { invitationMemory } from "./handoff";
+// WEB-14a revision 40 (R40-GATE; C2): the page memory's update holds follow it from now on (`held-memory.ts`).
+import "./held-memory";
 import { JoinForm } from "./JoinForm";
 import { MessageText } from "./MessageText";
 import { MESSAGE_TEXT, type Message, messageForError } from "./outcome-copy";
@@ -75,6 +71,14 @@ const previewError = (
  * keys it by the link generation) and the earlier submission's late result is bound to the invitation it was submitted from, so
  * it cannot retire the newer form. What it learned is told beside the newer link (`EarlierRegistration`), with its own way to
  * sign in, and is attributed to nothing on screen (review R5).
+ *
+ * WEB-14a revision 39 (review of revision 38, R40-COMPOSITION; design assessment C1/C2): the invitation and what a submission of it left
+ * (spent, refused after submitting, an earlier one's outcome) are page memory only, which no reload brings back: a reload shows "this link
+ * is no longer valid". So while the page holds what to tell the person after a submission, an app update does not reload over it until they
+ * act on it (sign in, dismiss) or discard it explicitly. The form's own username does the same (`JoinForm`). Revision 40 (review of revision
+ * 39, R40-GATE; design assessment C2): that hold follows the page memory (`held-memory.ts`), not this surface, so a gate that unmounts this
+ * surface never releases it; "unusable after submitting" lives there too, and the surface that comes back shows it. The form serves this
+ * link's journey (`journey`): its username comes back to the form after a gate, and never to a newer link's.
  */
 export function JoinSurface({ session: provided }: { session?: Session }) {
   const fromContext = useSession();
@@ -97,9 +101,15 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
     invitationMemory.earlier,
     invitationMemory.earlier,
   );
+  const unusable = useSyncExternalStore(
+    invitationMemory.subscribe,
+    invitationMemory.unusable,
+    invitationMemory.unusable,
+  );
+  // Revision 40 (R40-GATE): the link this surface was made for (`SessionRoot` keys it by the same generation).
+  const [journey] = useState(() => String(invitationMemory.version()));
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const username = useRef("");
 
   // The preview: not an attempt, so it is safe while anyone is signed in; an in-flight request is aborted when the page hides.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` is the "Try again" trigger and is deliberately a dependency
@@ -149,13 +159,9 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
   const onSubmit = useCallback(
     async (input: { username: string; password: string }) => {
       if (token === null) return { kind: "unavailable" as const };
-      username.current = input.username;
-      const result = await register(session, { token, ...input });
-      // `lost_response`, `superseded` and `gating` leave the invitation `spent` in page memory (see the controller), which is
-      // what this surface draws from; only a plain `401` is local.
-      if (result.kind === "unavailable")
-        setPhase({ kind: "unavailable", afterSubmit: true });
-      return result;
+      // `lost_response`, `superseded` and `gating` leave the invitation `spent` in page memory (see the controller), and a plain `401`
+      // leaves it `unusable` (revision 40), which is what this surface draws from.
+      return register(session, { token, ...input });
     },
     [session, token],
   );
@@ -166,6 +172,27 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
       <FeedbackBanners items={feedback} />
     </>
   );
+
+  function unavailableCard(afterSubmit: boolean, username: string) {
+    return (
+      <PublicCard
+        surface="join"
+        focusKey="unavailable"
+        banners={banners}
+        heading="This invitation can't be used"
+      >
+        <NeutralStatus kind="status">
+          {MESSAGE_TEXT.invitation_unavailable}
+        </NeutralStatus>
+        {afterSubmit ? (
+          <p className="text-[14px] leading-[1.6] text-ink-2">
+            {LOST_RESPONSE}
+          </p>
+        ) : null}
+        <SignInLink username={username} />
+      </PublicCard>
+    );
+  }
 
   if (memory.kind === "spent")
     return (
@@ -179,6 +206,8 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
         <SignInLink username={memory.username} />
       </PublicCard>
     );
+
+  if (unusable !== null) return unavailableCard(true, unusable);
 
   if (token === null)
     return (
@@ -234,6 +263,7 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
           ) : null}
           <JoinForm
             online={online}
+            journey={journey}
             submitLabel={
               name ? `Create account and join ${name}` : "Create account"
             }
@@ -243,24 +273,7 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
       );
     }
     case "unavailable":
-      return (
-        <PublicCard
-          surface="join"
-          focusKey="unavailable"
-          banners={banners}
-          heading="This invitation can't be used"
-        >
-          <NeutralStatus kind="status">
-            {MESSAGE_TEXT.invitation_unavailable}
-          </NeutralStatus>
-          {phase.afterSubmit ? (
-            <p className="text-[14px] leading-[1.6] text-ink-2">
-              {LOST_RESPONSE}
-            </p>
-          ) : null}
-          <SignInLink username={username.current} />
-        </PublicCard>
-      );
+      return unavailableCard(phase.afterSubmit, "");
     case "error":
       return (
         <PublicCard

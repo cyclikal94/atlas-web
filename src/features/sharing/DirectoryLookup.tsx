@@ -15,7 +15,24 @@ import { useSharingEnv } from "./env";
  *
  * It is shown as a VIEW of the open dialog or sheet (with Back), not as a second stacked dialog: the same content, sections and reading
  * order, without a nested modal's focus trap inside another (D-12a-11).
+ *
+ * WEB-12b (D-12b-5, PPL-4): `GET /directory?username=` is ALWAYS an exact match, so a name search needs the directory's browse read
+ * (`GET /directory` without a query: the first 100 accounts by username), which a server with its directory disabled refuses `403`.
+ * `browse` is OPT-IN: with it, Search reads that list on an explicit Search and filters it here (case-insensitive substring, your own
+ * account excluded); a `403` is reported to the caller (`onRefused`), which remembers it for the page lifetime, and the section then
+ * says the server finds accounts only by exact username. Without `browse` (every WEB-12a, WEB-10 and WEB-11 consumer) nothing changes.
+ * `keep` (also opt-in) keeps the two inputs outside the component, so a remount of the protected tree shows them again.
  */
+export interface LookupBrowse {
+  read(): Promise<SharingResult<DirectoryEntry[]>>;
+  /** The server already refused the browse read on this page (its directory is disabled). */
+  refused: boolean;
+  onRefused(): void;
+}
+export interface LookupKeep {
+  get(which: "search" | "exact"): string;
+  set(which: "search" | "exact", value: string): void;
+}
 type Found =
   | { status: "idle" }
   | { status: "busy" }
@@ -27,7 +44,11 @@ export function DirectoryLookup({
   onChoose,
   onBack,
   blocked,
+  browse,
+  keep,
 }: {
+  browse?: LookupBrowse;
+  keep?: LookupKeep;
   /** What the choice is for, as the heading's description ("Add account grant", "Add exclusion"). */
   purpose: string;
   onChoose(entry: DirectoryEntry): void;
@@ -38,8 +59,17 @@ export function DirectoryLookup({
   const env = useSharingEnv();
   const announcer = useAnnouncer();
   const ids = { search: useId(), exact: useId(), heading: useId() };
-  const [query, setQuery] = useState("");
-  const [exact, setExact] = useState("");
+  const [query, setQueryState] = useState(() => keep?.get("search") ?? "");
+  const [exact, setExactState] = useState(() => keep?.get("exact") ?? "");
+  const setQuery = (value: string) => {
+    setQueryState(value);
+    keep?.set("search", value);
+  };
+  const setExact = (value: string) => {
+    setExactState(value);
+    keep?.set("exact", value);
+  };
+  const [capped, setCapped] = useState(false);
   const [search, setSearch] = useState<Found>({ status: "idle" });
   const [precise, setPrecise] = useState<Found>({ status: "idle" });
   const latest = useRef({ search: 0, exact: 0 });
@@ -51,15 +81,23 @@ export function DirectoryLookup({
   ) => {
     const mine = ++latest.current[which];
     set({ status: "busy" });
+    const browsing = which === "search" && browse !== undefined;
     const result: SharingResult<DirectoryEntry[]> = await untilSent(() =>
-      env.api.lookup(username),
+      browsing ? browse.read() : env.api.lookup(username),
     );
+    // Remembered even if this view is gone: the 403 remounts the tree, and a remounted view must not ask again (D-12a-13).
+    if (browsing && !result.ok && result.kind === "forbidden")
+      browse.onRefused();
     if (mine !== latest.current[which]) return;
     if (result.ok) {
+      const needle = username.toLowerCase();
+      if (browsing) setCapped(result.value.length >= 100);
       const entries = result.value.filter(
         (entry) =>
           entry.id !== env.accountId &&
-          (which === "search" || entry.username === username),
+          (which === "search"
+            ? !browsing || entry.username.toLowerCase().includes(needle)
+            : entry.username === username),
       );
       set({ status: "done", entries });
       announcer.announce(
@@ -105,7 +143,13 @@ export function DirectoryLookup({
         >
           {copy.LOOKUP_SEARCH}
         </h3>
+        {browse?.refused ? (
+          <p className="text-[12.5px] text-ink-2" data-lookup-exact-only="">
+            {copy.LOOKUP_EXACT_ONLY}
+          </p>
+        ) : null}
         <form
+          hidden={browse?.refused === true}
           className="flex flex-wrap items-end gap-2"
           onSubmit={(event) => {
             event.preventDefault();
@@ -129,12 +173,17 @@ export function DirectoryLookup({
             <Button type="submit">{copy.LOOKUP_SEARCH_BUTTON}</Button>
           )}
         </form>
-        <Results
-          found={search}
-          onChoose={onChoose}
-          blocked={blocked}
-          exact={false}
-        />
+        {browse?.refused ? null : (
+          <Results
+            found={search}
+            onChoose={onChoose}
+            blocked={blocked}
+            exact={false}
+          />
+        )}
+        {capped && search.status === "done" && !browse?.refused ? (
+          <p className="text-[12px] text-ink-2">{copy.LOOKUP_FIRST_100}</p>
+        ) : null}
       </section>
       <section
         aria-labelledby={`${ids.exact}-h`}

@@ -1,4 +1,4 @@
-# Today and tasks (WEB-10a, WEB-10c)
+# Today and tasks (WEB-10a, WEB-10c, WEB-18)
 
 *Written by WEB-10a, 12 October 2026, against the pinned contract `v0.28.0-rc.1`. Consumers: WEB-10b (lists), WEB-10c (materialisation,
 dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people names). Fixture-stage work: `integration_passed` is false.*
@@ -587,7 +587,7 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     mounted then, consumes the session only at that revision (the form then closes onto its task only if the person is on it; the
     amount clears), and otherwise keeps the newer input with what the save had to say (a refusal, "Saved. Your newer changes are still
     here."). A fix's answer reaches its draft wherever it is (session and draft numbers are the page's, never reused). Opening an editor
-    forgets every other identity's kept input; a reload forgets all of it (page memory only; Q4 recovery is WEB-14a's). The preset
+    forgets every other identity's kept input; a reload forgets all of it (page memory only); an accepted app update saves and restores it (Q4: WEB-14a revision 37, each recoverable editor's model in `kept-input.ts`). The preset
     picker's choice is kept through its own in-dialog sync control the same way. The occurrence correction keeps its own reviewed owner.
 45. **Coming back from the sync screens finds the day and the entry the input was typed for (DA19-I1/N1, revision 19).** The day the
     detail shows without an occurrence in its address is part of the draft: it is kept with the screen through a sync visit (a
@@ -858,8 +858,12 @@ are focused evidence, never integration acceptance.*
    seen running stays shown offline ("Last checked …") after its start was acknowledged (found by I-10C-TM3; jsdom regression test).
 5. **D-10c-5** Today catches up automatically; "Later" is not offered; at most one automatic sequence per `(task, day)` per page; offline
    Today shows no banner (WEB-10a decision 16: the day is the device's), and the runner waits for the connection.
-6. **D-10c-6** An ordered list, not a tree (no edges published); a decorative `aria-hidden` chain from 1280 px.
-7. **D-10c-7** The editor replaces the whole list, opens only with nothing private, starts empty.
+6. **D-10c-6** An ordered list, not a tree (no edges published); a decorative `aria-hidden` chain from 1280 px. *Superseded by WEB-18
+   (6 November 2026): the dialog draws a tree and a map from the dependency graph; the ordered list is only the labelled fallback and the
+   chain is removed (D-18-1/2/3/9).*
+7. **D-10c-7** The editor replaces the whole list, opens only with nothing private, starts empty. *Superseded in part by WEB-18 (6 November
+   2026): it starts from the authoritative direct list of its own depth-one graph read and saves on that read's version (D-18-6/7/8); it
+   still replaces the whole list and still saves only with nothing private.*
 8. **D-10c-8** The strip is mine and from this device; run dates are not shown.
 9. **D-10c-9** Rota writes use the attempt model, online only.
 10. **D-10c-10** Prerequisites are ordering targets; a completion raises the streams it writes. A prerequisite stream this device does not
@@ -1008,7 +1012,8 @@ no longer pass for a commit (E-T15, E-T17, E-T20, E-T21, E-T22, E-T41); self-qua
 ## Limits (WEB-10c)
 
 - **No dependency edges and no direct-list read (E-1, E-2).** The map, "Needs X too" and the hierarchy keys cannot be built; the editor
-  cannot show the current direct list and replaces it whole.
+  cannot show the current direct list and replaces it whole. *Superseded by WEB-18 (6 November 2026): API 0.29.1's `getDependencyGraph`
+  (released in `v0.31.0-rc.1`) publishes the edges and the direct list; see "Dependency graph (WEB-18)" below.*
 - **Expansion limit.** Over 200 preview nodes the released backend answers a generic `500` (`ExpansionLimit` has no error mapping; E-7);
   shown as "Couldn't show what this waits for" with the request ID.
 - **Request cost** (not profiled here; WEB-09c): one preview read per day shown, two streak reads per visit, up to 16 calls and reads per
@@ -1139,8 +1144,8 @@ no longer pass for a commit (E-T15, E-T17, E-T20, E-T21, E-T22, E-T41); self-qua
 - **A `403` re-check of the session** closes and reopens the display: a screen remounts, by design of the session.
 - **Unfinished input lasts for its screen's logical visit only (decisions 44 and 48, revisions 18 and 22).** ia.md §1.3.3 requires it
   for checking sync state; the same visit also keeps it through the data hiding an editor, the cache gate and a `403` re-check's remount
-  at the same address. A reload, a crash, another tab or another identity keep nothing (the enrolment draft keeps its own owner; Q4
-  update recovery is WEB-14a's). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
+  at the same address. A reload, a crash, another tab or another identity keep nothing (the enrolment draft keeps its own owner); an
+  accepted app update saves and restores the recoverable editors' input (Q4, WEB-14a revision 37; docs/pwa.md). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
   other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
   this point, per Review 22 and DA22-I3).
 - **A save answered while the person is away closes nothing (decisions 49 and 50, revisions 23 and 24).** Coming back to the form after
@@ -1153,3 +1158,144 @@ No PostgreSQL, HTTPS deployment, physical device, installed PWA or manual screen
 production leader is exercised by one fixture case (E-T2b: a save in the tree is sent by the production dispatcher); the composed
 production-leader journey against a backend is WEB-09d's. Browser viewport and colour-scheme emulation is not device evidence. Fixture evidence (stubbed `/daily`,
 `/task-presets`, the fixture leader) is never integration evidence. Backend gates BE-Q1 and BE-CH1 have no completion record.
+
+# Dependency graph (WEB-18)
+
+*Written by WEB-18, 6 November 2026, against the pinned contract `v0.31.0-rc.1` (API 0.31.0, backend `7dc51e39`), which ships BE-DEPENDENCY-GRAPH's
+`GET /occurrences/{id}/dependency-graph` (API 0.29.1). Fixture-stage work: `integration_passed` is false; BE-Q1, BE-B6 and BE-CH1 have no completion
+record. The released-backend cases (`integration.tasks-18.spec.ts`) are focused evidence, never integration acceptance.*
+
+## What WEB-18 adds
+
+- **"What needs doing first" draws what the day waits for from ONE graph answer** (TASK-04): a summary of what blocks it directly ("Waits
+  directly for 2: 1 done. Still open: “Cook”. 1 more further back."), notices when the answer is restricted ("Some of it is private to someone
+  else, so this isn't the whole picture.") or partial ("There's more further back than shown here."), a decorative map beside the list from
+  1280 px, the list as an ARIA tree (the real control) and an inspector of the selected day with "Open this task". The completion modes are
+  unchanged and still come from the preview alone (`GET /occurrences/{id}/dependencies` and its token).
+- **The editor starts from the authoritative direct list** of its own depth-one read (`max_depth=1`) and saves on that read's root version, so a
+  server that has moved on answers `conflict` (the existing "Couldn't set what this waits for as sent." block) and nothing is overwritten.
+- **Strict reads.** `parseDependencyGraph` checks the shape, the bounds and every definitional invariant the contract states (the root first and
+  expanded; edges only between returned nodes and only from expanded ones; the direct list equal to the root's edges and to the `direct` nodes;
+  every depth the breadth-first distance; `coverage`, `restricted` and every `dependency_state` equal to their definitions; one task entry per
+  task with a node), against the request it answers (root and effective `max_depth`). Anything else is `uncertain`.
+
+## Public interface added
+
+`TasksApi.readDependencyGraph(occurrenceId, maxDepth?)`; contract types `DependencyGraph`, `DependencyGraphNode`, `DependencyEdge`,
+`DependencyGraphTask`, `DependencyState`, `DependencyRelation` and `definedState`; `model/graph.ts` (pure: `indexGraph`, `treeOf`, `edgesOfTree`,
+`summaryOf`, `mapLayout`, `mapRefusal`, `MAP_MAX_DEPTH`, `MAP_MAX_COLUMN`); `detail/useDependencyGraph.ts` (`useDependencyGraph`, `GraphView`,
+`GRAPH_READ`); `commands.ts` `SetDependenciesInput.reviewedBase` and `OCCURRENCE_VERSIONED_KINDS`; `Dialog`'s additive `size="wide"`
+(640 px from 768 px, 960 px from 1280 px; the default panel's classes are unchanged).
+
+### Obligations of a consumer (backend `docs/tasks.md` "Dependency graph", as applied here)
+
+1. A view is held in the mounted component's memory only, keyed by identity, root and `max_depth`; nothing from a graph answer is written to
+   IndexedDB, `localStorage`, the kept-input store (which keeps the editor's own list of ids, as before), the service worker or logs.
+2. One generation number per view; only the answer to the latest request of the scope still shown is applied.
+3. A shown view is read again on "Check again", when this device's own drafts of the day settle, when the account's applied sync revision moves
+   (its first value is no change: opening reads once), when the connection returns, when the document becomes visible and on a BFCache
+   restore (a BFCache hide drops the snapshot). At most one request is in flight per view; a trigger meanwhile queues one follow-up.
+4. `403`/`404` remove the view ("This item can't be shown on this device.") and are noted for the identity.
+5. Answers are never merged; each replaces the view whole.
+6. Nothing hidden is shown, guessed or counted: the summary counts visible days only and says "and something you can't see" when the root
+   waits for something hidden; a restricted or partial answer always carries its notice.
+7. The graph carries no completion authority; the modes and their reasons come from the preview (what can't be ticked off from here is named
+   from the preview's items, never annotated on the graph).
+8. The editor reads with `max_depth=1`; when its root has hidden prerequisites saving is NOT offered (it would remove them).
+
+## Decisions (D-18-1 … D-18-12, from the approved plan) and what Running changed
+
+1. **D-18-1** The graph lives in the existing dialog; the row stays preview-based (no graph read per detail visit).
+2. **D-18-2** The list is an ARIA tree: the root, its direct prerequisites, each day's prerequisites nested below it; a day placed once (under the
+   first dependant a breadth-first walk reaches, so its level is its depth), every other edge to it a reference "Needs “X · day” too" that moves
+   focus to the day itself. Nesting and references together are exactly the answer's edges (tested by a property over 300 random answers).
+   Up/Down, Right (open, then enter), Left (close, then go up), Home/End, Enter/Space (select; on a reference, go to the day); roving tab stop;
+   the root and the direct prerequisites open by default; what the person opened or closed is kept across re-reads.
+3. **D-18-3** The map is decoration (`aria-hidden`, nothing focusable): one column per depth, prerequisites to the left, this day rightmost, one
+   path per edge (same-depth edges as arcs on the left, a prerequisite nearer the root than its dependant as an arc over the top); a pointer
+   pick selects the day in the list and moves focus there. **Running changed the bound:** boxes of 112 px with 32 px gaps (the design's boxes
+   are 132 px with 40 px gaps), so four columns fit the 960 px dialog's map column: `MAP_MAX_DEPTH = 3` (the plan's 4 assumed five columns
+   fit 560 px, which they do not), and a column of more than `MAP_MAX_COLUMN = 32` boxes is not drawn either. Beyond them the list alone is
+   shown with "Too much to draw here; the list shows all of it."; below 1280 px the list alone, without that note.
+4. **D-18-4** Selecting a day shows its title and day, its state, direct or further back, what it waits for and what needs it *in this answer*
+   ("It also waits for something you can't see." when hidden), and "Open this task", which closes the dialog as Cancel does (entered evidence
+   kept) and shows that day's own detail (whose dialog reads its own graph). An unexpanded day says "What this waits for isn't shown here.".
+   **Running changed:** the selection is announced through the page's announcer (lint R6 allows no live region of the screen's own).
+5. **D-18-5** Reads per obligation 3 above. **Found in Running:** the applied revision arriving after the dialog's first read made every opening
+   read the whole graph twice; its first value is now no change (S-G1 asserts one read; MU-7033).
+6. **D-18-6** A root with hidden prerequisites: Save is not offered ("Some of what this waits for is private to someone else, so it can't be
+   changed here."); the WEB-10c rule (a fresh preview with nothing private) is kept too.
+7. **D-18-7** A new edit is seeded with the read's direct list and the root's strict rule and saved on its version (`reviewedBase`). A later read
+   that moves the base re-seeds an untouched edit and withholds Save from a touched one ("What this waits for has changed since you started."
+   with "Start again from the current list"). Save is withheld while another unsettled draft checks the day's version
+   (`OCCURRENCE_VERSIONED_KINDS`: `resolve`, `revise_occurrence`, `set_dependencies`; "Another change to this day hasn't been sent yet. Try
+   again once it's sent or discarded."), and when the read says the person may not edit the day. **Running made explicit:** with no current
+   depth-one answer (loading, failed, refused or stale) Save is withheld with the read's reason.
+8. **D-18-8** "Keep editing" starts from the SUBMITTED list, shows "Waits for now: …" from its fresh read and supersedes on that read's version.
+9. **D-18-8a** Labels are the answer's task titles and the node's day ("No date" when undated); a recurring task's days are told apart by day.
+10. **D-18-9** States: loading; offline (hidden, "Can be checked when you're online."); refused; error ("Couldn't show how these connect", request
+    ID, Try again); stale ("Couldn't check again. Shown as it was at HH:MM.", Try again); checking ("Checking again…", `aria-busy`, also
+    beside "Try again" while a stale or failed view is read again, revision 1); empty
+    ("Nothing needs doing first", or "This waits for something you can't see." when the root is restricted). **Running changed:** the preview's
+    ordered list is the labelled fallback ("How these connect couldn't be shown. This is the order they can be done in.") when the graph read
+    failed or was refused, not while it is loading (no flash of a list that is then replaced).
+11. **D-18-10** Pills from `dependency_state` (the backend's suggested labels: Done, Waiting, "Waiting on something you can't see", To do,
+    "Not shown here"), with the outcome word for missed, excluded and on-track days; "Needed directly" / "Further back".
+12. **D-18-11/12** As planned.
+
+## Tests
+
+jsdom (FIXTURE): `dependency-graph-model.test.ts` (M-P1..M-P23 one rejection per invariant, the six documented examples, every builder, M-G1..M-G7,
+the maximal answer, the 300-answer property), `dependency-graph-hook.test.tsx` (H-1..H-10), `dependency-graph-view.test.tsx` (S-G1..S-G10 with
+S-G1b one name for the day; revision 1: S-G3b a title's own words in the summary, S-G9b modifier keys left to the browser, S-G10b/c checking
+from the stale and failed views),
+`dependency-editor-graph.test.tsx` (S-ED1..S-ED8), `api-graph.test.ts`, `commands-18.test.ts`; `tests/support/tasks/graphs.ts` builds valid answers
+from small specs and carries the backend's documented examples verbatim. `dependency-dialog.test.tsx` (WEB-10c) is unchanged except a labelled
+fixture adaptation (`rootAloneAtDepthOne`, used by its `mount` and, since revision 1, by the R4 case that opens the editor through `mountTasks`
+itself, which also asserts that premise): the editor's depth-one read answers the root alone (the server state those cases assume) and the
+dialog's full read stays unavailable, so its cases keep exercising the ordered list as the fallback. Native (FIXTURE, Chromium, Firefox, WebKit):
+`fixture.tasks-18.spec.ts` E-G1..E-G5, E-G7, E-G9 (E-G6, an answer held across an account switch, is jsdom H-2: a switch remounts the detail).
+Released backend: `integration.tasks-18.spec.ts` I-18-G1..G9 in the `tasks` stack; two I-10C assertions of the ordered list now count the
+tree's items (labelled adaptations; same two days). The cases' helpers write to the server past the outbox, so nothing tells the device;
+every wait for "the device holds it" goes through one helper, `untilDeviceHolds` (`tests/integration/device-delivery.ts`, revision 3,
+review 3's F-R9): a poll that nudges sync on every pass and is met only when the applied revision has reached the writer's own receipt
+revision (that account's device only) and every named task row is cached. A single nudge followed by a passive wait is not a wait: the
+engine keeps a running step's idle poll over a nudge that arrives during that step, so such a nudge is lost until the next timer.
+`openDialog` and `openEditor` first wait for the root this way. The editor's Task picker reads the device's tasks once, when it opens
+(review 2's F-R6), so I-18-G6 waits for the root before A, B and C exist, which produces the order that once failed on almost every run
+(it is guaranteed only under the mutation judge's held sync step), then waits for A, B, C and the helper's revision and asserts the device
+holds every task it picks before opening the editor. `device-delivery.test.ts` checks the helper against the real sync engine under fake
+time and guards the spec's text (no direct nudge; every wait asserted). Mutation: `scripts/mutation/catalogue-web18.mjs` (unit MU-7001..MU-7025, MU-7027..MU-7034
+and, revision 1, MU-7036..MU-7041; MU-7026 not created, identical to MU-3017; MU-7035 withdrawn; real engine MU-7101..MU-7103); WEB-10c's
+MU-3018 re-anchored.
+
+## Limits (WEB-18)
+
+- **Two reads, two snapshots (L-18-1).** The display comes from the graph and the modes from the preview; they may briefly disagree and are never
+  combined. The server enforces completion by token.
+- **Hidden transitive prerequisites still withhold the editor (L-18-2).** The WEB-10c preview rule is kept; relaxing it (the graph shows the root
+  itself has no hidden prerequisite) is a follow-up option for Kieran.
+- **The map's bounds (L-18-3)** replace the design's "200 boxes" with a legibility rule (depth 3, 32 a column); the list always carries everything.
+- **BFCache (L-18-4).** A native BFCache restore of the dialog is not exercised (F-R23-1, the data layer's closed store after a restore); jsdom
+  H-9 covers the hook's `pagehide`/`pageshow` handling.
+- **Node-budget partial answers against a real backend (L-18-5)** are fixture-only; I-18-G8 reads a real depth-one `partial` body.
+- **The card's private design-handoff page (L-18-6)** was not readable; TASK-04 and the backend's labels were used.
+- **Request cost.** One full read per opening, plus re-reads only while the dialog is open (coalesced); the editor's read is depth one
+  (BE-DEPENDENCY-GRAPH P1: large-fan p95 908 ms on PostgreSQL). Not profiled here.
+
+## Deviations and additions for the connected-app checkpoint (WEB-18)
+
+| Item | Route and fixture state |
+| --- | --- |
+| The summary ("Waits directly for {n}: {d} done", "Still open: …", "and something you can't see", "{m} more further back"), the restricted and partial notices, "Nothing needs doing first" / "This waits for something you can't see." | `/tasks/<id>` → See what needs doing first (jsdom `dependency-graph-view.test.tsx`, native E-G1..E-G4) |
+| The tree's words: "This task: …", "Needed directly", "Further back", the state pills, "Needs “X · day” too", the keys line | the same (S-G9, E-G1) |
+| The inspector: "Waits for:", "Needed by:", "Nothing", "It also waits for something you can't see.", "What this waits for isn't shown here.", "Open this task" | the same, select a day (S-G8) |
+| "Check again", "Checking again…", "Couldn't check again. Shown as it was at HH:MM.", "Couldn't show how these connect", "Too much to draw here; the list shows all of it.", the fallback line | the same with a failing, stale or deep answer (S-G10, E-G7) |
+| The editor's "What this waits for has changed since you started." / "Start again from the current list", "Another change to this day hasn't been sent yet. Try again once it's sent or discarded.", "Waits for now: …" | `/tasks/<id>` → Set what this waits for (jsdom `dependency-editor-graph.test.tsx`, native E-G9) |
+| The wide dialog (640 px tablet, 960 px desktop) | the same |
+
+## Not claimed (WEB-18)
+
+No PostgreSQL, HTTPS deployment, physical device, installed PWA or manual screen-reader evidence (NVDA, VoiceOver, TalkBack: Q13, WEB-09d/WEB-15).
+Viewport and colour-scheme emulation is not device evidence. Fixture evidence is never integration evidence.
+

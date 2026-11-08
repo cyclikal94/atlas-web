@@ -84,6 +84,7 @@ import {
 } from "../../data/store/open";
 import type { AccountStore, Plan } from "../../data/store/port";
 import { StoreFailure, w } from "../../data/store/port";
+import { createRecoveryStore } from "../../data/store/recovery-store";
 import { createRegistry, getPageRegistry } from "../../data/store/registry";
 import { createDataEnv, type DataEnv } from "../../data/ui/env";
 import { readDefaultsSnapshotThrough } from "../../data/ui/identity-reads";
@@ -235,6 +236,26 @@ export interface DataHarness {
   recoveryRelease(name: string): void;
   recoveryResults(name: string): Promise<string[]>;
   recoveryLoad(account: AccountId): Promise<string | null>;
+  /**
+   * E-R7 (WEB-14a revision 1, R7): the PRODUCTION recovery connection (`store/recovery-store.ts`) and the production port over it, for an
+   * account whose database another build has upgraded. `admitted` stands for the latch and identity check the browser composition makes.
+   * Each call is run in order: `save` (the form `RECOVERY_ORDER_FORM`, tab `tab`, field `text`) answers the port's `SaveResult`, `list` the
+   * listed texts by tab, `discard` the `DiscardResult`, and `foreign` runs a plan OUTSIDE the recovery set (`readSyncFacts`) through the
+   * store and answers `ran` or `refused:<cause>`.
+   */
+  recoveryConnection(
+    account: AccountId,
+    input: {
+      incarnationId: string;
+      admitted?: boolean;
+      calls: Array<
+        | { kind: "save"; tab: string; text: string }
+        | { kind: "list" }
+        | { kind: "discard"; tab: string }
+        | { kind: "foreign" }
+      >;
+    },
+  ): Promise<string[]>;
   /**
    * E-P2: a persistence hold that RUNS OUT (R2, revision 6), with real components where they matter: the kernel's own hold
    * lifecycle (`openHold`) over real Web Locks and `AbortSignal.timeout`, the production Dexie adapter, a real transaction queued
@@ -2867,6 +2888,47 @@ const harness: DataHarness = {
     const run = recoveryRuns.get(name);
     if (!run) throw new Error(`no recovery run ${name}`);
     return Promise.all(run.results);
+  },
+  async recoveryConnection(account, { incarnationId, admitted = true, calls }) {
+    const store = createRecoveryStore({
+      account,
+      incarnationId,
+      admitted: () => admitted,
+    });
+    const port = createFormRecoveryPort({
+      service: () => ({ store, incarnationId }),
+      now: () => new Date().toISOString(),
+    });
+    const results: string[] = [];
+    for (const call of calls) {
+      if (call.kind === "save")
+        results.push(
+          await port.save({
+            formContext: RECOVERY_ORDER_FORM,
+            tabInstanceId: call.tab,
+            values: { text: call.text },
+            savedAt: new Date().toISOString(),
+          }),
+        );
+      else if (call.kind === "discard")
+        results.push(await port.discard(RECOVERY_ORDER_FORM, call.tab));
+      else if (call.kind === "list")
+        results.push(
+          JSON.stringify(
+            (await port.list(RECOVERY_ORDER_FORM)).map(
+              (copy) => `${copy.tabInstanceId}:${copy.values.text}`,
+            ),
+          ),
+        );
+      else
+        results.push(
+          await store.run(readSyncFacts, { incarnationId } as never).then(
+            () => "ran",
+            (error: { cause?: string }) => `refused:${error.cause}`,
+          ),
+        );
+    }
+    return results;
   },
   async recoveryLoad(account) {
     const loaded = await createFormRecoveryPort({

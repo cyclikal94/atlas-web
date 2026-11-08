@@ -167,9 +167,21 @@ export const DEFAULT_STACKS = [
     name: "sharing",
     suffix: "-sharing",
     files: [SPEC("sharing")],
+    grepInvert: "I-SH17b",
     oidc: false,
     mutates:
       "households, invitations, shared resources; paced by its stack ledger",
+  },
+  // WEB-12b (D-12b-5, PPL-4): the same sharing journeys need the backend's OTHER directory mode once. A backend of its own, started with
+  // its directory disabled (`backendEnv`, allow-listed: BACKEND_ENV_ALLOWED), runs only I-SH17b.
+  {
+    name: "sharing-directory-off",
+    suffix: "-sharing-directory-off",
+    files: [SPEC("sharing")],
+    grep: "I-SH17b",
+    oidc: false,
+    backendEnv: { ATLAS_DIRECTORY_ENABLED: "false" },
+    mutates: "one household and invitation; the directory is disabled",
   },
   {
     name: "snapshot",
@@ -179,11 +191,12 @@ export const DEFAULT_STACKS = [
     mutates: "account data seeded for the snapshot; paced by its stack ledger",
   },
   // WEB-10a: task journeys have their own backend, accounts and pacing state. WEB-10c's catch-up, dependency, timer, rota and streak
-  // journeys share it (the same accounts, paced against the same ledger).
+  // journeys share it (the same accounts, paced against the same ledger), and so do WEB-18's dependency-graph journeys (their own
+  // accounts, heidi to liam, on the same backend and ledger).
   {
     name: "tasks",
     suffix: "-tasks",
-    files: [SPEC("tasks"), SPEC("tasks-10c")],
+    files: [SPEC("tasks"), SPEC("tasks-10c"), SPEC("tasks-18")],
     oidc: false,
     mutates:
       "tasks, evidence, sharing and enrolment; paced by its stack ledger",
@@ -210,14 +223,53 @@ export const DEFAULT_STACKS = [
   },
 ];
 
+/**
+ * WEB-12b: the only backend settings a stack may change (`backendEnv`). Anything else is refused before a backend starts, so a stack
+ * can never weaken the backend's security configuration or reach outside its own process.
+ */
+export const BACKEND_ENV_ALLOWED = ["ATLAS_DIRECTORY_ENABLED"];
+/** The stack's validated backend settings ({} when it has none); throws for a key not allowed or a value that is not a string. */
+export function backendEnvOf(stack) {
+  const env = stack.backendEnv ?? {};
+  for (const [key, value] of Object.entries(env))
+    if (!BACKEND_ENV_ALLOWED.includes(key) || typeof value !== "string")
+      throw new Error(
+        `stack ${stack.name}: backend setting not allowed: ${key}`,
+      );
+  return { ...env };
+}
+/** What the specs are told of the stack's directory mode (`ATLAS_INTEGRATION_DIRECTORY`). */
+export const directoryModeOf = (stack) =>
+  backendEnvOf(stack).ATLAS_DIRECTORY_ENABLED === "false" ? "off" : "on";
+
 /** Discovered by Playwright but NOT run by the default suite: a separate, mandatory command. Never counted as passed by it. */
-export const SEPARATE = [];
+export const SEPARATE = [
+  {
+    name: "pwa",
+    files: [SPEC("pwa")],
+    obligation:
+      "I-U2 needs the worker-enabled build: node scripts/integration/run.mjs --app dist-pwa/fixture-a --browsers chromium,firefox,webkit -- tests/integration/integration.pwa.spec.ts",
+  },
+];
 
 /**
  * The skips a passing stack may contain, each with the condition under which it is designed. Any other skipped or unexecuted case
  * makes the stack incomplete. A designed skip is reported as not run, never as passed.
  */
 export const DESIGNED_SKIPS = [
+  {
+    // WEB-12b: I-SH17b needs a backend whose directory is disabled: only the `sharing-directory-off` stack starts one.
+    file: "integration.sharing.spec.ts",
+    description:
+      "this stack's directory is enabled (I-SH17b runs in sharing-directory-off)",
+    when: ({ env }) => env.ATLAS_INTEGRATION_DIRECTORY !== "off",
+  },
+  {
+    file: "integration.pwa.spec.ts",
+    description:
+      "needs the worker-enabled build: scripts/integration/run.mjs --app dist-pwa/fixture-a",
+    when: ({ app }) => !(app ?? "").includes("dist-pwa"),
+  },
   {
     file: "integration.profile.spec.ts",
     description: "not run: measurements are taken by `pnpm profile:session`",
@@ -358,6 +410,7 @@ export function planStacks({ grep, passthrough, oidc, postgres, only = [] }) {
         },
       ],
     };
+  for (const stack of DEFAULT_STACKS) backendEnvOf(stack);
   const manifest = DEFAULT_STACKS.map((stack) => ({
     ...stack,
     oidc: stack.oidc && !postgres,
@@ -692,10 +745,22 @@ export function judgeStack({
     failed = true;
     reasons.push(`Playwright exited ${exitCode}`);
   }
-  if (refusals.length > 0 && !deliberateThrottle) {
+  // WEB-12b: a planned case that provokes a PRODUCT cap's own 429 (CAP_REFUSALS) makes those refusals expected; any other 429 still
+  // fails the stack, as before.
+  const capped = CAP_REFUSALS.filter((cap) =>
+    [...planned.keys()].some((key) => key.includes(cap.provokedBy)),
+  );
+  const unexpected = refusals.filter(
+    (r) =>
+      !capped.some(
+        (cap) =>
+          cap.method === r.method && cap.path === (r.path ?? "").split("?")[0],
+      ),
+  );
+  if (unexpected.length > 0 && !deliberateThrottle) {
     failed = true;
     reasons.push(
-      `the backend refused ${refusals.length} request(s) with 429 (first: ${refusals[0].method} ${refusals[0].path}): this stack's throttle budget was not its own`,
+      `the backend refused ${unexpected.length} request(s) with 429 (first: ${unexpected[0].method} ${unexpected[0].path}): this stack's throttle budget was not its own`,
     );
   }
   if (report === null) return unproven("no result file");
@@ -800,6 +865,19 @@ export function judgeStack({
  * limiter is a 429, which the throttle check below fails.
  */
 export const SOURCE_BUDGET = { limit: 120, windowMs: 60_000 };
+/**
+ * WEB-12b: 429s that are a PRODUCT cap, not the throttle. At the pinned backend (`7dc51e39`, v0.31.0-rc.1) `POST /account-invitations`
+ * (`onboarding.rs` `invite`) calls no `source_attempt`/`account_attempt`: its only 429 is `issue`'s 20-unredeemed-per-issuer cap
+ * (`ensure!(count < 20, RateLimited)`), which I-SH14 provokes on purpose. Such a refusal is expected ONLY in a stack that plans that case;
+ * every other 429 (and this one anywhere else) still fails the stack.
+ */
+export const CAP_REFUSALS = [
+  {
+    method: "POST",
+    path: `/api/experimental/v1/account-invitations`,
+    provokedBy: "I-SH14:",
+  },
+];
 const API_PREFIX = "/api/experimental/v1";
 export const SOURCE_BUDGET_CONSUMERS = [
   ["POST", "/sessions"],

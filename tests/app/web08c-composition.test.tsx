@@ -249,6 +249,8 @@ describe("Review this device (G-10)", () => {
     );
     const watcher = boot.indexOf("lifecycle.startAttemptEndWatcher(session)");
     const start = boot.indexOf("await session.start(");
+    // Base merge of 5 November 2026: boot awaits the start in place again (WEB-09c's `boot_leads_by_default`); the start must be found.
+    expect(start).toBeGreaterThan(0);
     expect(watcher).toBeGreaterThan(0);
     expect(watcher).toBeLessThan(start);
     // Loaded with the forms, not on the initial path.

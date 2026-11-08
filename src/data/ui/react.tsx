@@ -10,6 +10,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { apiUrl } from "../../lib/api-client/wire";
+import type { FormRecoveryPort } from "../../lib/form-recovery/port";
 import type { SyncStatusModel } from "../../lib/sync-chip";
 import type { Session } from "../../session";
 import type { DataRuntime } from "../engine/account-service";
@@ -51,6 +52,8 @@ import {
   readResourceView,
 } from "../plans/pending-reads";
 import type { Loadable, Plan, Watchable } from "../store/port";
+import { getPageRegistry } from "../store/registry";
+import type { BrowserRuntime } from "./browser-env";
 import { publishCacheLifetime } from "./cache-lifetime";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import {
@@ -135,7 +138,7 @@ function createProductionEnv(
   host: PageDataHost,
   commands?: CommandRegistry,
 ): DataEnv {
-  let browser: { dispose(): void } | null = null;
+  let browser: Pick<BrowserRuntime, "dispose" | "recoveryStore"> | null = null;
   /**
    * Counts every start and every stop. A runtime is built after an asynchronous import, so it belongs to the lifetime that asked for it:
    * one that arrives after a stop (an unmount, or the cleanup of a replayed effect) is disposed at once and never kept.
@@ -203,6 +206,16 @@ function createProductionEnv(
       // The page's ONE markers object (R46, P-4), leased: the controller's start takes a lease and its stop gives it back.
       markers: host.markers,
       commands: commands ?? host.commands,
+      // The recovery connection is built by the lazily loaded composition (a supersession is only ever found by its opener).
+      recovery: {
+        storeFor: (account, incarnationId) =>
+          getPageRegistry().latch(account) === "upgrade_pending"
+            ? (host.runtime.get()?.recoveryStore?.(account, incarnationId) ??
+              browser?.recoveryStore(account, incarnationId) ??
+              null)
+            : null,
+        subscribe: (listener) => getPageRegistry().onLatch(() => listener()),
+      },
     },
     { start: false },
   );
@@ -297,6 +310,28 @@ function onlineStore() {
 export function useOptionalDataEnv(): DataEnv | null {
   return useContext(DataEnvContext);
 }
+
+/**
+ * The displayed account's form-recovery port (Q4, WEB-14a), or null outside a data provider. A recoverable form saves and restores its
+ * copy through it; see `useRecoverableForm` in src/lib/form-recovery.
+ */
+export function useFormRecoveryPort(): FormRecoveryPort | null {
+  const env = useContext(DataEnvContext);
+  const store = env?.formRecoveryOpen ?? NOT_OPEN;
+  // Null until the displayed account's database is open (or, revision 1 R7, superseded by a newer build with the recovery connection standing
+  // in): a form then restores nothing, and saving fails honestly. (Closures over the store: it is a class instance.)
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribe(listener),
+    [store],
+  );
+  const get = useCallback(() => store.get(), [store]);
+  const open = useSyncExternalStore(subscribe, get, get);
+  return env !== null && open ? env.formRecovery : null;
+}
+const NOT_OPEN = {
+  get: () => false,
+  subscribe: () => () => undefined,
+};
 
 export function useDataEnv(): DataEnv {
   const env = useContext(DataEnvContext);

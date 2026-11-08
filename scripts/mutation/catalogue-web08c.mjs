@@ -598,7 +598,7 @@ export const UNIT_LIFECYCLE = [
     patch: (t) =>
       sub(
         t,
-        "      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).\n      focusToken += 1;\n",
+        "      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).\n      focusToken += 1;\n",
         "",
       ),
   },
@@ -609,7 +609,12 @@ export const UNIT_LIFECYCLE = [
     file: "src/session/adapters/protected-surface.ts",
     tests: ["tests/session/resume-gate.test.tsx"],
     expect: /does not take focus from a control the person moved to/,
-    patch: (t) => sub(t, "      if (deferred && moved) return;\n", ""),
+    patch: (t) =>
+      sub(
+        sub(t, "        claimed ||\n", ""),
+        "        (active !== doc.body && tree.contains(active)) ||\n",
+        "",
+      ),
   },
   {
     id: "MU-8C-HF13d",
@@ -620,11 +625,7 @@ export const UNIT_LIFECYCLE = [
     expect:
       /focus returns to the control that had it|the original schedule of HF-13/,
     patch: (t) =>
-      sub(
-        t,
-        "        if (target) target.focus();\n",
-        "        if (target) void target;\n",
-      ),
+      sub(t, "          target.focus();\n", "          void target;\n"),
   },
   {
     id: "MU-8C-RR1",
@@ -1078,14 +1079,24 @@ export const ENGINE_LIFECYCLE = [
     spec: "tests/e2e/fixture.session-gate.spec.ts",
     grep: "HF-13 \\(revision 3\\)",
     expect: /HF-13 \(revision 3\)/,
+    // The merged fallback also cancels on a keyed lift and remembers any focus claim.
+    // Revert all paths that protect the pending heading, preserving this mutant's original defect.
     patch: (t) =>
       sub(
         sub(
-          t,
-          "      // The gate owns focus until the lift: a heading attempt still waiting from the mount is obsolete (HF-13).\n      focusToken += 1;\n",
+          sub(
+            sub(
+              t,
+              "      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).\n      focusToken += 1;\n",
+              "",
+            ),
+            "          // The person's own place wins over a heading focus still pending from an earlier mount (revision 19, R27).\n          focusToken += 1;\n",
+            "",
+          ),
+          "        claimed ||\n",
           "",
         ),
-        "      if (deferred && moved) return;\n",
+        "        (active !== doc.body && tree.contains(active)) ||\n",
         "",
       ),
   },

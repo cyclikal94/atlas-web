@@ -92,6 +92,36 @@ export type ManagementCommand =
       id: string;
       expected_version: number;
       accept: boolean;
+    }
+  // WEB-12b: the rest of the contract's household commands (each names its own counter: SHARE-9).
+  | {
+      kind: "rename_household";
+      id: string;
+      name: string;
+      expected_version: number;
+    }
+  | {
+      kind: "remove_household_member";
+      household_id: string;
+      account_id: string;
+      expected_version: number;
+    }
+  | {
+      kind: "set_household_role";
+      household_id: string;
+      account_id: string;
+      expected_version: number;
+      manager: boolean;
+    }
+  | {
+      kind: "set_primary_household";
+      household_id: string | null;
+      expected_version: number;
+    }
+  | {
+      kind: "revoke_household_invitation";
+      id: string;
+      expected_version: number;
     };
 
 export type AccessCommand =
@@ -282,16 +312,26 @@ export function classifyThrown(error: unknown): SharingFailure {
   return { ok: false, kind: "uncertain" };
 }
 
-interface Answered {
+export interface Answered {
   data?: unknown;
   error?: unknown;
   response: Response;
 }
 
-async function call<T>(
+/**
+ * One call of the stamped client, its answer validated (`parse`) or classified. `classify` (WEB-12b, D-12b-10) lets the household module
+ * classify ITS calls' non-2xx answers first (a refusal the generic rule calls uncertain); it answers null to fall back to `classifyAnswer`.
+ * Every other caller passes none, so its classification is unchanged.
+ */
+export async function call<T, F = never>(
   run: () => Promise<Answered>,
   parse: (body: unknown) => T | null,
-): Promise<SharingResult<T>> {
+  classify?: (
+    status: number,
+    contentType: string | null,
+    body: unknown,
+  ) => F | null,
+): Promise<SharingResult<T> | F> {
   try {
     const { data, error, response } = await run();
     if (response.ok) {
@@ -300,11 +340,10 @@ async function call<T>(
         ? { ok: false, kind: "uncertain" }
         : { ok: true, value };
     }
-    return classifyAnswer(
-      response.status,
-      response.headers.get("content-type"),
-      error,
-    );
+    const contentType = response.headers.get("content-type");
+    const special = classify?.(response.status, contentType, error) ?? null;
+    if (special !== null) return special;
+    return classifyAnswer(response.status, contentType, error);
   } catch (error) {
     return classifyThrown(error);
   }
@@ -316,13 +355,17 @@ const NOT_SENT_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1_000];
  * `not_sent` means the session held the request back for a moment (nothing was sent, nothing counted): the stamped-call contract says
  * the caller makes the same call again, so it is asked again quietly, a bounded number of times, and only then reported.
  */
-export async function untilSent<T>(
-  call: () => Promise<SharingResult<T>>,
+export async function untilSent<
+  T,
+  // WEB-12b: any result of this shape (the household calls add two refusals of their own); the behaviour is unchanged.
+  R extends { ok: true } | { ok: false; kind: string } = SharingResult<T>,
+>(
+  call: () => Promise<R>,
   options: {
     isCurrent?: () => boolean;
     sleep?: (ms: number) => Promise<void>;
   } = {},
-): Promise<SharingResult<T>> {
+): Promise<R> {
   const isCurrent = options.isCurrent ?? (() => true);
   const sleep =
     options.sleep ??

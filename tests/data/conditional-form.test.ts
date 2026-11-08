@@ -5,6 +5,7 @@ import { digestOf } from "../../src/data/model/canonical";
 import type { FormRecoveryRow } from "../../src/data/model/types";
 import { setClosing } from "../../src/data/plans/fence";
 import { readFormCopies } from "../../src/data/plans/form-copies";
+import { saveFormRecovery } from "../../src/data/plans/form-recovery";
 import { createConditionalFormPort } from "../../src/data/ports/conditional-form";
 import { createFormRecoveryPort } from "../../src/data/ports/form-recovery";
 import type { RecoverySnapshot } from "../../src/lib/form-recovery/port";
@@ -381,4 +382,82 @@ describe("review 4: several rows in one transaction, tombstones and one binding 
           "live",
         ]);
     });
+});
+
+describe("WEB-14a / WEB-11a integration: capture identity and content digest", () => {
+  test("a digest string cannot retire a capture, and a People replacement invalidates the old capture", async () => {
+    const w = await pageWorld();
+    const ordinary = createFormRecoveryPort({
+      service: () => w.service,
+      now: () => NOW,
+    });
+    expect(
+      await ordinary.save({
+        ...snap({ held: "original" }),
+        capture: "pwa-capture",
+      }),
+    ).toBe("saved");
+    const [row] = await rowsOf(w);
+    if (!row) throw new Error("Expected a saved recovery row");
+    const retire = (capture: string) =>
+      w.service.store.run(saveFormRecovery, {
+        incarnationId: w.service.incarnationId,
+        row: {
+          ...row,
+          terminal: true,
+          fields: {},
+          content_digest: digestOf({}),
+        },
+        expect: capture,
+      });
+    expect(await retire(row.content_digest)).toEqual({ kind: "changed" });
+    expect((await rowsOf(w))[0]).toEqual(row);
+    expect(
+      await portOf(w).put(
+        snap({ held: "new People state" }),
+        row.content_digest,
+      ),
+    ).toEqual({
+      kind: "saved",
+      digest: digestOf({ held: "new People state" }),
+    });
+    expect(await retire("pwa-capture")).toEqual({ kind: "changed" });
+    expect((await rowsOf(w))[0]?.fields).toEqual({ held: "new People state" });
+  });
+
+  test("exact PWA retirement stays terminal against a People write with the old digest", async () => {
+    const w = await pageWorld();
+    const ordinary = createFormRecoveryPort({
+      service: () => w.service,
+      now: () => NOW,
+    });
+    expect(
+      await ordinary.save({
+        ...snap({ held: "original" }),
+        capture: "pwa-capture",
+      }),
+    ).toBe("saved");
+    const [row] = await rowsOf(w);
+    if (!row) throw new Error("Expected a saved recovery row");
+    expect(
+      await w.service.store.run(saveFormRecovery, {
+        incarnationId: w.service.incarnationId,
+        row: {
+          ...row,
+          terminal: true,
+          fields: {},
+          content_digest: digestOf({}),
+        },
+        expect: "pwa-capture",
+      }),
+    ).toEqual({ kind: "saved" });
+    expect(
+      await portOf(w).put(
+        snap({ held: "obsolete People state" }),
+        row.content_digest,
+      ),
+    ).toEqual({ kind: "changed", stored: "ended" });
+    const read = await portOf(w).read(CONTEXT, TAB);
+    expect(read.kind).toBe("ended");
+  });
 });

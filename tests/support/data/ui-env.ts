@@ -14,6 +14,7 @@ import type {
 import { summariseQueue } from "../../../src/data/model/queue-summary";
 import type { CurrentRead } from "../../../src/data/outbox/registries";
 import { createCommandRegistry } from "../../../src/data/outbox/registries";
+import { MemoryRecoveryAdapter } from "../../../src/lib/form-recovery/memory-adapter";
 import type { Identity, Store } from "../../../src/session";
 
 /**
@@ -313,6 +314,9 @@ export function stubEnv(
     },
     serviceStore: serviceCell as never,
     cacheLifetime: new Cell(null),
+    formRecovery: new MemoryRecoveryAdapter(),
+    // The fake resource service has no recovery database.
+    formRecoveryOpen: new Cell(false),
     setResource(id, merged) {
       resources.set(id, {
         status: "ready",

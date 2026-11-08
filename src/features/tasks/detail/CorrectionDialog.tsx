@@ -1,7 +1,23 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
+import { useFormRecoveryPort } from "../../../data";
+import type {
+  RecoverableModel,
+  RecoveryControls,
+} from "../../../lib/form-recovery/model";
+import type { DiscardResult } from "../../../lib/form-recovery/port";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
+import { pageFormRegistry } from "../../../lib/form-recovery/registry";
 import { FROM_REVIEW } from "../../calendars/copy-review";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
@@ -14,6 +30,11 @@ import {
   correctionResult,
 } from "../model/correction";
 import type { MoveSeed } from "../model/move";
+import {
+  correctionFormContext,
+  correctionRecoveryValues,
+  restoreCorrection,
+} from "../model/recovery";
 import { resolveWallTime } from "../model/time";
 import type { RowModel } from "../view";
 import {
@@ -26,12 +47,15 @@ import {
 import {
   adoptCorrection,
   completeCorrection,
+  correctionEntry,
   correctionKey,
   discardCorrection,
   editCorrection,
   forgetCorrectionSessions,
+  linkCorrection,
   openCorrection,
   releaseCorrection,
+  resetCorrection,
   resumable,
   retainCorrection,
   submitCorrection,
@@ -84,6 +108,91 @@ export const CORRECTION_COPY = {
  * Escape and the close icon discard it. A save consumes only the exact session and revision it submitted.
  */
 export const retainedKey = correctionKey;
+
+/**
+ * Revision 37 (WEB-14a R40): the correction's session as one recoverable text (version 1), read back against the occurrence as this device
+ * has it now (`restoreCorrection`: a label of an item it no longer has, or a value of another shape, makes it unreadable: offered, never
+ * restored in part).
+ */
+const encodeCorrection = (state: CorrectionState): string =>
+  JSON.stringify({
+    v: 1,
+    state: JSON.parse(correctionRecoveryValues(state).correction ?? "null"),
+  });
+function decodeCorrection(row: RowModel, text: string): CorrectionState | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    if (raw === null || typeof raw !== "object" || raw.v !== 1) return null;
+    return restoreCorrection(
+      { correction: JSON.stringify(raw.state) },
+      row.data,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** The correction model of `row`'s day, linked for this identity, shown while mounted and bound to the account's store. */
+function useCorrectionModel(
+  row: RowModel,
+  identity: string,
+  /** An editor shows it (the dialog); a host that only looks for a copy does not. */
+  shown: boolean,
+): RecoverableModel {
+  const port = useFormRecoveryPort();
+  const visitOf = useTaskVisit();
+  const latest = useRef({ row, visitOf });
+  latest.current = { row, visitOf };
+  const key = correctionKey(identity, row.id);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one model per key and identity; the row is read through `latest` (a copy is read against the occurrence as it is now)
+  const model = useMemo(
+    () =>
+      linkCorrection(
+        key,
+        identity,
+        correctionFormContext(row.id),
+        {
+          encode: encodeCorrection,
+          decode: (text) => decodeCorrection(latest.current.row, text),
+        },
+        () => correctionFrom(latest.current.row.data),
+        () => latest.current.visitOf(identity),
+      ),
+    [key, identity],
+  );
+  useEffect(() => (shown ? model.show() : undefined), [model, shown]);
+  // The dialog binds it itself, after its session opened (the look must find that session's start, not take it for input).
+  useEffect(() => {
+    if (!shown) model.bind(port);
+  }, [model, port, shown]);
+  return model;
+}
+
+/**
+ * Revision 37 (WEB-14a R40; design assessment C1): the DETAIL looks for a correction the page before an update left for the day it shows:
+ * the dialog is not open after a reload, so a look inside it would never run. A copy restored is a retained session of this visit, and the
+ * dialog is opened on it (`onRestored`), at the stage the person had reached; nothing is submitted. Renders nothing.
+ */
+export function CorrectionRecoveryHost({
+  row,
+  identity,
+  onRestored,
+}: {
+  row: RowModel;
+  identity: string;
+  onRestored(occurrenceId: string): void;
+}) {
+  const model = useCorrectionModel(row, identity, false);
+  const view = useSyncExternalStore(model.subscribe, model.view, model.view);
+  const restored = view.restored !== null;
+  const latest = useRef(onRestored);
+  latest.current = onRestored;
+  useEffect(() => {
+    if (restored && resumable(correctionKey(identity, row.id)) !== null)
+      latest.current(row.id);
+  }, [restored, row.id, identity]);
+  return null;
+}
 export function forgetAllCorrections(): void {
   forgetCorrectionSessions();
 }
@@ -126,6 +235,29 @@ export function CorrectionDialog({
   };
   const [state, setState] = useState<CorrectionState>(
     () => resumable(key) ?? fresh(row.data),
+  );
+  // Revision 37 (WEB-14a R40): the session's recoverable model (the registry's, while the dialog shows it), its view and the update's hold.
+  const model = useCorrectionModel(row, identity, true);
+  const body = useRef<HTMLDivElement>(null);
+  const firstField = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // A date or time field partly typed has no value the session can hold: unfinished, never saved as empty.
+    model.probe(() =>
+      Array.from(body.current?.querySelectorAll("input") ?? []).some(
+        (input) => input.validity?.badInput === true,
+      ),
+    );
+    return () => model.probe(null);
+  }, [model]);
+  const recoveryView = useSyncExternalStore(
+    model.subscribe,
+    model.view,
+    model.view,
+  );
+  const locked = useSyncExternalStore(
+    pageFormRegistry.subscribe,
+    pageFormRegistry.frozen,
+    pageFormRegistry.frozen,
   );
   const [errors, setErrors] = useState<
     Partial<Record<CorrectionField, string>>
@@ -207,6 +339,11 @@ export function CorrectionDialog({
     const unheard = onRouteMoved(renew);
     const stop = subscribeCorrection(key, (event) => {
       if (event.session !== session.current) return;
+      if (event.kind === "restored") {
+        const entry = correctionEntry(key);
+        if (entry !== null) setState(entry.state);
+        return;
+      }
       setBusy(false);
       if (event.kind !== "consumed") return;
       session.current = null;
@@ -228,6 +365,11 @@ export function CorrectionDialog({
       session.current = null;
     };
   }, [key, identity]);
+  // Revision 37 (R40): bound after the session opened (above).
+  const port = useFormRecoveryPort();
+  useEffect(() => {
+    model.bind(port);
+  }, [model, port]);
   const formId = useId();
   const weekday =
     row.data.slot.date === null
@@ -236,7 +378,9 @@ export function CorrectionDialog({
   const goal = row.data.definition.goal;
   const set = (patch: Partial<CorrectionState>) => {
     const next = { ...state, ...patch };
-    if (session.current !== null) editCorrection(key, session.current, next);
+    // Refused while an update reload is prepared (R40): the dialog keeps what was saved.
+    if (session.current !== null && !editCorrection(key, session.current, next))
+      return;
     setState(next);
   };
   const field = (name: CorrectionField) =>
@@ -250,9 +394,31 @@ export function CorrectionDialog({
       </p>
     ) : null;
   const discard = () => {
-    if (session.current !== null) discardCorrection(key, session.current);
+    if (session.current !== null && !discardCorrection(key, session.current))
+      return;
     setState(correctionFrom(row.data));
     setErrors({});
+  };
+  // "Discard instead" of a restored correction (R40): its copies go, and the dialog shows the day as it is now (the session goes on).
+  const recovery: RecoveryControls = {
+    view: recoveryView,
+    locked,
+    discard() {
+      // Admitted at the gesture or not at all (revision 38, R40-A): the session, the dialog and the model take the day as it is now in
+      // this same step; the copies' removal completing later changes nothing on screen.
+      if (!model.accepting()) return Promise.resolve<DiscardResult>("failed");
+      const fresh = correctionFrom(row.data);
+      const result = model.discard(encodeCorrection(fresh));
+      if (session.current !== null)
+        resetCorrection(key, session.current, fresh);
+      setState(fresh);
+      setErrors({});
+      return result;
+    },
+    retry: () => model.retry(),
+    checkAgain: model.checkAgain,
+    restoreAlternative: (copy) => model.restoreAlternative(copy.tabInstanceId),
+    discardAlternative: (copy) => model.discardAlternative(copy.tabInstanceId),
   };
   // Whether a correction may be saved now, by this render's facts (R30): every route into a save is admitted here, not only by the
   // footer's state. A known denial of the occurrence (`can_edit: false` as this device last read it) keeps what was typed, unsaved; the
@@ -350,7 +516,8 @@ export function CorrectionDialog({
         </div>
       }
     >
-      <div className="flex flex-col gap-4" data-correction-form="">
+      <div ref={body} className="flex flex-col gap-4" data-correction-form="">
+        <RecoveryNotice recovery={recovery} firstFieldRef={firstField} />
         {seed ? (
           <p
             data-correction-from-review=""
@@ -421,6 +588,7 @@ export function CorrectionDialog({
         <div className="grid gap-3 tablet:grid-cols-2">
           <div>
             <Input
+              ref={firstField}
               label={CORRECTION_COPY.date}
               type="date"
               value={state.date}

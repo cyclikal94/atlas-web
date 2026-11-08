@@ -10,8 +10,10 @@ import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import * as copy from "../../../src/features/sharing/copy";
 import { DirectoryLookup } from "../../../src/features/sharing/DirectoryLookup";
-import { HouseholdsMinimal } from "../../../src/features/sharing/HouseholdsMinimal";
+import * as hh from "../../../src/features/sharing/households/copy";
+import { forgetHouseholdsMemory } from "../../../src/features/sharing/households/memory";
 import { formatWhen } from "../../../src/features/sharing/parts";
+import { installMatchMedia } from "../../helpers/match-media";
 import {
   FLAT,
   HOME,
@@ -22,17 +24,31 @@ import {
   snapshot,
 } from "../../support/data/sharing";
 import { stubEnv } from "../../support/data/ui-env";
+import { fakeSharingApi, ok } from "../../support/sharing/fake-api";
 import {
-  type FakeSharingApi,
-  fakeSharingApi,
-  ok,
-} from "../../support/sharing/fake-api";
+  type FakeHouseholdApi,
+  fakeHouseholdApi,
+} from "../../support/sharing/fake-households";
+import { mountHouseholds } from "../../support/sharing/households";
 import { mountSharing } from "../../support/sharing/mount";
+import { must, present, presentAll } from "../../support/sharing/present";
 
 /**
- * A8, A9 (component layer): WEB-12a's household demonstration subset and the directory lookup (WF-SHARING-05), in jsdom. FIXTURE evidence.
+ * A8, A9 (component layer): the household cases WEB-12a wrote against its demonstration subset (`HouseholdsMinimal`), RE-TARGETED by WEB-12b
+ * to the full household screens that replace it (D-12b-1: the create is the route-addressed New household dialog, an invite is the
+ * household's Invitations dialog). Every assertion is kept; what changed is how each screen is reached, stated at each case. The directory
+ * lookup (WF-SHARING-05) cases are unchanged. FIXTURE evidence, in the application's own router and protected providers.
  */
-afterEach(cleanup);
+installMatchMedia({ width: 1440 });
+afterEach(() => {
+  cleanup();
+  forgetHouseholdsMemory();
+});
+/**
+ * A banner's own text. The announcer also writes an error banner's message into its live region on the next frame (lint R6), so a
+ * page-wide text query could match it twice depending on timing; the assertions are about the banner shown.
+ */
+const BANNER = { selector: "[data-sharing-banner] p" };
 
 const home = household({
   id: HOME,
@@ -43,26 +59,48 @@ const home = household({
   ],
 });
 
+const createButton = () =>
+  must(screen.queryByRole("button", { name: hh.CREATE }));
+/** The New household form (its Create sits in the dialog's footer, associated with it). */
+const createForm = () =>
+  document.querySelector("[data-households-new]") as HTMLFormElement;
+const nameField = () => present(() => screen.queryByLabelText(hh.NAME_LABEL));
+const reasonOf = (button: HTMLElement) =>
+  document.getElementById(button.getAttribute("aria-describedby") ?? "")
+    ?.textContent;
+
 describe("the households subset (A8)", () => {
   test("lists your households with role and members; creates a household; invites by exact username with the household's version", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([home]);
     api.defaults.lookup = (username) =>
       ok(username === "jamie" ? [{ id: FLAT, username: "jamie" }] : []);
-    const t = mountSharing(<HouseholdsMinimal />, { api });
-    const row = (await screen.findByText("Home")).closest(
-      "[data-household]",
-    ) as HTMLElement;
-    expect(row).toHaveTextContent(copy.HOUSEHOLD_ROLE("manager"));
-    expect(row).toHaveTextContent("me, sam");
-    fireEvent.change(within(row).getByLabelText(copy.INVITE_LABEL("Home")), {
+    const t = mountHouseholds(`/sharing/households/${HOME}/invitations`, {
+      api,
+    });
+    const row = (
+      await presentAll(() => screen.queryAllByText("Home"))
+    )[0]?.closest("[data-household]") as HTMLElement;
+    // Re-targeted: the role is the pane row's "you manage it"; the members are the detail's rows.
+    expect(row).toHaveTextContent(hh.YOU_MANAGE);
+    const members = [
+      ...document.querySelectorAll("[data-household-members] [data-member]"),
+    ].map((m) => m.textContent);
+    expect(members.join(" ")).toContain("me");
+    expect(members.join(" ")).toContain("sam");
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: hh.INVITATIONS_TITLE_FOR("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(hh.USERNAME_LABEL)), {
       target: { value: "jamie" },
     });
     fireEvent.click(
-      within(row).getByRole("button", { name: copy.INVITE_BUTTON }),
+      must(within(dialog).queryByRole("button", { name: hh.INVITE })),
     );
-    await waitFor(() => expect(t.api.sent).toHaveLength(1));
-    expect(t.api.sent[0]?.commands).toEqual([
+    await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
+    expect(t.api.sentCommands[0]?.commands).toEqual([
       {
         kind: "invite_to_household",
         id: expect.any(String),
@@ -71,12 +109,11 @@ describe("the households subset (A8)", () => {
         expected_version: 4,
       },
     ]);
-    fireEvent.change(screen.getByLabelText(copy.CREATE_NAME), {
-      target: { value: "Flat 2" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE_BUTTON }));
-    await waitFor(() => expect(t.api.sent).toHaveLength(2));
-    expect(t.api.sent[1]?.commands).toEqual([
+    await t.navigate("/sharing/new");
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
+    fireEvent.click(createButton());
+    await waitFor(() => expect(t.api.sentCommands).toHaveLength(2));
+    expect(t.api.sentCommands[1]?.commands).toEqual([
       { kind: "create_household", id: expect.any(String), name: "Flat 2" },
     ]);
     // After each success the households and the sharing defaults are read again (membership moves the revision).
@@ -87,24 +124,30 @@ describe("the households subset (A8)", () => {
   });
 
   test("an invite for a username with no exact match is not sent", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([home]);
-    const t = mountSharing(<HouseholdsMinimal />, { api });
-    const row = (await screen.findByText("Home")).closest(
-      "[data-household]",
-    ) as HTMLElement;
-    fireEvent.change(within(row).getByLabelText(copy.INVITE_LABEL("Home")), {
+    const t = mountHouseholds(`/sharing/households/${HOME}/invitations`, {
+      api,
+    });
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: hh.INVITATIONS_TITLE_FOR("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(hh.USERNAME_LABEL)), {
       target: { value: "nobody" },
     });
     fireEvent.click(
-      within(row).getByRole("button", { name: copy.INVITE_BUTTON }),
+      must(within(dialog).queryByRole("button", { name: hh.INVITE })),
     );
-    expect(await screen.findByText(copy.INVITE_NOT_FOUND)).toBeInTheDocument();
-    expect(t.api.sent).toEqual([]);
+    expect(
+      await present(() => screen.queryByText(copy.INVITE_NOT_FOUND, BANNER)),
+    ).toBeInTheDocument();
+    expect(t.api.sentCommands).toEqual([]);
   });
 
   test("Invitations for you: accept sends respond_to_household_invitation with its version; an expired one says so", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.invitations = ok([
       {
         id: SAM,
@@ -116,15 +159,17 @@ describe("the households subset (A8)", () => {
         version: 2,
       },
     ]);
-    api.next.management.push({ ok: false, kind: "gone", requestId: "r-1" });
-    const t = mountSharing(<HouseholdsMinimal />, { api });
+    api.next.command.push({ ok: false, kind: "gone", requestId: "r-1" });
+    const t = mountHouseholds("/sharing/invitations", { api });
     fireEvent.click(
-      await screen.findByRole("button", { name: `${copy.ACCEPT}: Flat` }),
+      await present(() =>
+        screen.queryByRole("button", { name: `${hh.ACCEPT}: Flat` }),
+      ),
     );
     expect(
-      await screen.findByText(copy.INVITATION_EXPIRED),
+      await present(() => screen.queryByText(copy.INVITATION_EXPIRED, BANNER)),
     ).toBeInTheDocument();
-    expect(t.api.sent[0]?.commands).toEqual([
+    expect(t.api.sentCommands[0]?.commands).toEqual([
       {
         kind: "respond_to_household_invitation",
         id: SAM,
@@ -135,36 +180,33 @@ describe("the households subset (A8)", () => {
   });
 
   test("an uncertain create is retried as the SAME attempt (same id, key and body), and nothing new is sent meanwhile", async () => {
-    const api = fakeSharingApi();
-    api.next.management.push({ ok: false, kind: "uncertain" });
-    const t = mountSharing(<HouseholdsMinimal />, { api });
-    fireEvent.change(await screen.findByLabelText(copy.CREATE_NAME), {
-      target: { value: "Flat 2" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE_BUTTON }));
-    expect(await screen.findByText(copy.UNCERTAIN)).toBeInTheDocument();
+    const api = fakeHouseholdApi();
+    api.next.command.push({ ok: false, kind: "uncertain" });
+    const t = mountHouseholds("/sharing/new", { api });
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
+    fireEvent.click(createButton());
     expect(
-      screen.getByRole("button", { name: copy.CREATE_BUTTON }),
-    ).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
-    await waitFor(() => expect(t.api.sent).toHaveLength(2));
-    expect(t.api.sent[1]).toEqual(t.api.sent[0]);
+      await present(() => screen.queryByText(copy.UNCERTAIN, BANNER)),
+    ).toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
+    await waitFor(() => expect(t.api.sentCommands).toHaveLength(2));
+    expect(t.api.sentCommands[1]).toEqual(t.api.sentCommands[0]);
   });
 
   test("offline: the last snapshot's households with their time; actions disabled; nothing asked", async () => {
     const env = stubEnv();
     env.setDefaults(record(snapshot({ households: [home] })));
-    const api = fakeSharingApi();
-    mountSharing(<HouseholdsMinimal />, {
-      env,
-      api,
-      sharing: { online: false },
-    });
-    expect(await screen.findByText("Home")).toBeInTheDocument();
-    expect(screen.getByText(/As of/)).toBeInTheDocument();
+    const api = fakeHouseholdApi();
+    mountHouseholds("/sharing/new", { env, api, sharing: { online: false } });
     expect(
-      screen.getByRole("button", { name: copy.CREATE_BUTTON }),
-    ).toBeDisabled();
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/Last read/).length).toBeGreaterThan(0);
+    // Re-targeted: the create is the New household dialog's.
+    expect(createButton()).toBeDisabled();
     expect(api.calls).toEqual([]);
   });
 });
@@ -257,16 +299,14 @@ describe("the directory lookup (A9, WF-SHARING-05)", () => {
 // ---- WEB-12a review 2 ------------------------------------------------------------------------------------------------------------
 describe("R7: after a household change the snapshot is asked for AFTER it", () => {
   test("MU-S53: a successful create asks for a snapshot read issued after the success (an acquisition with a boundary), never a refresh that could share an older read", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([home]);
-    const t = mountSharing(<HouseholdsMinimal />, { api });
-    await screen.findByText("Home");
+    const t = mountHouseholds("/sharing/new", { api });
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
+    await waitFor(() => expect(createButton()).not.toBeDisabled());
     const before = t.env.calls.length;
-    fireEvent.change(screen.getByLabelText(copy.CREATE_NAME), {
-      target: { value: "Flat 2" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: copy.CREATE_BUTTON }));
-    await waitFor(() => expect(t.api.sent).toHaveLength(1));
+    fireEvent.click(createButton());
+    await waitFor(() => expect(t.api.sentCommands).toHaveLength(1));
     await waitFor(() =>
       expect(
         t.env.calls
@@ -284,58 +324,61 @@ describe("R7: after a household change the snapshot is asked for AFTER it", () =
 
 // ---- WEB-12a review 3 ------------------------------------------------------------------------------------------------------------
 describe("R8 (review 3): an unresolved household attempt is kept until a receipt or the server's refusal ends it", () => {
-  const createButton = () =>
-    screen.getByRole("button", { name: copy.CREATE_BUTTON });
-  const reasonOf = (button: HTMLElement) =>
-    document.getElementById(button.getAttribute("aria-describedby") ?? "")
-      ?.textContent;
   /** Every adapter invocation of the management command (an `offline` answer of the adapter is an invocation, never a request). */
-  const invocations = (api: FakeSharingApi) =>
-    api.calls.filter((c) => c.op === "management").length;
+  const invocations = (api: FakeHouseholdApi) => api.count("command");
   /** A create of "Flat 2" whose outcome is uncertain; returns the command that was sent. */
   async function uncertainCreate(
-    api: FakeSharingApi,
-    sharing: Parameters<typeof mountSharing>[1] = {},
+    api: FakeHouseholdApi,
+    sharing: Parameters<typeof mountHouseholds>[1] = {},
   ) {
-    api.next.management.push({ ok: false, kind: "uncertain" });
-    const t = mountSharing(<HouseholdsMinimal />, { api, ...sharing });
-    fireEvent.change(await screen.findByLabelText(copy.CREATE_NAME), {
-      target: { value: "Flat 2" },
-    });
+    api.next.command.push({ ok: false, kind: "uncertain" });
+    const t = mountHouseholds("/sharing/new", { api, ...sharing });
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
     fireEvent.click(createButton());
-    expect(await screen.findByText(copy.UNCERTAIN)).toBeInTheDocument();
+    expect(
+      await present(() => screen.queryByText(copy.UNCERTAIN, BANNER)),
+    ).toBeInTheDocument();
     expect(invocations(api)).toBe(1);
-    return { t, first: structuredClone(api.sent[0]) };
+    return { t, first: structuredClone(api.sentCommands[0]) };
   }
 
   test("MU-S55: a Try again that is not sent (the adapter answers offline) keeps the uncertain create: nothing new is admitted, and the next Try again resends the same id, key and body", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     const { first } = await uncertainCreate(api);
-    api.next.management.push({ ok: false, kind: "offline" });
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    api.next.command.push({ ok: false, kind: "offline" });
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(2));
     await act(async () => {});
     // The earlier request may have committed: it is still the one to try again, and nothing new can be sent.
     expect(
       screen.queryByRole("button", { name: copy.TRY_AGAIN }),
     ).not.toBeNull();
-    expect(screen.queryByText(copy.UNCERTAIN)).not.toBeNull();
+    expect(screen.queryByText(copy.UNCERTAIN, BANNER)).not.toBeNull();
     expect(createButton()).toBeDisabled();
     expect(reasonOf(createButton())).toBe(copy.UNCERTAIN_PENDING);
-    fireEvent.submit(createButton().closest("form") as HTMLFormElement);
+    fireEvent.submit(createForm());
     expect(invocations(api)).toBe(2);
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(3));
-    expect(api.sent[2]).toEqual(first);
-    // The receipt ends it: a new create is admitted again.
-    await waitFor(() => expect(createButton()).not.toBeDisabled());
+    expect(api.sentCommands[2]).toEqual(first);
+    // The receipt ends it: a new create is admitted again (re-targeted: the receipt shows the household it made, so New household is
+    // opened again to see it).
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: copy.TRY_AGAIN })).toBeNull(),
+    );
   });
 
   test("MU-S56: offline with an uncertain create, Try again is disabled with the connection reason and sends nothing; back online, Create stays blocked and Try again resends the same command", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     const { t, first } = await uncertainCreate(api);
     t.setSharing({ online: false });
-    const offlineRetry = screen.getByRole("button", { name: copy.TRY_AGAIN });
+    const offlineRetry = must(
+      screen.queryByRole("button", { name: copy.TRY_AGAIN }),
+    );
     expect(offlineRetry).toBeDisabled();
     expect(reasonOf(offlineRetry)).toBe(copy.SAVE_OFFLINE_REASON);
     fireEvent.click(offlineRetry);
@@ -344,34 +387,38 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     t.setSharing({ online: true });
     expect(createButton()).toBeDisabled();
     expect(reasonOf(createButton())).toBe(copy.UNCERTAIN_PENDING);
-    const retry = screen.getByRole("button", { name: copy.TRY_AGAIN });
+    const retry = must(screen.queryByRole("button", { name: copy.TRY_AGAIN }));
     expect(retry).not.toBeDisabled();
     fireEvent.click(retry);
     await waitFor(() => expect(invocations(api)).toBe(2));
-    expect(api.sent[1]).toEqual(first);
+    expect(api.sentCommands[1]).toEqual(first);
   });
 
   test("control: a Try again answered not_sent keeps the attempt that may have committed, and a server refusal of it ends it", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     const { first } = await uncertainCreate(api);
-    api.next.management.push({ ok: false, kind: "not_sent" });
+    api.next.command.push({ ok: false, kind: "not_sent" });
     for (let n = 0; n < 6; n += 1)
-      api.next.management.push({ ok: false, kind: "not_sent" });
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+      api.next.command.push({ ok: false, kind: "not_sent" });
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(8), { timeout: 5_000 });
     await waitFor(() =>
-      expect(screen.queryByText(copy.NOT_SENT)).not.toBeNull(),
+      expect(screen.queryByText(copy.NOT_SENT, BANNER)).not.toBeNull(),
     );
     expect(createButton()).toBeDisabled();
-    api.next.management.push({
+    api.next.command.push({
       ok: false,
       kind: "invalid",
       requestId: "r-9",
       message: "no",
     });
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(9));
-    expect(api.sent[8]).toEqual(first);
+    expect(api.sentCommands[8]).toEqual(first);
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: copy.TRY_AGAIN })).toBeNull(),
     );
@@ -379,29 +426,30 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
   });
 
   test("MU-S57: Reload shows the lists again but does not end the unresolved create (a list read is not proof it cannot still commit)", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     const { first } = await uncertainCreate(api);
-    const reads = api.calls.filter((c) => c.op === "readHouseholds").length;
-    fireEvent.click(screen.getByRole("button", { name: copy.RELOAD }));
-    await waitFor(() =>
-      expect(
-        api.calls.filter((c) => c.op === "readHouseholds").length,
-      ).toBeGreaterThan(reads),
-    );
+    const reads = api.count("households");
+    fireEvent.click(must(screen.queryByRole("button", { name: copy.RELOAD })));
+    await waitFor(() => expect(api.count("households")).toBeGreaterThan(reads));
     await act(async () => {});
     expect(createButton()).toBeDisabled();
     expect(reasonOf(createButton())).toBe(copy.UNCERTAIN_PENDING);
     expect(
       screen.queryByRole("button", { name: copy.TRY_AGAIN }),
     ).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    fireEvent.click(
+      must(screen.queryByRole("button", { name: copy.TRY_AGAIN })),
+    );
     await waitFor(() => expect(invocations(api)).toBe(2));
-    expect(api.sent[1]).toEqual(first);
+    expect(api.sentCommands[1]).toEqual(first);
   });
 
-  /** A manager of Home with an invitation lookup held until `answer` is called. */
+  /**
+   * A manager of Home with an invitation lookup held until `answer` is called. Re-targeted: the invite is Home's Invitations dialog and the
+   * create is the New household dialog, two routes; the page memory owns the operation across the in-app navigation between them.
+   */
   async function heldLookup() {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([home]);
     let answer: () => void = () => undefined;
     api.next.lookup.push(
@@ -410,22 +458,23 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
           answer = () => resolve(ok([{ id: FLAT, username: "jamie" }]));
         }),
     );
-    const t = mountSharing(<HouseholdsMinimal />, { api });
-    const row = (await screen.findByText("Home")).closest(
-      "[data-household]",
-    ) as HTMLElement;
-    fireEvent.change(within(row).getByLabelText(copy.INVITE_LABEL("Home")), {
+    const t = mountHouseholds(`/sharing/households/${HOME}/invitations`, {
+      api,
+    });
+    const dialog = await present(() =>
+      screen.queryByRole("dialog", {
+        name: hh.INVITATIONS_TITLE_FOR("Home"),
+      }),
+    );
+    fireEvent.change(must(within(dialog).queryByLabelText(hh.USERNAME_LABEL)), {
       target: { value: "jamie" },
     });
-    fireEvent.change(screen.getByLabelText(copy.CREATE_NAME), {
-      target: { value: "Flat 2" },
-    });
     fireEvent.click(
-      within(row).getByRole("button", { name: copy.INVITE_BUTTON }),
+      must(within(dialog).queryByRole("button", { name: hh.INVITE })),
     );
-    await waitFor(() =>
-      expect(api.calls.filter((c) => c.op === "lookup")).toHaveLength(1),
-    );
+    await waitFor(() => expect(api.count("lookup")).toBe(1));
+    await t.navigate("/sharing/new");
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
     return { t, api, answer: () => answer() };
   }
 
@@ -433,7 +482,7 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
     const { api, answer } = await heldLookup();
     expect(createButton()).toBeDisabled();
     expect(reasonOf(createButton())).toBe(copy.SAVE_BUSY_REASON);
-    fireEvent.submit(createButton().closest("form") as HTMLFormElement);
+    fireEvent.submit(createForm());
     await act(async () => {});
     // Asserted before the lookup answers: a create sent now could be left unresolved under the invite.
     expect(invocations(api)).toBe(0);
@@ -441,7 +490,7 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
       answer();
     });
     await waitFor(() => expect(invocations(api)).toBe(1));
-    expect(api.sent[0]?.commands).toEqual([
+    expect(api.sentCommands[0]?.commands).toEqual([
       {
         kind: "invite_to_household",
         id: expect.any(String),
@@ -455,6 +504,8 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
 
   test("MU-S59 (DA-H1): a lookup answering after the connection is lost sends nothing and says why; back online the page is free again", async () => {
     const { t, api, answer } = await heldLookup();
+    // Re-targeted: back on the invitations dialog, where the invite's problem is shown.
+    await t.navigate(`/sharing/households/${HOME}/invitations`);
     t.setSharing({ online: false });
     await act(async () => {
       answer();
@@ -465,19 +516,20 @@ describe("R8 (review 3): an unresolved household attempt is kept until a receipt
       copy.SAVE_OFFLINE_REASON,
     );
     t.setSharing({ online: true });
+    await t.navigate("/sharing/new");
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
     expect(createButton()).not.toBeDisabled();
   });
 
   test("MU-S60: two submissions in one turn admit one command (admission is synchronous, not the rendered state)", async () => {
-    const api = fakeSharingApi();
-    api.next.management.push(
+    const api = fakeHouseholdApi();
+    api.next.command.push(
       () => new Promise(() => undefined), // never answers: the first stays in flight
     );
-    mountSharing(<HouseholdsMinimal />, { api });
-    fireEvent.change(await screen.findByLabelText(copy.CREATE_NAME), {
-      target: { value: "Flat 2" },
-    });
-    const form = createButton().closest("form") as HTMLFormElement;
+    mountHouseholds("/sharing/new", { api });
+    fireEvent.change(await nameField(), { target: { value: "Flat 2" } });
+    await waitFor(() => expect(createButton()).not.toBeDisabled());
+    const form = createForm();
     act(() => {
       form.dispatchEvent(
         new Event("submit", { bubbles: true, cancelable: true }),
@@ -500,41 +552,48 @@ describe("DA-M2 (design assessment, review 6): offline, B5's households are said
     env.setDefaults(
       record(snapshot({ primary: null, households: [] }), { fetched_at: T1 }),
     );
-    const view = mountSharing(<HouseholdsMinimal />, {
+    const view = mountHouseholds("/sharing", {
       env,
       sharing: { online: false, now: () => T2 },
     });
     await waitFor(() =>
       expect(document.querySelector("[data-households-from]")).not.toBeNull(),
     );
-    expect(screen.queryByText(copy.HOUSEHOLDS_EMPTY)).toBeNull();
-    expect(screen.queryByText(copy.HOUSEHOLDS_SNAPSHOT_NONE)).not.toBeNull();
+    expect(screen.queryByText(hh.EMPTY)).toBeNull();
+    expect(screen.queryByText(hh.SNAPSHOT_NONE)).not.toBeNull();
     expect(
-      screen.getByText(copy.AS_OF(formatWhen(T1, T2))),
+      must(
+        within(
+          document.querySelector("[data-households-pane]") as HTMLElement,
+        ).queryByText(copy.AS_OF(formatWhen(T1, T2))),
+      ),
     ).toBeInTheDocument();
     view.unmount();
+    forgetHouseholdsMemory();
     const subset = stubEnv();
     subset.setDefaults(
       record(snapshot({ households: [home] }), { fetched_at: T1 }),
     );
-    mountSharing(<HouseholdsMinimal />, {
+    mountHouseholds("/sharing", {
       env: subset,
       sharing: { online: false, now: () => T2 },
     });
-    expect(await screen.findByText("Home")).toBeInTheDocument();
+    expect(
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
     expect(
       document.querySelector('[data-households-from="snapshot"]')?.textContent,
-    ).toBe(
-      `${copy.HOUSEHOLDS_FROM_SNAPSHOT} ${copy.AS_OF(formatWhen(T1, T2))}`,
-    );
+    ).toBe(`${hh.FROM_SNAPSHOT} ${copy.AS_OF(formatWhen(T1, T2))}`);
   });
 
   test("control: a complete list read empty is 'You're not in a household'", async () => {
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([]);
-    mountSharing(<HouseholdsMinimal />, { api });
-    expect(await screen.findByText(copy.HOUSEHOLDS_EMPTY)).toBeInTheDocument();
-    expect(screen.queryByText(copy.HOUSEHOLDS_SNAPSHOT_NONE)).toBeNull();
+    mountHouseholds("/sharing", { api });
+    expect(
+      await present(() => screen.queryByText(hh.EMPTY)),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(hh.SNAPSHOT_NONE)).toBeNull();
   });
 
   test("MU-S83: a complete list read on this page, then offline: it is shown with ITS read time, not the snapshot's", async () => {
@@ -542,19 +601,25 @@ describe("DA-M2 (design assessment, review 6): offline, B5's households are said
     env.setDefaults(
       record(snapshot({ primary: null, households: [] }), { fetched_at: T1 }),
     );
-    const api = fakeSharingApi();
+    const api = fakeHouseholdApi();
     api.defaults.households = ok([home]);
-    const t = mountSharing(<HouseholdsMinimal />, {
+    const t = mountHouseholds("/sharing", {
       env,
       api,
       sharing: { now: () => T2 },
     });
-    expect(await screen.findByText("Home")).toBeInTheDocument();
+    expect(
+      (await presentAll(() => screen.queryAllByText("Home"))).length,
+    ).toBeGreaterThan(0);
     t.setSharing({ online: false });
     expect(
       document.querySelector('[data-households-from="complete"]')?.textContent,
-    ).toBe(copy.HOUSEHOLDS_LAST_READ(formatWhen(T2, T2)));
-    expect(screen.queryByText(copy.AS_OF(formatWhen(T1, T2)))).toBeNull();
-    expect(screen.queryByText(copy.HOUSEHOLDS_SNAPSHOT_NONE)).toBeNull();
+    ).toBe(hh.LAST_READ(formatWhen(T2, T2)));
+    expect(
+      within(
+        document.querySelector("[data-households-pane]") as HTMLElement,
+      ).queryByText(copy.AS_OF(formatWhen(T1, T2))),
+    ).toBeNull();
+    expect(screen.queryByText(hh.SNAPSHOT_NONE)).toBeNull();
   });
 });

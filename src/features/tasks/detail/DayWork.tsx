@@ -9,6 +9,7 @@ import {
   CompletionConflict,
   DependencyDialog,
   DependencyEditor,
+  DependencyEditorRecoveryHost,
   DependencyRow,
   gateOf,
   type RootEvidence,
@@ -81,6 +82,7 @@ export function DayWork({
       {conflicted?.kind === "set_dependencies" ? (
         <SetConflict
           key={`set:${conflicted.local_id}`}
+          occurrenceId={row.id}
           localId={conflicted.local_id}
           onKeepEditing={(draft) => setEditor({ replacing: draft })}
         />
@@ -133,6 +135,13 @@ export function DayWork({
           actions={actions}
         />
       ) : null}
+      {/* D-1 (WEB-14a maintenance merge): a new list left by the page before an update is restored and its editor opened again, once. */}
+      <DependencyEditorRecoveryHost
+        key={`dependency-recovery:${row.id}`}
+        row={row}
+        idle={editor === null && dialog === null}
+        onRestored={() => setEditor({ replacing: null })}
+      />
       {editor !== null ? (
         <DependencyEditor
           key={`editor:${row.id}:${editor.replacing?.local_id ?? ""}`}

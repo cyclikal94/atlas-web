@@ -85,9 +85,14 @@ export function ConfirmItsYou({
         {CONFIRM_LABEL}
       </h4>
       <SignInForm
+        key={`${owner.account}:${owner.epoch}`}
         online={online}
         initialUsername={username}
         usernameReadOnly
+        // WEB-14a revision 39 (DA-AUTH-HOSTS): the account's own fixed username, never another host's unfinished one.
+        recoveryContext="sign-in:confirm"
+        // WEB-14a revision 40 (R40-GATE): this account and epoch's confirmation.
+        journey={`${owner.account}:${owner.epoch}`}
         submitLabel={CONFIRM_LABEL}
         backLabel={CONFIRM_CANCEL}
         onBack={() => confirmFlow.cancel()}

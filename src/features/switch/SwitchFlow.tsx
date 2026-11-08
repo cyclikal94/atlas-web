@@ -14,6 +14,7 @@ import {
   useAccountLabel,
   useQueueSummary,
 } from "../../data";
+import { endPreAccountInput } from "../../lib/form-recovery/editor";
 import { type Session, useSession } from "../../session";
 import {
   type SignInResult,
@@ -400,11 +401,16 @@ export function SwitchSignIn({
   const title = name ? signInAs(name) : SWITCH_COPY.signInOther;
   const cautionId = useId();
   const closeFocus = useCloseFocus(owner);
+  // WEB-14a revision 40 (R40-GATE; design assessment C1): this switch's journey (its owner and target); closing the dialog ends its username.
+  const journey = `${owner}:${target.kind === "retained" ? target.account_id : "other"}`;
 
   return (
     <Dialog
       open
-      onClose={onClose}
+      onClose={() => {
+        endPreAccountInput("sign-in:switch", journey);
+        onClose();
+      }}
       title={title}
       syncControl={false}
       onCloseAutoFocus={closeFocus}
@@ -428,10 +434,14 @@ export function SwitchSignIn({
           </div>
         ) : null}
         <SignInForm
+          key={journey}
           online={online}
           initialUsername={name ?? ""}
           submitLabel={name ? signInAs(name) : "Sign in"}
           backLabel={stayAs(current)}
+          // WEB-14a revision 39 (DA-AUTH-HOSTS): the switch's username is never the public page's, nor a confirmation's.
+          recoveryContext="sign-in:switch"
+          journey={journey}
           onBack={() => switchFlow.back(owner)}
           carried={failure}
           onCarriedShown={() => {

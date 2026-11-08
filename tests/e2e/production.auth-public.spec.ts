@@ -1,12 +1,28 @@
-import type { Page } from "@playwright/test";
-import { provokedIdbWarnings, test } from "./auth-helpers";
+import type { BrowserContext, Page } from "@playwright/test";
+import { provokedIdbWarnings } from "./auth-helpers";
+import {
+  observeAuthWork,
+  recordAuthTransactions,
+  settleAuth,
+  workOf,
+} from "./auth-settlement";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
+import { test } from "./intercepted-auth";
 import {
   expectPaintedContrast,
   recordPaintedContrast,
   surfaceScreenshot,
 } from "./surface-checks";
+
+/**
+ * WEB-14a revision 19, labelled HARNESS ADAPTATION (Kieran, 15 October 2026): the production build registers the app's service worker
+ * (WEB-14a), and Playwright WebKit does not apply `context.route` to requests a worker passes on, so the AuthStub never answered there
+ * and most WebKit cases failed (also on the unmodified revision-18 candidate). These specs test the authentication surfaces, not the
+ * worker: they run without it. The worker in the production build is covered by production.pwa.spec.ts and production.offline.spec.ts.
+ * Revision 34 (R37): the `test` of ./intercepted-auth now blocks worker registration for every AuthStub suite and refuses another
+ * setting, in place of this file's own `test.use`.
+ */
 
 /**
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the PUBLIC surfaces (sign-in, join) in the production build, in a real engine, with
@@ -32,27 +48,23 @@ interface Surface {
   open(page: Page, stub: AuthStub): Promise<void>;
   /** The heading that should hold focus once the surface has settled. */
   focusHeading?: boolean;
-  /** Exact engine messages that this surface's OWN actions cause (`toleratesNavigationAbort`: one engine, one message each). */
-  tolerates?: Array<[engine: string, message: RegExp]>;
 }
 
 /**
- * WEB-08c (HF-8, a flake of the accepted base: 3 of 30 base runs, 2 of 30 candidate runs, Firefox only, the same two warnings). Going
- * offline right after the sign-in heading can fail the lazily loaded sync leader's module, which the product retries on `online`; the
- * next width's `setOffline(false)` then fires `online`, and the test's own `about:blank` navigation aborts the retried leader's first
- * transaction (an aborted transaction commits nothing). WebKit reports the same cut module loads (traced once: `browser-leader`, `browser-env`,
- * `dexie-adapter`) as "Failed to load resource: WebKit encountered an internal error", a console text that names no URL; it is tolerated for
- * this one surface, which goes offline on purpose, and in WebKit only.
+ * WEB-14a revision 23 (diagnosis of the campaign-2 WebKit failure of "sign-in-offline", .agtx/evidence/WEB-14a/revision-23/diagnostics/
+ * offline-chunk-race): since accepted main's WEB-09b composition was merged, a signed-out page also starts the data leader, whose chunks
+ * (`browser-leader`, `browser-env`, `dexie-adapter`) are dynamic imports loaded AFTER boot (WebKit often only after the heading shows).
+ * With the worker blocked (the labelled revision-19 adaptation) they come from the network, so going offline while one is in flight
+ * makes the browser log the failed load ("WebKit encountered an internal error", Chromium "ERR_INTERNET_DISCONNECTED"). The offline
+ * surfaces are what these cases check, so they go offline once those loads are over: a condition, not a delay.
  */
-// Revision 1 (campaign 2026-10-11T12-25-06.329Z-f3732be4): Firefox cut `browser-env`, the next module of the SAME lazy chain (its warning names
-// `browser-leader` as the importer). The chain's three modules, as the WebKit trace named them, and nothing else, are tolerated here.
-const LEADER_MODULE_FAILED_OFFLINE =
-  /^\[JavaScript Warning: "Loading failed for the module with source “http:\/\/127\.0\.0\.1:\d+\/assets\/(browser-leader|browser-env|dexie-adapter)-[\w-]+\.js”\."/;
-const OFFLINE_LOAD_CUT_WEBKIT =
-  /^Failed to load resource: WebKit encountered an internal error$/;
-const TRANSACTION_ABORTED_BY_NAVIGATION =
-  /^\[JavaScript Warning: "An IndexedDB transaction that was not yet complete has been aborted due to page navigation\."/;
-
+const lazyChunksLoaded = (page: Page) =>
+  page.waitForFunction(() => {
+    const loaded = performance.getEntriesByType("resource").map((e) => e.name);
+    return ["browser-leader", "browser-env", "dexie-adapter"].every((chunk) =>
+      loaded.some((name) => name.includes(`/assets/${chunk}-`)),
+    );
+  });
 const heading = (page: Page, name: string | RegExp) =>
   page.getByRole("heading", { level: 1, name }).waitFor();
 
@@ -98,14 +110,10 @@ const SURFACES: Surface[] = [
   },
   {
     name: "sign-in-offline",
-    tolerates: [
-      ["firefox", LEADER_MODULE_FAILED_OFFLINE],
-      ["firefox", TRANSACTION_ABORTED_BY_NAVIGATION],
-      ["webkit", OFFLINE_LOAD_CUT_WEBKIT],
-    ],
     open: async (page) => {
       await page.goto("/");
       await heading(page, "Sign in to Atlas");
+      await lazyChunksLoaded(page);
       await page.context().setOffline(true);
       await page.getByText("Signing in needs a connection.").waitFor();
     },
@@ -221,6 +229,7 @@ const SURFACES: Surface[] = [
     name: "join-offline",
     open: async (page, stub) => {
       await readyJoin(page, stub, null);
+      await lazyChunksLoaded(page);
       await page.context().setOffline(true);
       await page.getByText("Creating an account needs a connection.").waitFor();
     },
@@ -231,107 +240,97 @@ for (const scheme of ["dark", "light"] as const) {
   test.describe(`public surfaces, rendered checks, ${scheme}`, () => {
     test.use({ colorScheme: scheme });
     for (const surface of SURFACES) {
-      test(
-        surface.name,
-        async ({
-          page,
-          context,
-          provokes,
-          toleratesNavigationAbort,
-        }, testInfo) => {
-          provokes(...(surface.provokes ?? []));
-          for (const [engine, message] of surface.tolerates ?? [])
-            toleratesNavigationAbort(engine, message);
-          const engine = testInfo.project.name.replace("production-", "");
-          const stub = new AuthStub();
-          await stub.install(context);
-          for (const [width, height] of WIDTHS) {
-            // A FRESH document each time: a fragment-only navigation does not reload the page. WEB-08c revision 2 (HF-12, campaign
-            // 2026-10-13T22-48-14.169Z-f76783ae, Firefox "join-offline"): leave the page BEFORE going back online. Online first, the `online`
-            // event made the offline page's session start its re-check read, which the navigation 2 ms later aborted, and Firefox reported the
-            // aborted transaction. `about:blank` needs no network; every check below is unchanged.
-            await page.goto("about:blank");
-            await context.setOffline(false);
-            await page.setViewportSize({ width, height });
-            await surface.open(page, stub);
-            const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
+      test(surface.name, async ({ page, context, provokes }, testInfo) => {
+        provokes(...(surface.provokes ?? []));
+        const engine = testInfo.project.name.replace("production-", "");
+        const stub = new AuthStub();
+        await stub.install(context);
+        for (const [width, height] of WIDTHS) {
+          // A FRESH document each time: a fragment-only navigation does not reload the page. Revision 22 (C4): the previous document
+          // (offline, for the two offline surfaces) is left BEFORE the connection comes back, so its reconnect work is not started only to
+          // be cut off by this navigation (the retained Firefox "transaction aborted due to page navigation" warnings); that schedule has
+          // its own cases (S10) below.
+          await page.goto("about:blank");
+          await context.setOffline(false);
+          await page.setViewportSize({ width, height });
+          await surface.open(page, stub);
+          const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
 
-            // 1. No horizontal scrolling.
-            expect(
-              await page.evaluate(
-                () =>
-                  document.documentElement.scrollWidth <=
-                  document.documentElement.clientWidth,
+          // 1. No horizontal scrolling.
+          expect(
+            await page.evaluate(
+              () =>
+                document.documentElement.scrollWidth <=
+                document.documentElement.clientWidth,
+            ),
+            `${label}: horizontal scroll`,
+          ).toBe(true);
+
+          // 2. axe, including colour contrast in the real layout.
+          const violations = await runAxe(page);
+          expect(
+            violations.map(
+              (v) =>
+                `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`,
+            ),
+            `${label}: axe`,
+          ).toEqual([]);
+
+          // 3. Targets are at least 44 px high.
+          const small = await page.evaluate(() =>
+            Array.from(
+              document.querySelectorAll<HTMLElement>(
+                "main button, main a[href], main input",
               ),
-              `${label}: horizontal scroll`,
-            ).toBe(true);
-
-            // 2. axe, including colour contrast in the real layout.
-            const violations = await runAxe(page);
-            expect(
-              violations.map(
-                (v) =>
-                  `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`,
+            )
+              .filter((el) => el.getBoundingClientRect().height > 0)
+              .filter((el) => el.getBoundingClientRect().height < 43.5)
+              .map(
+                (el) =>
+                  `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`,
               ),
-              `${label}: axe`,
-            ).toEqual([]);
+          );
+          expect(small, `${label}: targets under 44px`).toEqual([]);
 
-            // 3. Targets are at least 44 px high.
-            const small = await page.evaluate(() =>
-              Array.from(
-                document.querySelectorAll<HTMLElement>(
-                  "main button, main a[href], main input",
-                ),
-              )
-                .filter((el) => el.getBoundingClientRect().height > 0)
-                .filter((el) => el.getBoundingClientRect().height < 43.5)
-                .map(
-                  (el) =>
-                    `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`,
-                ),
-            );
-            expect(small, `${label}: targets under 44px`).toEqual([]);
+          // 4. The page's heading is the programmatic focus target for a state that has just appeared.
+          if (surface.focusHeading)
+            expect(
+              await page.evaluate(() => document.activeElement?.tagName),
+              `${label}: focus target`,
+            ).toBe("H1");
 
-            // 4. The page's heading is the programmatic focus target for a state that has just appeared.
-            if (surface.focusHeading)
-              expect(
-                await page.evaluate(() => document.activeElement?.tagName),
-                `${label}: focus target`,
-              ).toBe("H1");
-
-            // 5. A visible focus ring on the first control reached by keyboard.
-            if (
-              (await page
-                .locator("main :is(button, a[href], input):visible:enabled")
-                .count()) > 0
-            ) {
-              await pressTab(page);
-              const ring = await page.evaluate(() => {
-                const active = document.activeElement as HTMLElement | null;
-                if (!active || active === document.body) return null;
-                const style = getComputedStyle(active);
-                return {
-                  outline:
-                    style.outlineStyle !== "none" &&
-                    Number.parseFloat(style.outlineWidth) >= 2,
-                  shadow: style.boxShadow !== "none",
-                };
-              });
-              expect(
-                ring && (ring.outline || ring.shadow),
-                `${label}: focus ring`,
-              ).toBeTruthy();
-            }
-
-            if (engine === "chromium")
-              await surfaceScreenshot(page, testInfo, {
-                name: surface.name,
-                width,
-                scheme,
-              });
+          // 5. A visible focus ring on the first control reached by keyboard.
+          if (
+            (await page
+              .locator("main :is(button, a[href], input):visible:enabled")
+              .count()) > 0
+          ) {
+            await pressTab(page);
+            const ring = await page.evaluate(() => {
+              const active = document.activeElement as HTMLElement | null;
+              if (!active || active === document.body) return null;
+              const style = getComputedStyle(active);
+              return {
+                outline:
+                  style.outlineStyle !== "none" &&
+                  Number.parseFloat(style.outlineWidth) >= 2,
+                shadow: style.boxShadow !== "none",
+              };
+            });
+            expect(
+              ring && (ring.outline || ring.shadow),
+              `${label}: focus ring`,
+            ).toBeTruthy();
           }
-        },
-      );
+
+          if (engine === "chromium")
+            await surfaceScreenshot(page, testInfo, {
+              name: surface.name,
+              width,
+              scheme,
+            });
+        }
+      });
     }
   });
 }
@@ -595,3 +594,193 @@ for (const scheme of ["dark", "light"] as const) {
     });
   });
 }
+
+/**
+ * WEB-14a revision 22 (design assessment C4, schedule S10): the retained Firefox warning "An IndexedDB transaction that was not yet
+ * complete has been aborted due to page navigation" on the offline public surfaces. Diagnosis (author, scratch recorder over the unchanged
+ * production build, all three engines): `online` starts the session's reconnect work, whose `atlas-auth` transactions (the evaluation's
+ * record read and `resolve()`'s read under `atlas-auth`, both readwrite) were cut off when the test navigated to about:blank at once;
+ * Chromium and WebKit abort them silently. None of them had asked for a write. These cases hold that schedule deterministically (another
+ * page of the origin keeps a readwrite transaction on `records` open, so the reconnect transactions exist but cannot finish), and require:
+ * the cut-off transactions asked for no write, and the durable records are byte-for-byte what they were. The control lets the reconnect
+ * work finish first: nothing is cut off and nothing is declared.
+ */
+test.describe("revision 22, C4: a reconnect immediately followed by leaving the page", () => {
+  /** A same-origin page that runs no application: it reads and holds the `atlas-auth` records without booting a session. */
+  async function originPage(context: BrowserContext) {
+    await context.route("**/__r22-origin-page", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>origin page</title>",
+      }),
+    );
+    const other = await context.newPage();
+    await other.goto("/__r22-origin-page");
+    return other;
+  }
+  const readRecords = (other: Page) =>
+    other.evaluate(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          const open = indexedDB.open("atlas-auth");
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const db = open.result;
+            const tx = db.transaction("records", "readonly");
+            const store = tx.objectStore("records");
+            const keys = store.getAllKeys();
+            const values = store.getAll();
+            tx.oncomplete = () => {
+              db.close();
+              resolve(
+                JSON.stringify(
+                  keys.result.map((key, index) => [key, values.result[index]]),
+                ),
+              );
+            };
+            tx.onerror = () => reject(tx.error);
+          };
+        }),
+    );
+  /** Keeps a readwrite transaction on `records` open until `release`. */
+  const block = (other: Page) =>
+    other.evaluate(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const w = window as unknown as {
+            __blocking: boolean;
+            __blocked: Promise<void>;
+          };
+          const open = indexedDB.open("atlas-auth");
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const db = open.result;
+            const tx = db.transaction("records", "readwrite");
+            const store = tx.objectStore("records");
+            w.__blocking = true;
+            const spin = () => {
+              if (!w.__blocking) return;
+              store.get("auth_state").onsuccess = spin;
+            };
+            spin();
+            w.__blocked = new Promise<void>((done) => {
+              tx.oncomplete = () => {
+                db.close();
+                done();
+              };
+            });
+            resolve();
+          };
+        }),
+    );
+  const release = (other: Page) =>
+    other.evaluate(() => {
+      const w = window as unknown as {
+        __blocking: boolean;
+        __blocked: Promise<void>;
+      };
+      w.__blocking = false;
+      return w.__blocked;
+    });
+  const FIREFOX_ABORT =
+    /^\[JavaScript Warning: "An IndexedDB transaction that was not yet complete has been aborted due to page navigation\." \{file: "[^"]+" line: \d+\}\]$/;
+
+  for (const surface of ["sign-in", "join"] as const) {
+    test(`S10 [cut off] ${surface}: the reconnect transactions cut off by leaving the page asked for no write, and the durable records are unchanged`, async ({
+      page,
+      context,
+      provokes,
+    }) => {
+      provokes(FIREFOX_ABORT);
+      await observeAuthWork(context);
+      const log = await recordAuthTransactions(context);
+      const stub = new AuthStub();
+      await stub.install(context);
+      if (surface === "sign-in") {
+        await page.goto("/");
+        await heading(page, "Sign in to Atlas");
+      } else await readyJoin(page, stub, null);
+      // Opened while online: an offline context cannot load it.
+      const other = await originPage(context);
+      await lazyChunksLoaded(page);
+      await context.setOffline(true);
+      await page
+        .getByText(
+          surface === "sign-in"
+            ? "Signing in needs a connection."
+            : "Creating an account needs a connection.",
+        )
+        .waitFor();
+      await settleAuth(stub, [page], { instruments: [other] });
+      const before = await readRecords(other);
+      const leaving = page.url();
+      await block(other);
+      const begun = log.filter((t) => t.url === leaving).length;
+      await context.setOffline(false);
+      // The reconnect work exists before the page is left: its transactions are created and waiting behind the held one.
+      await expect
+        .poll(async () => (await workOf(page)).authTx, { timeout: 20_000 })
+        .toBeGreaterThan(0);
+      await page.goto("about:blank");
+      await release(other);
+      const cut = log
+        .slice(begun)
+        .filter((t) => t.url === leaving && t.end !== "complete");
+      expect(cut.length, "reconnect transactions cut off").toBeGreaterThan(0);
+      expect(
+        cut.map((t) => ({ stores: t.stores, writes: t.writes })),
+        "a cut-off transaction asked for no write",
+      ).toEqual(cut.map(() => ({ stores: ["records"], writes: 0 })));
+      expect(await readRecords(other), "the durable records").toBe(before);
+    });
+
+    test(`S10 [control] ${surface}: reconnect work that finishes before the page is left: nothing is cut off and nothing is declared`, async ({
+      page,
+      context,
+    }) => {
+      await observeAuthWork(context);
+      const log = await recordAuthTransactions(context);
+      const stub = new AuthStub();
+      await stub.install(context);
+      if (surface === "sign-in") {
+        await page.goto("/");
+        await heading(page, "Sign in to Atlas");
+      } else await readyJoin(page, stub, null);
+      // Opened while online: an offline context cannot load it.
+      const other = await originPage(context);
+      await lazyChunksLoaded(page);
+      await context.setOffline(true);
+      await page
+        .getByText(
+          surface === "sign-in"
+            ? "Signing in needs a connection."
+            : "Creating an account needs a connection.",
+        )
+        .waitFor();
+      await settleAuth(stub, [page], { instruments: [other] });
+      const before = await readRecords(other);
+      const leaving = page.url();
+      const begun = log.filter((t) => t.url === leaving).length;
+      await context.setOffline(false);
+      await expect
+        .poll(() => log.filter((t) => t.url === leaving).length, {
+          timeout: 20_000,
+        })
+        .toBeGreaterThan(begun);
+      await settleAuth(stub, [page], { instruments: [other] });
+      const reconnect = log.slice(begun).filter((t) => t.url === leaving);
+      await page.goto("about:blank");
+      expect(
+        log.filter((t) => t.url === leaving && t.end !== "complete"),
+        "nothing cut off",
+      ).toEqual([]);
+      // The same reconnect work, allowed to finish, writes nothing: what the cut-off case loses is a read.
+      expect(
+        reconnect.map((t) => ({ end: t.end, writes: t.writes })),
+        "a completed reconnect transaction asked for no write",
+      ).toEqual(reconnect.map(() => ({ end: "complete", writes: 0 })));
+      expect(await readRecords(other), "the durable records").toBe(before);
+    });
+  }
+});

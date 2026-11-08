@@ -104,11 +104,12 @@ function normalisePublicPath(): void {
   history.replaceState(null, "", `/${location.search}`);
 }
 
-export function createProtectedTree(session: Session) {
+/** `extra`: fixture-only recoverable form, mounted inside the shared data provider after the routed shell. */
+export function createProtectedTree(session: Session, extra?: () => ReactNode) {
   // WEB-13b: the registries are filled before boot starts the page's leader (`boot.tsx` builds this first), so no dispatcher of the page
   // can send an import before its terminal answers are known.
   appCommands();
-  // The page's command registrations (the queue screens describe, read and rebuild these kinds), once, before any route renders.
+  // Register People commands before any route renders.
   registerPeopleCommands(getPageDataHost().commands);
   // WEB-10a: the task kinds are registered once into the page's registry (the leader's dispatcher and the queue screens share it), so
   // `/sync` describes and offers task drafts whichever screen is open first.
@@ -142,6 +143,7 @@ export function createProtectedTree(session: Session) {
             <ShellFromData router={router}>
               <RouterProvider router={router} />
               <SessionNotices />
+              {extra?.()}
             </ShellFromData>
           </DataProvider>
         </ProtectedProviders>

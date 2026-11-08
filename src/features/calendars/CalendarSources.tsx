@@ -22,9 +22,10 @@ import {
   useResourceList,
   useStatusInputs,
 } from "../../data";
+import { useRecoveryHost } from "../../lib/form-recovery/editor";
 import { useSession } from "../../session";
 import { CacheGate } from "../sync/CacheGate";
-import { AddSourceDialog } from "./AddSourceDialog";
+import { ADD_CONTEXT, AddSourceDialog } from "./AddSourceDialog";
 import { type CalendarApi, useCalendarApi } from "./api";
 import {
   ADD_SOURCE,
@@ -54,7 +55,7 @@ import {
   resumeChooser,
 } from "./import-kept";
 import { type ImportOpener, ImportOpenerContext } from "./import-opener";
-import { LinkCalendarDialog } from "./LinkCalendarDialog";
+import { LINK_CONTEXT, LinkCalendarDialog } from "./LinkCalendarDialog";
 import { ManageSourceDialog } from "./ManageSourceDialog";
 import { identityMemory } from "./memory";
 import { type Compat, type Environment, headerActions } from "./model/status";
@@ -63,6 +64,7 @@ import type {
   SourceObserver,
 } from "./observation-controller";
 import { ReviewPanel } from "./ReviewPanel";
+import { CalendarRecoveryIdentity } from "./recovery";
 import {
   createRefreshController,
   type RefreshController,
@@ -234,6 +236,19 @@ function Sources() {
     capability?.get ?? NO_CAPABILITY,
   );
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  // Revision 37 (WEB-14a R40): an add form left by the page before an update is restored, and its dialog opened again.
+  const recoveryIdentity =
+    api === null ? null : `${api.identity.account}:${api.identity.epoch}`;
+  useRecoveryHost({
+    identity: recoveryIdentity,
+    context: ADD_CONTEXT,
+    open: () => setDialog((open) => open ?? { kind: "add" }),
+  });
+  useRecoveryHost({
+    identity: recoveryIdentity,
+    context: LINK_CONTEXT,
+    open: () => setDialog((open) => open ?? { kind: "link" }),
+  });
   const [awaiting, setAwaiting] = useState<AwaitingSync>(new Map());
 
   // The capability is read once per VISIT while online (D-13a-10; revision 5, R11: a remount does not read it again); unknown
@@ -324,7 +339,7 @@ function Sources() {
     );
 
   return (
-    <>
+    <CalendarRecoveryIdentity value={recoveryIdentity}>
       <section
         aria-label={SCREEN_HEADING}
         className="flex max-w-[760px] flex-col gap-4"
@@ -406,7 +421,11 @@ function Sources() {
         )}
       </section>
       {dialog?.kind === "add" ? (
-        <AddSourceDialog online={online} onClose={() => setDialog(null)} />
+        <AddSourceDialog
+          online={online}
+          identity={recoveryIdentity ?? "-"}
+          onClose={() => setDialog(null)}
+        />
       ) : null}
       {dialog?.kind === "import" ? (
         <ImportDialog
@@ -437,7 +456,7 @@ function Sources() {
           onClose={() => setDialog(null)}
         />
       ) : null}
-    </>
+    </CalendarRecoveryIdentity>
   );
 }
 

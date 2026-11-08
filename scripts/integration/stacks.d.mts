@@ -10,11 +10,14 @@ export interface Stack {
   /** What the stack's cases change in their own backend (documentation for the isolation argument). */
   mutates?: string;
   passthrough?: string[];
+  /** WEB-12b: backend settings of this stack, limited to BACKEND_ENV_ALLOWED. */
+  backendEnv?: Record<string, string>;
 }
 export interface SkipContext {
   env: Record<string, string | undefined>;
   oidc: boolean;
   postgres: boolean;
+  app?: string;
 }
 export const DEFAULT_STACKS: Stack[];
 export const SEPARATE: Array<{
@@ -29,6 +32,14 @@ export const DESIGNED_SKIPS: Array<{
   when: (context: SkipContext) => boolean;
 }>;
 export function stackArgs(stack: Stack): string[];
+export const BACKEND_ENV_ALLOWED: string[];
+export const CAP_REFUSALS: Array<{
+  method: string;
+  path: string;
+  provokedBy: string;
+}>;
+export function backendEnvOf(stack: Stack): Record<string, string>;
+export function directoryModeOf(stack: Stack): "on" | "off";
 export const PLAYWRIGHT_POLICY: string[];
 export function passthroughProblems(passthrough: string[]): string[];
 export function planStacks(options: {

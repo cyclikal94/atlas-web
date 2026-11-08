@@ -32,7 +32,7 @@ claim; BE-Q1 and BE-CH1 have no completion record, and WEB-09d owns integrated, 
 | `archiveResource({ id, archived })` | `archive` of any archivable resource (also what `archive({ taskId })` delegates to). |
 | `projectCreateList(draft, id)` | The projection of an outstanding `create_list`, for its own id only. |
 | `composeList`, `listRows`, `listItemOf`, `atCapacity`, `roomFor` | The single composition rule (below). |
-| Q4 readiness: `newListFormContext`, `listFormContext`, `listPickerContext`, `listFormRecoveryValues`, `restoreListForm`, `pickerRecoveryValues`, `restorePicker` | Recoverable list forms, raw; restoring never submits (WEB-14a wires the capture). |
+| Q4 readiness: `newListFormContext`, `listFormContext`, `listPickerContext`, `listFormRecoveryValues`, `restoreListForm`, `pickerRecoveryValues`, `restorePicker` | Recoverable list forms, raw; restoring never submits. WEB-14a revision 38 wires the capture: the create dialog under `newListFormContext("dialog")`, rename and the picker under their list (the picker's copy also keeps each selection's title, version 1); the Lists pane and the list's detail open the dialog on a copy after an app-update reload (docs/pwa.md). |
 | `listPath(id?)` | The route helper. |
 
 ### The composition (D-10b-4, `model/list-view.ts`)

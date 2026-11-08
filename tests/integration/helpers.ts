@@ -6,6 +6,18 @@ import {
   type TestInfo,
 } from "@playwright/test";
 import type { Session } from "../../src/session";
+import {
+  ageSharedConfirmation,
+  type ConfirmationAgeing,
+  type SettledIdentity,
+  STALE_CONFIRMATION_AGE_MS,
+} from "../e2e/shared-confirmation";
+import {
+  type AbandonmentWitness,
+  type DocumentSample,
+  judgeAbandonment,
+  judgeReplacement,
+} from "./navigation-premise";
 
 /**
  * Part C (plan 14): helpers for the integration specs. They run the session module and its PRODUCTION adapters in a real engine
@@ -141,8 +153,16 @@ export const provider = {
 
 const allowedStatuses = new WeakMap<TestInfo, Set<number>>();
 /** The console guard of tests/e2e/helpers.ts, with the one thing an integration run needs: a test DECLARES the HTTP statuses it provokes. */
+/**
+ * WEB-14a revision 37 (R41): console WARNINGS a test names as the browser's own report about a document its premise keeps from using what
+ * it preloaded (WebKit: "…was preloaded using link preload but not used within a few seconds…", for a document held neutral). Each is
+ * attached to the report (`tolerated-console-messages`), never dropped; errors and page errors are never tolerated.
+ */
+const toleratedWarnings = new WeakMap<object, RegExp[]>();
+
 export const test = base.extend<{
   provokes: (...statuses: number[]) => void;
+  tolerates: (pattern: RegExp) => void;
   guard: undefined;
   stack: undefined;
 }>({
@@ -166,12 +186,29 @@ export const test = base.extend<{
       for (const status of statuses) allowed.add(status);
     });
   },
+  tolerates: async ({ page: _page }, use, info) => {
+    const patterns: RegExp[] = [];
+    toleratedWarnings.set(info, patterns);
+    await use((pattern) => {
+      patterns.push(pattern);
+    });
+  },
   guard: [
-    async ({ page, provokes: _provokes }, use, info) => {
+    async ({ page, provokes: _provokes, tolerates: _tolerates }, use, info) => {
       const problems: string[] = [];
+      const tolerated: string[] = [];
       page.on("console", (message) => {
         if (message.type() !== "error" && message.type() !== "warning") return;
         const text = message.text();
+        if (
+          message.type() === "warning" &&
+          (toleratedWarnings.get(info) ?? []).some((pattern) =>
+            pattern.test(text),
+          )
+        ) {
+          tolerated.push(text);
+          return;
+        }
         const allowed = allowedStatuses.get(info) ?? new Set<number>();
         const status = /status of (\d{3})/.exec(text)?.[1];
         // Chromium reports an HTTP 4xx/5xx as a console error; a test that provokes one says which.
@@ -190,6 +227,11 @@ export const test = base.extend<{
         problems.push(`pageerror: ${error.message}`),
       );
       await use(undefined);
+      if (tolerated.length > 0)
+        await info.attach("tolerated-console-messages", {
+          body: tolerated.join("\n"),
+          contentType: "text/plain",
+        });
       // A failing run keeps the kernel's own trace from every page, so a flake can be read, not guessed at.
       if (info.status !== info.expectedStatus) {
         let index = 0;
@@ -491,21 +533,8 @@ export const finishSignIn = (page: Page) =>
       window.__t.signin as Promise<{ kind: string; [key: string]: unknown }>,
   );
 
-export interface SettledLike {
-  account_id: string;
-  epoch: number;
-  session_id: string;
-}
-/** A redacted receipt of `withStaleSharedConfirmation`: booleans and ages, never the token, cookie or verifier. */
-export interface ConfirmationAgeing {
-  aged: true;
-  settlement_matched: true;
-  confirmation_matched: true;
-  /** The confirmation's age when it was found (the settlement's own: a few seconds at most). */
-  found_age_ms: number;
-  /** Its age as written, by the page's own clock (the clock the session compares it with). */
-  written_age_ms: number;
-}
+export type SettledLike = SettledIdentity;
+export type { ConfirmationAgeing };
 
 /**
  * WEB-08c revision 14 (review 14 R16, family `r43-premise-shared-confirmation`): makes the NEXT document's background identity read
@@ -515,115 +544,108 @@ export interface ConfirmationAgeing {
  * makes NO `GET /browser-sessions/current` (src/session/kernel/evaluate.ts, src/session/session.ts `confirmedRecently`): the
  * accepted behaviour, which a case that needs that read must not assume away.
  *
- * In ONE read-write transaction of this origin's `atlas-auth` record it checks that the record still settles exactly `expected`
- * (account, epoch, session) and holds a confirmation of exactly that session, and rewrites only that confirmation's `confirmed_at`
- * to `ageMs` before now (the page's clock); every other field, the token included, is kept, so the next document still adopts the
- * token (no extra CSRF read) and its only identity read is the verification, exactly as before the decision. Anything else (a
- * different or absent settlement, no confirmation, a confirmation of another session) is a SETUP failure: nothing is changed and
- * it throws. Resolves after the transaction committed.
+ * WEB-14a revision 35 (review R38, design assessment C1): the checked transaction is now tests/e2e/shared-confirmation.ts
+ * `ageSharedConfirmation`, shared with the production browser specs. It checks that the record still settles exactly `expected` and
+ * holds a confirmation of exactly that session, rewrites only `confirmed_at` to `ageMs` before now (the page's clock) and reads every
+ * other field, the token included, back unchanged, so the next document still adopts the token (no extra CSRF read) and its only
+ * identity read is the verification. Anything else is a SETUP failure with nothing changed. Resolves after the commit.
  *
- * It does not reach a live page's memory (its own last verification stays), so the read is eligible only in a NEW document
- * (`freshHarnessDocument`); and it does not stop another page from writing a new confirmation later (each caller here has one page).
+ * The contract here is the NEXT document's (`freshHarnessDocument`): the helper does not reach a live page's memory (its own last
+ * verification and last record read stay), and it does not stop another page from writing a new confirmation later (each caller of
+ * this name has one page). A same-document schedule (I-04) states its own eligibility premise and proves the request was issued.
  */
-export async function withStaleSharedConfirmation(
+export function withStaleSharedConfirmation(
   page: Page,
   expected: SettledLike,
-  ageMs = 120_000,
+  ageMs = STALE_CONFIRMATION_AGE_MS,
 ): Promise<ConfirmationAgeing> {
-  const outcome = await page.evaluate(
-    ({ want, ageMs }) =>
-      new Promise<
-        | { ok: true; foundAgeMs: number; writtenAgeMs: number }
-        | { ok: false; why: string }
-      >((resolve, reject) => {
-        const open = indexedDB.open("atlas-auth");
-        open.onerror = () => reject(open.error);
-        open.onsuccess = () => {
-          const db = open.result;
-          const write = db.transaction("records", "readwrite");
-          const store = write.objectStore("records");
-          const request = store.get("auth_state");
-          let verdict:
-            | { ok: true; foundAgeMs: number; writtenAgeMs: number }
-            | { ok: false; why: string } = {
-            ok: false,
-            why: "the record was not read",
-          };
-          const same = (
-            a: { account_id?: unknown; epoch?: unknown; session_id?: unknown },
-            b: typeof want,
-          ) =>
-            a.account_id === b.account_id &&
-            a.epoch === b.epoch &&
-            a.session_id === b.session_id;
-          request.onsuccess = () => {
-            const record = request.result as
-              | (Record<string, unknown> & {
-                  settled?: Record<string, unknown> | null;
-                  confirmation?: Record<string, unknown> | null;
-                })
-              | undefined;
-            if (!record?.settled || !same(record.settled, want)) {
-              verdict = {
-                ok: false,
-                why: "the record does not settle the expected session",
-              };
-              return;
-            }
-            if (!record.confirmation || !same(record.confirmation, want)) {
-              verdict = {
-                ok: false,
-                why: "the record has no confirmation of the expected session",
-              };
-              return;
-            }
-            const now = Date.now();
-            const found =
-              now - Date.parse(String(record.confirmation.confirmed_at));
-            const confirmedAt = new Date(now - ageMs).toISOString();
-            store.put(
-              {
-                ...record,
-                confirmation: {
-                  ...record.confirmation,
-                  confirmed_at: confirmedAt,
-                },
-              },
-              "auth_state",
-            );
-            verdict = {
-              ok: true,
-              foundAgeMs: found,
-              writtenAgeMs: now - Date.parse(confirmedAt),
-            };
-          };
-          write.oncomplete = () => {
-            db.close();
-            resolve(verdict);
-          };
-          write.onerror = () => {
-            db.close();
-            reject(write.error);
-          };
-          write.onabort = () => {
-            db.close();
-            reject(write.error ?? new Error("the transaction aborted"));
-          };
-        };
-      }),
-    { want: expected, ageMs },
-  );
-  if (!outcome.ok)
-    throw new Error(
-      `setup: the shared confirmation was not aged (${outcome.why}); nothing was changed`,
+  return ageSharedConfirmation(page, expected, ageMs);
+}
+
+/** The id of the newest proxy log entry now (0: none): what `untilRequestsRetired` counts a document's readers from. */
+export const proxyMark = async (): Promise<number> =>
+  (await proxy.log()).reduce((newest, entry) => Math.max(newest, entry.id), 0);
+
+/**
+ * WEB-14a revision 37 (review of 25 October 2026, R41 `offline-reload-request-retirement-premise`; design assessment C5, I10/I11, Q8): THE
+ * DURABLE PREMISE OF A DOCUMENT TRANSITION. Before a test replaces or reloads a document, or takes the network away, on the premise that the
+ * document has finished its own requests, the SESSION RECORD must say so: every request lease (any class but `exposure`) has been retired.
+ * A proxy entry with a status says only that the proxy answered; the browser may not have delivered that answer to the page yet, and the
+ * page retires the lease only after handling it, in its own durable transaction. A document that goes before then leaves the lease
+ * unresolved, and the next document must verify it (online) or, offline, stays neutral (`1e.interrupted_offline`): a different premise.
+ *
+ *  1. The document's expected `readers` (path patterns) have been ISSUED and answered at the proxy since `since` (`proxyMark()` taken before
+ *     the document loaded), so a zero sampled before they start is never taken for their retirement. None named: nothing is required here.
+ *  2. Within `timeout`, the durable record holds no request lease, still settles exactly `expected`, and is read from the SAME document
+ *     (a marker the helper sets); otherwise it fails as a SETUP error naming what it saw. The records are only read: nothing is retired,
+ *     deleted, aged or suppressed here.
+ *
+ * It is a read-only sample, not a browser-wide lock: work a test starts after it (a reload's own boot) is the test's to account for.
+ * Returns what it established (metadata only: counts and classes, never a credential or body), for an attachment.
+ */
+export async function untilRequestsRetired(
+  page: Page,
+  expected: SettledLike,
+  options: {
+    since: number;
+    readers?: readonly RegExp[];
+    label: string;
+    timeout?: number;
+  },
+): Promise<{ document: string; readers: string[]; leases: string[] }> {
+  const timeout = options.timeout ?? 15_000;
+  const end = Date.now() + timeout;
+  const mark = () =>
+    page.evaluate(() => {
+      const scope = window as unknown as { __retirementDocument?: string };
+      scope.__retirementDocument ??= crypto.randomUUID();
+      return scope.__retirementDocument;
+    });
+  const document = await mark();
+  const readers = options.readers ?? [];
+  let issued: string[] = [];
+  for (;;) {
+    const log = (await proxy.log()).filter(
+      (entry) => entry.id > options.since && entry.status !== undefined,
     );
-  return {
-    aged: true,
-    settlement_matched: true,
-    confirmation_matched: true,
-    found_age_ms: outcome.foundAgeMs,
-    written_age_ms: outcome.writtenAgeMs,
-  };
+    issued = readers
+      .filter((reader) => log.some((entry) => reader.test(entry.path)))
+      .map(String);
+    if (issued.length === readers.length) break;
+    if (Date.now() > end)
+      throw new Error(
+        `setup (${options.label}): the document's readers were not issued and answered (${readers.map(String).join(", ")}; seen ${issued.join(", ") || "none"})`,
+      );
+    await page.waitForTimeout(50);
+  }
+  let leases: string[] = [];
+  for (;;) {
+    const read = (await records(page)) as RecordsLike | undefined;
+    if (read?.auth_state === undefined)
+      throw new Error(
+        `setup (${options.label}): the session record could not be read`,
+      );
+    const settled = read.auth_state.settled;
+    if (
+      settled?.account_id !== expected.account_id ||
+      settled?.epoch !== expected.epoch ||
+      settled?.session_id !== expected.session_id
+    )
+      throw new Error(
+        `setup (${options.label}): the record no longer settles the expected session`,
+      );
+    if ((await mark()) !== document)
+      throw new Error(`setup (${options.label}): the document was replaced`);
+    leases = Object.values(read.auth_state.leases)
+      .filter((lease) => lease.class !== "exposure")
+      .map((lease) => lease.class);
+    if (leases.length === 0) return { document, readers: issued, leases };
+    if (Date.now() > end)
+      throw new Error(
+        `setup (${options.label}): the document's requests were not retired within ${timeout} ms (leases: ${leases.join(", ")})`,
+      );
+    await page.waitForTimeout(50);
+  }
 }
 
 /**
@@ -631,11 +653,39 @@ export async function withStaleSharedConfirmation(
  * app route itself, without the fixture bridge), waits for its boot and exposes its session, and checks that the new document's
  * durable record still settles exactly `expected`: otherwise the premise (the same session, now unconfirmed) is gone and it throws.
  * The context's init scripts run again in the new document; `window.__t` is new.
+ *
+ * WEB-14a revision 46 (review r45 F-R45-I14D, R34-N1): this is the CLEAN replacement. Its premise is that the old document has
+ * finished its own requests (no request lease is left for the new document to verify), established durably before the navigation.
+ * Callers (each states this premise): I-01 (integration.password-path.spec.ts). A test that abandons a request on purpose states the
+ * opposite premise and uses `abandonHarnessDocument`; neither may stand in for the other.
  */
 export async function freshHarnessDocument(
   page: Page,
   expected: SettledLike,
   route = "/today",
+): Promise<void> {
+  // WEB-14a revision 36: the shell merged with accepted WEB-10a shows Today, whose readers (`/daily`, `/defaults/snapshot`) ask as soon as
+  // the display lifts. A document replaced while one of them is in flight leaves its request lease unretired, and the new document must
+  // then verify that lease before it displays: a different premise from the one these callers state (the new document's ONLY identity
+  // read is its own resume verification). So the replaced document finishes its own requests first, within a bound, or the setup fails.
+  // Revision 37 (R41; design assessment C5): the one durable premise shared with I-U2 (`untilRequestsRetired`), now also checking that the
+  // record is read from this document and still settles `expected`.
+  await untilRequestsRetired(page, expected, {
+    since: 0,
+    label:
+      "the replaced document's own requests have finished (no request lease is left for the new document to verify)",
+  });
+  await navigateHarnessDocument(page, expected, route);
+}
+
+/**
+ * The navigation both replacements share (not exported: each caller names its premise through `freshHarnessDocument` or
+ * `abandonHarnessDocument`). It does not wait for display: an abandonment's new document must verify the abandoned lease first.
+ */
+async function navigateHarnessDocument(
+  page: Page,
+  expected: SettledLike,
+  route: string,
 ): Promise<void> {
   await page.goto(`/__session?route=${encodeURIComponent(route)}`);
   // A document without the fixture bridge (the app route itself, as `reload()` of a harness page loads) is a setup failure named as
@@ -659,6 +709,97 @@ export async function freshHarnessDocument(
     throw new Error(
       "setup: the new document's record does not settle the expected session",
     );
+}
+
+/** Read one document's evidence for navigation-premise.ts (metadata only), writing its marker on first read. */
+const sampleDocument = (page: Page): Promise<DocumentSample> =>
+  page.evaluate(async () => {
+    const scope = window as unknown as { __navigationDocument?: string };
+    scope.__navigationDocument ??= crypto.randomUUID();
+    const bridge = window.__atlasFixture?.session;
+    const read = bridge
+      ? ((await bridge.readRecords()) as {
+          auth_state?: {
+            settled: DocumentSample["settled"];
+            leases: DocumentSample["leases"];
+          };
+        })
+      : undefined;
+    return {
+      bridged: bridge !== undefined,
+      boot: (window.__s as { bootId?: string } | undefined)?.bootId ?? null,
+      document: scope.__navigationDocument,
+      settled: read?.auth_state?.settled ?? null,
+      leases: read?.auth_state?.leases ?? {},
+      trace: (bridge?.trace ?? []) as DocumentSample["trace"],
+    };
+  });
+
+/**
+ * WEB-14a revision 46 (review r45 F-R45-I14D, family `i14d-post-navigation-lease-premise` (R34-N1); design assessment C1/C2): the
+ * INTENTIONAL ABANDONMENT of a request by navigation, the opposite premise of `freshHarnessDocument`. The caller has made ONE named
+ * ordinary request in `page`'s document, whose answer the proxy holds (`witness.held`) and whose continuation the document never runs,
+ * and it holds the next document's verification. Before the navigation, within `timeout` (the clean replacement's bound), the old
+ * document must show that request and nothing else outstanding (navigation-premise.ts `judgeAbandonment`): the witnessed lease, of its
+ * boot, account, epoch and class, correlated with exactly one `request.issued` of its own trace and never retired, the answer held,
+ * and every OTHER request lease retired by its live owner. Any other problem fails at once as a SETUP error: it is not waited out.
+ * The same navigation as the clean replacement follows (bridge and settlement checked; display is NOT waited for). The new document
+ * must then be a different document and boot that still settles `expected` and still holds the witnessed lease unchanged
+ * (`judgeReplacement`). Nothing is retired, released, deleted or aged here; the caller asserts what the new document does with the
+ * lease. Callers: the I-14d premise control "a navigation that abandons the seed's held request ..." (integration.pages.spec.ts).
+ * Returns what it established, metadata only, for an attachment.
+ */
+export async function abandonHarnessDocument(
+  page: Page,
+  expected: SettledLike,
+  witness: AbandonmentWitness,
+  options: { route?: string; timeout?: number } = {},
+): Promise<{
+  before: { document: string; boot: string; issued: number | null };
+  after: { document: string; boot: string | null };
+  lease: string;
+}> {
+  const timeout = options.timeout ?? 15_000;
+  const end = Date.now() + timeout;
+  const first = await sampleDocument(page);
+  let issued: number | null = null;
+  for (;;) {
+    const before = await sampleDocument(page);
+    const held = (await proxy.held())[witness.held] ?? 0;
+    const verdict = judgeAbandonment({
+      expected,
+      witness,
+      document: first.document,
+      before,
+      held,
+    });
+    if (verdict.problems.length > 0)
+      throw new Error(
+        `setup (intentional abandonment): ${verdict.problems.join("; ")}`,
+      );
+    issued = verdict.issued;
+    if (verdict.waiting.length === 0) break;
+    if (Date.now() > end)
+      throw new Error(
+        `setup (intentional abandonment): other requests of the old document were not retired within ${timeout} ms (${verdict.waiting.join(", ")}); only the abandoned request may be left for the next document`,
+      );
+    await page.waitForTimeout(50);
+  }
+  await navigateHarnessDocument(page, expected, options.route ?? "/today");
+  const after = await sampleDocument(page);
+  const problems = judgeReplacement({
+    expected,
+    witness,
+    document: first.document,
+    after,
+  });
+  if (problems.length > 0)
+    throw new Error(`setup (intentional abandonment): ${problems.join("; ")}`);
+  return {
+    before: { document: first.document, boot: witness.boot, issued },
+    after: { document: after.document, boot: after.boot },
+    lease: witness.lease,
+  };
 }
 
 /** The proxy's log entries of the identity read (`GET /browser-sessions/current`). */
