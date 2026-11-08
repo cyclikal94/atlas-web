@@ -1,0 +1,1205 @@
+{
+  "source": {
+    "repository": "atlas (backend)",
+    "release": "v0.29.0-rc.1",
+    "commit": "4396c99300d00798fc10e61d459f4d9fce699ee8",
+    "caller": "crates/core/src/calendars/ics.rs parse",
+    "parser": "ical 0.11.0 (IcalParser: LineReader, PropertyParser)",
+    "parser_files_sha256": {
+      "src/line.rs": "8fa08985500b4e478a58d78063ac2e0f2a6472ebf84aa3fb7bd085d411e9dede",
+      "src/property.rs": "bf46987b888488f747bbd8799aa227823f07dac8a5ff8ea6ea2ee07410da495f",
+      "src/parser/mod.rs": "854e803778da35d83f483bcc803113980c7f4ef7040906b2a2fba6700cf5a0ba",
+      "src/parser/ical/mod.rs": "75162ed7ff084a72e24b90a7b700b60888de45d9010dfac3fcc55b6a8b5ccc36",
+      "src/parser/ical/component.rs": "7e3731259160e985c7dc3b57fa3caea05d451d04ed723e0f05d6909a8a3d3398"
+    },
+    "cargo_lock_sha256": "4d86322e56e5766e77fe0a3ef2b392ea4f0cdffea4185d558e920147748dc405",
+    "generator": "scripts/generate-ics-parser-corpus.mjs",
+    "note": "status ok: one calendar and no second (events = events.len()); none, error or second: the server refuses the file (invalid_ics). Reference evidence of the parser, not a backend import run."
+  },
+  "cases": [
+    {
+      "name": "plain-one",
+      "why": "control",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "0e94a4b548eb0b76300bc3e828466cb2cc138606b66eb1ceb685e256bed44832",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "plain-one-lf",
+      "why": "LF line ends",
+      "parts": [
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Atlas//ics corpus//EN\n",
+        {
+          "repeat": [
+            "BEGIN:VEVENT\nUID:{n}@corpus.example\nDTSTART;VALUE=DATE:20261101\nSUMMARY:Event {n}\nEND:VEVENT\n"
+          ],
+          "times": 1
+        },
+        "END:VCALENDAR\n"
+      ],
+      "sha256": "353473c41549c0595d9a6664d84ab6d3dc556b75d4b4af11afd271967bc69430",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "plain-256",
+      "why": "event bound",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 256
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "50a3db410803ecaed940fe8924306491010ba9ff4b67568dc42b445aeaa8c5b8",
+      "parser": {
+        "status": "ok",
+        "events": 256
+      }
+    },
+    {
+      "name": "plain-257",
+      "why": "one over",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "b12e17b5e0a72a7e720a45b8433b3eebd71d5d441de3d09299dfe851da494e51",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "header-folded-space",
+      "why": "R12 header",
+      "parts": [
+        "BEGIN:\r\n VCALENDAR\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "e587109bdae63dc67a1b1908fc9639110f54a479ebadfe108f6f8a98296dfcc6",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-folded-tab",
+      "why": "tab continuation",
+      "parts": [
+        "BEGIN:\r\n\tVCALENDAR\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "a7eb1a4f794386e8ba5ef5a57493607bbc19970fe1920d895aebec8829e4f31b",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-folded-in-name",
+      "why": "split in the name",
+      "parts": [
+        "BEG\r\n IN:VCALENDAR\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "fb5034e6838d2602b45b6475ca9a3fc9728eeda255c1d08e3a7138953d80065a",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-folded-in-value",
+      "why": "split in the value",
+      "parts": [
+        "BEGIN:VCAL\r\n ENDAR\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "6d252f299137430691856f964c4b8fb1605303c29f18e73c609f16991dc8f3eb",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-folded-many",
+      "why": "several folds",
+      "parts": [
+        "B\r\n E\r\n\tG\r\n IN:\r\n VCAL\r\n ENDAR\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "0fdfb1ea6a41aaab2192f1904e04e51a639d5ec043cec24098f9a7f191cb9b5c",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-folded-lf",
+      "why": "LF fold",
+      "parts": [
+        "BEGIN:\n VCALENDAR\nVERSION:2.0\n",
+        {
+          "repeat": [
+            "BEGIN:VEVENT\nUID:{n}@corpus.example\nDTSTART;VALUE=DATE:20261101\nSUMMARY:Event {n}\nEND:VEVENT\n"
+          ],
+          "times": 1
+        },
+        "END:VCALENDAR\n"
+      ],
+      "sha256": "82e014a807376ce3a807e8833bb840a498ee9e9c5adfa6aefa85bc962dd83494",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-trailing-space",
+      "why": "trailing white space",
+      "parts": [
+        "BEGIN:VCALENDAR \t\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "91eea9475b7bc9318b8151efa34ca6527210a714b1732171dc819af405d6d75a",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "header-after-blank-lines",
+      "why": "leading empty lines",
+      "parts": [
+        "\r\n\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "b7137a66926f3b20b913b74631103e9559ba2c16f9f8daf1d783c043bdaf56c1",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "events-folded-256",
+      "why": "R12 boundary",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 256
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "14f601925fd3171de6d3714f80d750ae74ed0ba816075e5b6b6a5092206e9dbc",
+      "parser": {
+        "status": "ok",
+        "events": 256
+      }
+    },
+    {
+      "name": "events-folded-257",
+      "why": "R12 bypass",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "dde987c3e89ff2dfa36f26b2d50de1d3f9257f22f416f1a5ffa56656dafd7575",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "events-folded-lf-257",
+      "why": "LF fold",
+      "parts": [
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Atlas//ics corpus//EN\n",
+        {
+          "repeat": [
+            "BEGIN:\n VEVENT\nUID:{n}@corpus.example\nDTSTART;VALUE=DATE:20261101\nSUMMARY:Event {n}\nEND:VEVENT\n"
+          ],
+          "times": 257
+        },
+        "END:VCALENDAR\n"
+      ],
+      "sha256": "829d072a8f12fa41bfc76850158779827959fff6cbaffafd1f667c61ed58a5aa",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variants-256",
+      "why": "every variant, exact count",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": [
+            "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VE\r\n\tVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "B\r\n EGIN:VEV\r\n ENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:\r\n\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT \t\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN: \r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT \r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=\"a:b\";X-B=c,d:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN::VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "begin:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n"
+          ],
+          "times": 256
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "3a24f155b5a5f1c105dd9c4942bda990ae03873d4afc250cfe863027752ea76f",
+      "parser": {
+        "status": "ok",
+        "events": 256
+      }
+    },
+    {
+      "name": "variants-257",
+      "why": "every variant, one over",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": [
+            "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VE\r\n\tVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "B\r\n EGIN:VEV\r\n ENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:\r\n\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT \t\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN: \r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN:VEVENT \r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=\"a:b\";X-B=c,d:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN::VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "begin:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n"
+          ],
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "d1a30129dbbae62e98834d1388a52b436bca8801c625edbe0badd628351ace0f",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-1-257",
+      "why": "one variant alone, one over: \"BEGIN:\\r\\n VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "dde987c3e89ff2dfa36f26b2d50de1d3f9257f22f416f1a5ffa56656dafd7575",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-2-257",
+      "why": "one variant alone, one over: \"BEGIN:VE\\r\\n\\tVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VE\r\n\tVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "6d205168a2a273523b037fe5aa51509e119a28b31a8d60d76fb57fc9aabebb88",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-3-257",
+      "why": "one variant alone, one over: \"B\\r\\n EGIN:VEV\\r\\n ENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "B\r\n EGIN:VEV\r\n ENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "60f0b7acc430c552736dad17e256f465ea499ba1c18dd9609ce828cc76fc3a56",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-4-257",
+      "why": "one variant alone, one over: \"BEGIN:\\r\\n\\r\\n VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:\r\n\r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "452706b2df18278efec5fc8b36c251f45e9f6fdba872519f026d88d29960c3eb",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-5-257",
+      "why": "one variant alone, one over: \"BEGIN:VEVENT \\t\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT \t\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "20243141ba405c5c532e80792a6d00763243154361021062e131e668d992d407",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-6-257",
+      "why": "one variant alone, one over: \"BEGIN: \\r\\n VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN: \r\n VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "dec7e06ba0584462bbc50d76604ba4599ffef8fed1ca66bfa9dcc70765127394",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-7-257",
+      "why": "one variant alone, one over: \"BEGIN:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "042b167f96c81273954baa2df5b6254facc361c3694d99aa8048df5aee3617ac",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-8-257",
+      "why": "one variant alone, one over: \"BEGIN:VEVENT \"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT \r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "965c6d681f2ddfefc7b8862315534c25f07dfaa76fc81ec952aae903fb9527dd",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-9-257",
+      "why": "one variant alone, one over: \"BEGIN;X-A=1:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "43cdafa45bc51092034b719f24e075e37a6cd8bee0747e14e16a30e728da62c3",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-10-257",
+      "why": "one variant alone, one over: \"BEGIN;X-A=\\\"a:b\\\";X-B=c,d:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=\"a:b\";X-B=c,d:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "d162203c16c4f76b8c0a0ff4f8127ed7714b57df38a039f6cf6c1c55a88e7527",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-11-257",
+      "why": "one variant alone, one over: \"BEGIN::VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN::VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "ae7a480885b465ddeb23024ad0ae2105396ea0b8a26da91b0f17e5fa4903a0fc",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "variant-12-257",
+      "why": "one variant alone, one over: \"begin:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "begin:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "09fa34abcaa6704ad5dc72af87deae9c5b7eedeb77d2bbcb3ae4c0d5eae8aa75",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameters-256",
+      "why": "R13: every parameter variant, exact count",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": [
+            "BEGIN;X-A=a,\"b:c\":VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=a,,,b;X-B=c:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=;X-B=:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;;;X-A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X:A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=b=c:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=\"a,b\";X-B=\"c;d\":VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=\r\n 1;X-\r\n\tB=2:VEV\r\n ENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=1,2,3,4,5,6,7,8,9,10:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n"
+          ],
+          "times": 256
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "5c29a15b28649c847fba649407c88fd7d94512499722e584ef77f650f4fa8bfd",
+      "parser": {
+        "status": "ok",
+        "events": 256
+      }
+    },
+    {
+      "name": "parameters-257",
+      "why": "R13: every parameter variant, one over",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": [
+            "BEGIN;X-A=a,\"b:c\":VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=a,,,b;X-B=c:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=;X-B=:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;;;X-A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X:A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=b=c:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=\"a,b\";X-B=\"c;d\":VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=\r\n 1;X-\r\n\tB=2:VEV\r\n ENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X-A=1,2,3,4,5,6,7,8,9,10:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+            "BEGIN;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n"
+          ],
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "e725382e37aabeaf9da74753049798a53ec8b4839ac282ab1dd5a5fdac59346b",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-1-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=a,\\\"b:c\\\":VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=a,\"b:c\":VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "d38eb3461c30d18e5db5116c733396a832c77090478b939791604d1d2ce9b107",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-2-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=a,,,b;X-B=c:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=a,,,b;X-B=c:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "96e861874b69817c9301eb4bb1f464e6dde70c0505da1aeb4214872218087f80",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-3-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=;X-B=:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=;X-B=:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "c4318e65f9fd76f4d4b92a238dd02e7eaba30dee019cb60c0b1ac1ec829b9bf0",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-4-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;;;X-A=1:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;;;X-A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "8d2314dbf3025a645e5457539566c1586c46ea868aa51a1b0a33c5c2bc1f7c5c",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-5-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X:A=1:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X:A=1:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "7e42d3d0f5cb9ca1a7b17d8450ca5cd790f3cbf2b6c7d79e3100b58cb80b2749",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-6-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=b=c:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=b=c:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "63b83288c4808c357da15fd660340bc242aff2bf61ff59016cdda29a533c85b8",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-7-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=\\\"a,b\\\";X-B=\\\"c;d\\\":VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=\"a,b\";X-B=\"c;d\":VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "6e3e41b4cbb2219dbd634cf2ccfeaecf76ad4054c67a20a78f311f25c8ba085f",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-8-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=\\r\\n 1;X-\\r\\n\\tB=2:VEV\\r\\n ENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=\r\n 1;X-\r\n\tB=2:VEV\r\n ENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "2569c94127f6f57253ff019673a498d6184a9d380f32dace16b1f74ca60da09b",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-9-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X-A=1,2,3,4,5,6,7,8,9,10:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=1,2,3,4,5,6,7,8,9,10:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "068a5d4805c56b53e93b1c03a472ae9390476da0036e7803bd8eabad0f7288a3",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameter-10-257",
+      "why": "R13: one parameter variant alone, one over: \"BEGIN;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A:VEVENT\"",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A;X=A:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "74dc32272da7b0d8c67886e09d1e0c74586aafae2228122e7fdf5a03a4f77533",
+      "parser": {
+        "status": "ok",
+        "events": 257
+      }
+    },
+    {
+      "name": "parameters-summary-many",
+      "why": "R13: an ordinary property with 4,000 parameters",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        "BEGIN:VEVENT\r\nUID:p@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY",
+        {
+          "repeat": ";X=A",
+          "times": 4000
+        },
+        ":Review\r\nEND:VEVENT\r\n",
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "81e5dabf13f49ffe288348e98fcea41122ec5ad262e96ef471f33d1d56764501",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "parameters-begin-many",
+      "why": "R13: a component line with 4,000 parameters",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        "BEGIN",
+        {
+          "repeat": ";X=A",
+          "times": 4000
+        },
+        ":VEVENT\r\nUID:p@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Review\r\nEND:VEVENT\r\n",
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "e37989766d5b04b514f534a6a52f186fb665bc1e947e3224e68cd203691999b0",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "end-eleven-values-then-gap",
+      "why": "R13: the ten-value limit — the calendar's END with eleven listed values still parses and closes it, so the gap ends the reading",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END;X-A=1,2,3,4,5,6,7,8,9,10,11\r\n",
+        "\u000b\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "dc6842400a3c411bcb8db470fb8316473494b426bb2f59cc2b51248d36f30400",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "end-parameters-then-gap",
+      "why": "R13: the calendar's END with quoted and listed parameters closes it",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END;X-A=\"a:b\";X-B=c,d:VCALENDAR\r\n",
+        "\u000b\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "b6e512b2c15832b0ebd19e81eb38893c2befd84fe50c0569a71046777d604544",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "overrides-folded",
+      "why": "overrides are components",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        "BEGIN:VEVENT\r\nUID:series@corpus.example\r\nDTSTART:20261101T090000Z\r\nRRULE:FREQ=DAILY;COUNT=5\r\nSUMMARY:Series\r\nEND:VEVENT\r\nBEGIN:\r\n VEVENT\r\nUID:series@corpus.example\r\nRECURRENCE-ID:20261102T090000Z\r\nDTSTART:20261102T100000Z\r\nEND:VEVENT\r\nBEG\r\n\tIN:VEVENT\r\nUID:series@corpus.example\r\nRECURRENCE-ID:20261103T090000Z\r\nDTSTART:20261103T100000Z\r\nEND:VEVENT\r\n",
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "f4a5d60a40a107910302daeedb08f7c27ef9400d598c6dc70f05cabe32ab90e3",
+      "parser": {
+        "status": "ok",
+        "events": 3
+      }
+    },
+    {
+      "name": "nested-components",
+      "why": "only VEVENTs count",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        "BEGIN:VTIMEZONE\r\nTZID:Europe/London\r\nBEGIN:STANDARD\r\nDTSTART:19701025T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0000\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:19700329T010000\r\nTZOFFSETFROM:+0000\r\nTZOFFSETTO:+0100\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:alarm@corpus.example\r\nDTSTART:20261101T090000Z\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nBEGIN:VTODO\r\nUID:todo@corpus.example\r\nEND:VTODO\r\n",
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "a95dfad56da4664346336a7f6e446191c30536991119d0e172be8837f1ccda45",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "markers-in-text",
+      "why": "markers inside property text",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        "BEGIN:VEVENT\r\nUID:text@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nDESCRIPTION:Notes\r\n BEGIN:VEVENT\r\nCOMMENT:BEGIN:VEVENT\r\nX-NOTE;X-P=\"BEGIN:VEVENT\":y\r\nX-MORE:x\r\n\tBEGIN:VCALENDAR\r\nEND:VEVENT\r\n",
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "671bb2c540e937b00ca408d3a34152c8e473a09f72ff0fc1ddf7dbe78bd66a33",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "gap-after-end",
+      "why": "the parser stops at a gap after the calendar",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n",
+        "\u000b\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "70465d8ad6162c0754f8e9fd0664b9c5a2fe91702381e42c3adaf1ba132bb5c0",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "crcrlf-after-end",
+      "why": "the same gap written \\r\\r\\n",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n",
+        "\r\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "63e162cc2df6930286733feda039478bc9885eada522c4becaf2e9df8f94bc92",
+      "parser": {
+        "status": "ok",
+        "events": 1
+      }
+    },
+    {
+      "name": "stray-end-then-gap",
+      "why": "any END closes the calendar",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 2
+        },
+        "END:VEVENT\r\n",
+        "\u000b\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "99fbeb95f1b91f8a5c55e4981534ef157acc98a2a23a529fd99e40a9088f56d1",
+      "parser": {
+        "status": "ok",
+        "events": 2
+      }
+    },
+    {
+      "name": "gap-inside-calendar",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        "\u000b\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "f3e25523363ab969cb3e9c69a7d7579b78f1fbc092d705cc9ed96f1903eb6a2a",
+      "parser": {
+        "status": "error",
+        "detail": "incomplete object"
+      }
+    },
+    {
+      "name": "gap-after-event",
+      "why": "refused by the parser: only the calendar's END ends the reading",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "\u000b\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "42c5e7b10906f9baa9fb6a6cf0b62440712dee3961bd93ca6a447eef4b29b947",
+      "parser": {
+        "status": "error",
+        "detail": "incomplete object"
+      }
+    },
+    {
+      "name": "gap-before-header",
+      "why": "refused by the parser",
+      "parts": [
+        "\u000b\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "fd941e01047b7d404780d48460513357ecd2007988c4cefc1739cbf3d64be7e1",
+      "parser": {
+        "status": "none"
+      }
+    },
+    {
+      "name": "header-continued",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\n X-JUNK\r\nVERSION:2.0\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "04f124c01ccd4fce5bf1445ce2f472a74a44c965b2a58727518f42da24c2be91",
+      "parser": {
+        "status": "error",
+        "detail": "missing header"
+      }
+    },
+    {
+      "name": "header-leading-space",
+      "why": "refused by the parser",
+      "parts": [
+        " BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "b7e247f0f6d799a217f842472e2fae41f9efbeb4dfe3bee0789751b65f8be081",
+      "parser": {
+        "status": "error",
+        "detail": "missing header"
+      }
+    },
+    {
+      "name": "header-lower-case",
+      "why": "refused by the parser",
+      "parts": [
+        "begin:vcalendar\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "04abb61ae81e0e5904b5dc1f082a0d5a90ead33c011d726fc63108321f9deb40",
+      "parser": {
+        "status": "error",
+        "detail": "missing header"
+      }
+    },
+    {
+      "name": "second-calendar",
+      "why": "refused by the backend",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 1
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "8eb8f1bbc9ce70946df02930a259983e6ef655e319bd1e41b53502c4acaaf761",
+      "parser": {
+        "status": "second",
+        "detail": "1"
+      }
+    },
+    {
+      "name": "value-lower-case-257",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:vevent\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 257
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "cf2290b608c2590394566a84b50fb53ac002e40f95541f145f0607c0fde458a3",
+      "parser": {
+        "status": "error",
+        "detail": "invalid component"
+      }
+    },
+    {
+      "name": "event-continued",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT\r\n X\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 2
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "12c264916c49840f2cdd737b00cc12a9478ed5f78544ed753b00d0702ab69737",
+      "parser": {
+        "status": "error",
+        "detail": "invalid component"
+      }
+    },
+    {
+      "name": "fold-two-spaces",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:\r\n  VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 2
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "8705ee3aec02ae4f55db6d3547691859aea8e05f8633c483b1b00f9d769160b4",
+      "parser": {
+        "status": "error",
+        "detail": "invalid component"
+      }
+    },
+    {
+      "name": "trailing-feff",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN:VEVENT﻿\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 2
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "85b194e4a51d3336dd430dc9720239d0381baba048cff5ae7169f15e4a83c8e5",
+      "parser": {
+        "status": "error",
+        "detail": "invalid component"
+      }
+    },
+    {
+      "name": "unclosed-quote",
+      "why": "refused by the parser",
+      "parts": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Atlas//ics corpus//EN\r\n",
+        {
+          "repeat": "BEGIN;X-A=\"a:VEVENT\r\nUID:{n}@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY:Event {n}\r\nEND:VEVENT\r\n",
+          "times": 2
+        },
+        "END:VCALENDAR\r\n"
+      ],
+      "sha256": "b31f7cc834f9c0f315616c19044c53e086dcf88f29e5c756e6fe485c5bcfa396",
+      "parser": {
+        "status": "error",
+        "detail": "property error: Line 4: Missing a closing quote."
+      }
+    },
+    {
+      "name": "not-calendar",
+      "why": "refused by the parser",
+      "parts": ["hello\n"],
+      "sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+      "parser": {
+        "status": "error",
+        "detail": "property error: Line 1: Missing property name."
+      }
+    },
+    {
+      "name": "empty",
+      "why": "refused by the parser",
+      "parts": [""],
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "parser": {
+        "status": "none"
+      }
+    }
+  ]
+}

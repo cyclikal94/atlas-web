@@ -2,12 +2,15 @@
 import { describe, expect, test } from "vitest";
 import { canonicalJson } from "../../src/data/model/canonical";
 import type { DraftRow } from "../../src/data/model/types";
+import { registerImportAnswers } from "../../src/features/calendars/answers";
 import {
   configureSourceRequest,
   createSourceRequest,
   importRequest,
 } from "../../src/features/calendars/model/commands";
+import { historyOf } from "../support/data/continuity";
 import { outboxWorld } from "../support/data/outbox-world";
+import { cacheRow } from "../support/data/rows";
 
 /**
  * The calendar schema extension's acceptance (WEB-13a; delivery-slices "Acceptance cases for calendar command queuing" 1 and 2) through
@@ -42,6 +45,7 @@ async function world() {
       ics: ICS,
       from: "2026-01-01",
       through: "2026-12-31",
+      continuity: historyOf(w),
     }),
   );
   if (
@@ -156,5 +160,204 @@ describe("case 1 and case 2: a lost response is resent with the same key and the
       "acknowledged",
       "acknowledged",
     ]);
+  });
+});
+
+/**
+ * WEB-13b (§5 of its plan): what each answer to an import means, on the released wire (`v0.29.0-rc.1`), with the import's two terminal
+ * answers registered as the page host registers them (`registerImportAnswers`). The source is cached and editable, so the import is sent
+ * at once (E12's positive control); the answers are scripted.
+ */
+describe("WEB-13b: the import's answers", () => {
+  const BODY = { ics: ICS, from: "2026-01-01", through: "2026-12-31" };
+
+  async function cachedImport(
+    options: { canEdit?: boolean; register?: boolean } = {},
+  ) {
+    const w = await outboxWorld();
+    if (options.register !== false) registerImportAnswers(w.conflicts);
+    w.put("cache", [
+      cacheRow({
+        id: SOURCE,
+        kind: "calendar_source",
+        label: "Chores",
+        value: { timezone: "UTC" },
+        can_edit: options.canEdit ?? true,
+      }),
+    ]);
+    const out = await w.outbox.enqueue(
+      importRequest({ sourceId: SOURCE, ...BODY, continuity: historyOf(w) }),
+    );
+    await w.settle();
+    return { w, out };
+  }
+
+  /** Runs the dispatcher until `count` requests were sent or the turns run out (fake time: each turn is a minute). */
+  async function sendUntil(
+    w: Awaited<ReturnType<typeof outboxWorld>>,
+    count: number,
+  ) {
+    for (let turn = 0; turn < 40 && w.sent.length < count; turn += 1) {
+      await w.settle();
+      await w.advance(60_000);
+    }
+    await w.settle();
+  }
+
+  test("a source I can only view refuses the import as denied: nothing is stored or sent", async () => {
+    const { w, out } = await cachedImport({ canEdit: false });
+    expect(out).toEqual({ kind: "refused", reason: "denied" });
+    expect(w.drafts()).toEqual([]);
+    w.start();
+    await w.settle();
+    expect(w.sent).toEqual([]);
+  });
+
+  test("control: an editable cached source is sent at once, to its address, with the stored body", async () => {
+    const { w, out } = await cachedImport();
+    expect(out.kind).toBe("queued");
+    w.script.push(w.receipt(7));
+    w.start();
+    await w.settle();
+    expect(w.sent.map((s) => s.path)).toEqual([
+      `/calendar-sources/${SOURCE}/import`,
+    ]);
+    expect(w.sent[0]?.body).toBe(canonicalJson(BODY));
+    expect(w.drafts().map((d) => d.status)).toEqual(["acknowledged"]);
+  });
+
+  test.each([
+    ["409 stale_refresh (generation_changed)", 409, "stale_refresh"],
+    ["409 stale_refresh (lease_expired)", 409, "stale_refresh"],
+    [
+      "502 fetch_failed (the server could not read the file)",
+      502,
+      "fetch_failed",
+    ],
+  ])(
+    "%s is terminal: sent once, rejected, never resent",
+    async (_, status, code) => {
+      const { w } = await cachedImport();
+      w.script.push(w.error(status, code));
+      w.start();
+      await sendUntil(w, 2);
+      expect(w.sent).toHaveLength(1);
+      expect(w.drafts()[0]).toMatchObject({
+        status: "rejected",
+        last_error: { status, code },
+      });
+    },
+  );
+
+  test("control: without the registered answers the same 409 and 502 are retried under the same key (the generic rule)", async () => {
+    for (const [status, code] of [
+      [409, "stale_refresh"],
+      [502, "fetch_failed"],
+    ] as const) {
+      const { w } = await cachedImport({ register: false });
+      w.script.push(w.error(status, code), w.receipt());
+      w.start();
+      await sendUntil(w, 2);
+      expect(w.sent.map((s) => s.key)).toHaveLength(2);
+      expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
+      expect(w.drafts()[0]?.status).toBe("acknowledged");
+    }
+  });
+
+  test("a gateway's 502 without an Atlas body stays the generic retry: resent byte-identically, then receipted", async () => {
+    const { w } = await cachedImport();
+    w.script.push(
+      new Response("<html>Bad gateway</html>", {
+        status: 502,
+        headers: { "content-type": "text/html" },
+      }),
+      w.receipt(),
+    );
+    w.start();
+    await sendUntil(w, 2);
+    expect(w.sent).toHaveLength(2);
+    expect(w.sent[1]?.body).toBe(w.sent[0]?.body);
+    expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
+    expect(w.drafts()[0]?.status).toBe("acknowledged");
+  });
+
+  test("409 refresh_in_progress (case 6(b)) and 503 temporarily_unavailable (7(f)) keep the import uncertain: same key and body until the receipt", async () => {
+    const { w } = await cachedImport();
+    w.script.push(
+      w.error(409, "refresh_in_progress"),
+      w.error(409, "refresh_in_progress"),
+      w.error(503, "temporarily_unavailable"),
+      w.receipt(3),
+    );
+    w.start();
+    await w.settle();
+    expect(w.sent).toHaveLength(1);
+    expect(w.drafts()[0]).toMatchObject({ status: "in_flight", attempts: 1 });
+    await sendUntil(w, 4);
+    expect(w.sent).toHaveLength(4);
+    expect(new Set(w.sent.map((s) => s.key)).size).toBe(1);
+    expect(new Set(w.sent.map((s) => s.body)).size).toBe(1);
+    expect(w.drafts()[0]).toMatchObject({
+      status: "acknowledged",
+      receipt_revision: 3,
+    });
+  });
+
+  test("503 slice_capacity is held for the person (blocked), never resent automatically", async () => {
+    const { w } = await cachedImport();
+    w.script.push(w.error(503, "slice_capacity"));
+    w.start();
+    await sendUntil(w, 2);
+    expect(w.sent).toHaveLength(1);
+    expect(w.drafts()[0]).toMatchObject({
+      status: "blocked",
+      blocked_reason: "slice_capacity",
+    });
+  });
+
+  test.each([
+    [422, "invalid_ics"],
+    [422, "calendar_limit"],
+    [422, "invalid_value"],
+    [403, "forbidden"],
+    [404, "not_found"],
+  ])("%i %s is the generic rejection: sent once", async (status, code) => {
+    const { w } = await cachedImport();
+    w.script.push(w.error(status, code));
+    w.start();
+    await sendUntil(w, 2);
+    expect(w.sent).toHaveLength(1);
+    expect(w.drafts()[0]?.status).toBe("rejected");
+  });
+
+  test("the registered answers touch only imports: a settings change answered 502 fetch_failed or 409 stale_refresh is retried", async () => {
+    for (const [status, code] of [
+      [502, "fetch_failed"],
+      [409, "stale_refresh"],
+    ] as const) {
+      const w = await outboxWorld();
+      registerImportAnswers(w.conflicts);
+      w.put("cache", [
+        cacheRow({ id: SOURCE, kind: "calendar_source", version: 2 }),
+      ]);
+      const out = await w.outbox.enqueue(
+        configureSourceRequest(
+          { id: SOURCE, value: { timezone: "UTC" } },
+          { timezone: "Europe/London", enabled: true },
+        ),
+      );
+      expect(out.kind).toBe("queued");
+      w.script.push(w.error(status, code), w.receipt());
+      w.start();
+      await sendUntil(w, 2);
+      expect(w.sent).toHaveLength(2);
+      expect(w.drafts()[0]?.status).toBe("acknowledged");
+    }
+  });
+
+  test("registering the answers twice on one registry is a defect (one handler per code)", async () => {
+    const w = await outboxWorld();
+    registerImportAnswers(w.conflicts);
+    expect(() => registerImportAnswers(w.conflicts)).toThrow(/twice/);
   });
 });

@@ -125,7 +125,7 @@ test.describe("E-CG1: the real adapter advances the local composition generation
   });
 });
 
-test.describe("E-CG2: version 3 closes an older build's connection and an older build cannot open it (Q19)", () => {
+test.describe("E-CG2: version 3 closes an older build's connection and an older build cannot open it (Q19; adapted, WEB-13b revision 8: version 4, renumbered 5 at the base merge)", () => {
   test("a version-1 database held open by an older build's connection: this build's open delivers versionchange to it, upgrades, and a version-2 open is refused", async ({
     context,
   }, info) => {
@@ -165,6 +165,11 @@ test.describe("E-CG2: version 3 closes an older build's connection and an older 
       account,
     );
     expect(description?.version).toBe(SCHEMA_VERSION * 10);
+    // ADAPTED (WEB-13b revision 8, review 8 R7b; renumbered at the base merge of 5 November 2026): WEB-13b's branch asserted
+    // `expect(SCHEMA_VERSION).toBe(4)`, its invalidation-witness barrier after the composition generation's (3). The accepted base's
+    // version 4 is WEB-09c's `delta_staging`, so the witness barrier is now 5. The older connection is closed by this build's open exactly
+    // as before, and a version-2 build is refused as before; a version-3 build and a version-4 build (no witness) are refused too.
+    expect(SCHEMA_VERSION).toBe(5);
     // WEB-09c ADAPTATION (labelled, BOUNDED-SYNC-PAGINATION-20261027): the current version is 4 (it adds `delta_staging`), so the line
     // `expect(SCHEMA_VERSION).toBe(3)` is now false by design. Its intent, that this build stands at or above the version-3 composition
     // barrier, is kept: the barrier is still 3 and the current version is above it; the upgraded database has the version-4 store.
@@ -175,38 +180,34 @@ test.describe("E-CG2: version 3 closes an older build's connection and an older 
       () => (window as unknown as { __older?: number | null }).__older,
     );
     expect(older).toBe(SCHEMA_VERSION * 10);
-    // A build of version 2 (IndexedDB version 20) cannot open the database any more.
-    const refused = await page.evaluate(
-      (db) =>
-        new Promise<string>((resolve) => {
-          const request = indexedDB.open(db, 20);
-          request.onsuccess = () => {
-            request.result.close();
-            resolve("opened");
-          };
-          request.onerror = () => resolve(request.error?.name ?? "error");
-        }),
-      name,
-    );
+    // A build of version 2 (IndexedDB version 20), 3 (30) or 4 (40) cannot open the database any more.
+    const refusedAt = (db: string, version: number) =>
+      page.evaluate(
+        ([at, v]) =>
+          new Promise<string>((resolve) => {
+            const request = indexedDB.open(at, v);
+            request.onsuccess = () => {
+              request.result.close();
+              resolve("opened");
+            };
+            request.onerror = () => resolve(request.error?.name ?? "error");
+          }),
+        [db, version] as const,
+      );
+    const refused = await refusedAt(name, 20);
     expect(refused).toBe("VersionError");
     // WEB-09c: a build of version 3 (IndexedDB version 30, before `delta_staging`) cannot open it either.
-    const refused3 = await page.evaluate(
-      (db) =>
-        new Promise<string>((resolve) => {
-          const request = indexedDB.open(db, 30);
-          request.onsuccess = () => {
-            request.result.close();
-            resolve("opened");
-          };
-          request.onerror = () => resolve(request.error?.name ?? "error");
-        }),
-      name,
-    );
-    expect(refused3).toBe("VersionError");
+    const refusedV3 = await refusedAt(name, 30);
+    expect(refusedV3).toBe("VersionError");
+    // WEB-13b (renumbered at the base merge): nor can a build of version 4 (40: `delta_staging` without the invalidation witness).
+    const refusedV4 = await refusedAt(name, 40);
+    expect(refusedV4).toBe("VersionError");
     recordEvidence(info, "e-cg2", {
       version: description?.version,
       older,
       refused,
+      refusedV3,
+      refusedV4,
     });
   });
 });

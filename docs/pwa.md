@@ -369,7 +369,7 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   found, or still withheld). The wording is PROPOSED, not accepted. Coverage: `tests/lib/recovery-check-again.test.tsx` (both adapters,
   an older build's exclusive probe modelled exactly, omitted-all/omitted-one, live owner, repeats, late reads, guards, hand-offs),
   `tests/lib/recovery-claimed-handoff-offer.test.tsx` (revision 55: this page's claimed hand-off in every offer look, both adapters),
-  `tests/features/recovery-check-again.test.tsx` (the household screen) and the native household journey in
+  `tests/features/recovery-check-again.test.tsx` (the household dialogs, since WEB-12b's merge) and the native household journey in
   `tests/e2e/fixture.pwa-editors.spec.ts` (Chromium, Firefox, WebKit).
 - **What this does not cover.** Only the app-update reload is guarded. The sync-recovery "Reload" action (`SyncBlocked`, through the session's
   own reload) and browser reload/close are outside the update coordinator; they are not claimed protected (design assessment, 10 October
@@ -397,13 +397,21 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
   editor `dependency-editor:<occurrence>:<new|replaced set>` and the turn order `rota-order:<task>`), the occurrence correction
   (`occurrence-correction:<id>`),
   the entry history's fix drafts (`entry-fix:<progress>`), the calendar Add, Link (label and timezone only) and Manage (settings edited)
-  forms, the households' create and invite forms, the sharing policy editor (`sharing-policy:<id>`, with the version it was composed
-  against) and each defaults layer form (`sharing-defaults:<layer>:<household|personal>:<kind>`). Component-state editors use
-  `editor.ts` (`useRecoverableEditor`).
+  forms, the household dialogs (since the maintenance merge of WEB-12b: New household `household-create`, Rename
+  `household-rename:<id>` with the version it was composed against, and a household's Invitations `household-invite:<id>`), the sharing
+  policy editor (`sharing-policy:<id>`, with the version it was composed against) and each defaults layer form
+  (`sharing-defaults:<layer>:<household|personal>:<kind>`), and, since WEB-13b's maintenance merge (correction M-13b-1, below), the new
+  task's calendar anchor in the task form's own text (version 2), WEB-13b's anchor panel (`task-form:new:anchor`, `task-anchor:<task>`)
+  and its import dialog (`calendar-import:<source>`, `calendar-import:chooser`). Component-state editors use `editor.ts`
+  (`useRecoverableEditor`); the People forms and the household dialogs, whose drafts live in their feature's page memory, have their own
+  owners (`people/form-recovery.ts`, `sharing/households/form-recovery.ts`); WEB-13b's page-memory editing sessions use `editor.ts`
+  through `calendars/session-recovery.ts`.
 - **Restore hosts.** A dialog or stage that is not open after a reload cannot look: the screen that opens it does (`useKeptRecovery` for
   the new task's preset stage, `CorrectionRecoveryHost` and `PolicyEditorRecoveryHost` on the task detail, `DependencyEditorRecoveryHost`
   in the day's work, the conflict block of a refused `set_dependencies` and the rota panel, `useRecoveryHost` on the calendar screen and
-  its rows). A copy found is held for the editor (never submitted) and the editor is opened on it.
+  its rows, and, since M-13b-1, the new task form's and a task's "Calendar anchor" sections, each source's "Import events" and the import
+  drop zone). A copy found is held for the editor (never submitted) and the editor is opened on it. A route-addressed dialog needs no host:
+  the update's reload keeps the URL, so the dialog mounts again and looks itself (the defaults layers, the household dialogs).
 - **Departure, discard and submission.** A departure that drops an owner's input (the visit's end, Cancel, another day) discards its
   copies (`end`), so it never returns after a later reload; a session kept for a visit to the sync screens stays dirty and listed. A save
   takes the model's ticket in the same step as the feature's own ticket; only a durable success covers what it sent, an uncertain or
@@ -454,6 +462,156 @@ or a remove), else of the people who could be added, read in those two sections 
 focus (D1). Before, it was the first enabled button of the dialog's body, which also holds the notice: focus landed on the restored banner's
 own "Discard instead" in every engine, and one Enter discarded the restored order. The dependency editor's is its Task select (a ref): its
 first field proper, always shown and enabled, never a chosen day's Remove.
+
+**WEB-12b's household dialogs (maintenance merge correction M-1, 6 November 2026; Kieran's decision "Fix in the second merge").** WEB-12b
+replaced `HouseholdsMinimal`, whose inline create and invitation forms revision 37 had made recoverable, with route-addressed dialogs whose
+drafts live in the households PAGE memory (they outlive a dialog's close and a `403` remount, never a reload). `households/form-recovery.ts`
+follows the People forms' owner (`people/form-recovery.ts`): page memory stays the authority and one recoverable model follows each draft
+key, for the displayed identity only.
+
+- **New household** keeps the name (`household-create`, `{ v: 1, text }`: WEB-14a's own context and text, so a copy saved by the old
+  inline form is restored into the dialog), **Rename** the name and the household version it was composed against
+  (`household-rename:<id>`, `{ v: 1, text, base }`), and **a household's Invitations** the username (`household-invite:<id>`), whether
+  typed or chosen in the directory lookup (the lookup's queries are presentation; the signup link is a credential: neither is kept).
+- Each model is registered while its field is shown and while a draft kept after Cancel is dirty, so an update saves it either way; it is
+  frozen while an update reload is prepared (typing is refused, Create, Save and Invite send nothing), and bound, so looking, only once its
+  field is shown (Rename and the invitation wait for the household list). After the reload the same route's dialog restores the copy into
+  an untouched field, never submitted; a dialog opened again later offers what other tabs left (an offer look).
+- A submission takes the model's ticket with the values it sends; only a durable success covers what it sent, and the draft is cleared
+  only while it is still what was sent (I7). An uncertain answer covers nothing (Decision H: the unresolved attempt itself is page memory
+  only and never part of a copy; a restored name is a new operation, and New household's same-name check still asks first). A restored
+  rename is saved under its base, so a household renamed since meets the server's conflict ("changed elsewhere") and is read again; the
+  next Save is against the version read then.
+- When page memory drops a draft (a success, a Try again that completed the form, Rename's Escape) its session follows: with the dialog
+  shown the copies are discarded and the field shows its start; with none, the session ends. A restored rename's base goes with its draft
+  (dropped, or reset by "Discard instead"), so a fresh rename afterwards is saved under the household's version of now. When another
+  identity's memory is asked for, the previous identity's household models leave the registry.
+- **Try again.** I7 is a FIRST-TRY rule. A Try again that is now known to have made the change completes the form as `docs/sharing.md`
+  D-12b-18 is written: it forgets the field's text even when the person typed a different name or username after the lost attempt (that
+  text is not saved by a later update). Whether a successful Try again should keep such newer text (I7 on the retry path), and whether a
+  Try again and Rename's Escape should be refused while an update reload is prepared (the latent DA-2 of the design assessment of
+  7 November 2026: no product path reaches it while the dialogs are modal), was decision **D-1**: Kieran decided on 7 November 2026
+  (`WEB12B-D1-ANSWER-20261107`, `approval/web12b-d1-answer-20261107.json` in the orchestrator) to keep the behaviour as written, with no
+  product change in WEB-12b; keeping the newer text, together with DA-2, is recorded for a follow-up card. The tests below pin the decided
+  behaviour, so a later change of it changes them visibly.
+- The household dialogs are modal, so while one is open the update banner behind it is inert: a person closes the dialog first (the draft
+  stays), or another tab's update asks the page to save (the peer flush).
+
+**The rules, cell by cell** (WEB-12b revisions 2 and 3, Reviews 3 and 4: F-R3-1, F-R4-1; the second design assessment of 7 November 2026,
+Branch B′). A cell is one rule for one input under one answer class, event or path. `tests/static/household-draft-writers.test.ts`
+machine-checks the whole table together with every WRITER of the drafts, bases and tickets (each tied to the catalogued mutants whose patch
+changes its line, or given a reason from a closed set) and every decision EXIT of `run`, `sendAttempt`, `retry`, `invite`, `dropped` and
+`completeTicket` (each tied to its cells, or given a reason): each cell names its test and the catalogued mutants whose `expect` names it,
+and a mutant of one input's cell names no other input's cell of that rule. A title there is the naming check only; that a test FAILS
+when its mutant is applied is the qualification run (`qmut`, every mutant below with its control). "Rules" is
+`households-submission-rules.test.tsx`, "Cells" `households-submission-cells.test.tsx` (each title begins with its cell id), "M-1"
+`households-recovery.test.tsx`, "Owner" `recovery-owner-discard.test.tsx`, "Page" and "Invitations" the household page and invitations
+suites:
+
+| Rule | New household | Rename | Invitation |
+| --- | --- | --- | --- |
+| R1 frozen: typing (or a directory choice) changes nothing, the press sends (and looks up) nothing | M-1 "while an update reload is being prepared…" (MU-6240, MU-6241) | Rules "R1 Rename…" ×2 (MU-6252, MU-6254, MU-6292, MU-6295) | Rules "R1 Invite…" ×3 (MU-6253, MU-6255, MU-6256, MU-6285, MU-6292, MU-6295) |
+| R2 I7: a durable first-try success clears only what was sent | M-1 "I7: a create answered…" (MU-6242) | Rules "R2 Rename I7" (MU-6257) | Rules "R2 Invite I7" (MU-6258) |
+| O1 a durable success with nothing typed since clears the draft and its copy | Rules "O1 New household" (MU-6293) | Rules "O1 Rename" (MU-6259, MU-6293) | Rules "O1 Invite" (MU-6293) |
+| R3 uncertain, and uncertain then an accepted update (restored, never resent) | Rules ×2 (MU-6261, MU-6307) | Rules ×2 (MU-6262, MU-6311) | Rules ×2 (MU-6263, MU-6315) |
+| R3 a definite refusal | Rules (MU-6261, MU-6308) | Rules (MU-6262, MU-6312) | Rules (MU-6263, MU-6316) |
+| R3 refusals of other kinds, one after the other | Cells `R3.create.refused-other-kinds` (MU-6319) | Cells `R3.rename.refused-other-kinds` (MU-6320) | Cells `R3.invite.refused-other-kinds` (MU-6321) |
+| R3 `closed` (nothing sent, no attempt kept) | Cells `R3.create.closed` (MU-6276) | Cells `R3.rename.closed` (MU-6277) | Cells `R3.invite.closed` (MU-6278) |
+| R3 `offline` | Cells `R3.create.offline` (MU-6309) | Cells `R3.rename.offline` (MU-6313) | Cells `R3.invite.offline` (MU-6317) |
+| R3 `not_sent` after the quiet retries (held back for Try again) | Cells `R3.create.not-sent` (MU-6310) | Cells `R3.rename.not-sent` (MU-6314) | Cells `R3.invite.not-sent` (MU-6318) |
+| R3 Invite's own exits: the lookup finds nobody, the lookup FAILED, inviting yourself | n/a | n/a | Rules (MU-6263); Cells `R3.invite.lookup-failed` (MU-6269), `R3.invite.self` (MU-6270) |
+| R4 a restored rename's base: Save under it; Escape and "Discard instead" drop it; a first-try conflict forgets it | n/a | Rules "R4 Rename…" ×3 (MU-6264, MU-6265, MU-6288..MU-6291, MU-6297, MU-6298); M-1 (MU-6243, MU-6244) | n/a |
+| R4 typed into after a restore (and after Cancel and reopen) keeps it; a refusal that is not a conflict, or an answer `closed`, `offline` or `not_sent`, keeps it | n/a | Cells `R4.rename.typed-after-restore` (+`-reopened`) (MU-6271), `R4.rename.keep-on-refusal` (MU-6279), `R4.rename.keep-when-not-sent` (MU-6325); control `R4.rename.typed-control` | n/a |
+| G a press the dialog refuses (the form submitted by Enter) sends, and looks up, nothing | Cells `G.create.refused-press` (MU-6322) | Cells `G.rename.refused-press` (MU-6323) | Cells `G.invite.empty-press` (MU-6324) |
+| W1 the form's start: its own name typed back is resolved by the next save; a form closed untouched begins again from what it then shows | n/a | Cells `W1.rename.typed-back-to-start` (MU-6329), `W1.rename.reopened-after-rename-elsewhere` (MU-6330) | n/a |
+| O1 after a success the form takes new input (the session goes on from its start) | (the dialog closes) | (the dialog closes) | Cells `O1.invite.typed-after-success` (MU-6328) |
+| W1 to W4: typing, a choice from an EMPTY field, a restored copy, "Discard instead" | M-1 (MU-6240, MU-6286); Owner "CONTROL create…" (MU-6287) | (R1, R4 above) | Cells `W2.invite.choice-from-empty-field` (MU-6274, MU-6284), M-1 (MU-6283), Cells `W4.invite.discard-instead` (MU-6272, MU-6296) |
+| D binding: no model for a household you do not manage | n/a | Cells `D.rename.non-manager-not-bound` (MU-6275) | Cells `D.invite.non-manager-not-bound` (MU-6332) |
+| W7 Try again on the PAGE after Cancel or Close ends the session (opened again, the dialog begins a new one) | Cells `W7.create.page-after-cancel` | Cells `W7.rename.page-after-cancel` | Cells `W7.invite.page-after-close` (all three MU-6273, MU-6294; Rename's, where the retried name lands, also MU-6331) |
+| W7 a Try again REFUSED, not sent (`closed`), or answered uncertain, offline, `not_sent` or forbidden completes nothing | Cells `W7.create.refused-completes-nothing`, `W7.create.try-again-not-sent` (MU-6281), `W7.create.try-again-other-answers` (MU-6326) | Cells `W7.rename.refused-completes-nothing` | Cells `W7.invite.refused-completes-nothing` (MU-6281) |
+| W7 a detail action's Try again (a member promoted) is not the invitation's: its draft stays | n/a | n/a | Cells `W7.invite.detail-action-keeps-draft` (MU-6327) |
+| W7 where it is pressed: Rename's own dialog closes; another dialog's change leaves Rename open; the detail and Invitations forget | (D-1 below) | Page MU-6233, MU-6238 | Cells `W7.invite.retried-in-rename-dialog` (MU-6280); Invitations MU-6232 |
+| W8 Rename's Escape ends the session (copy discarded) | n/a | M-1 (MU-6247, MU-6294, MU-6299) | n/a |
+| D-1 (decided: keep as written) a successful Try again forgets text typed since | Rules "D-1 New household" (MU-6266) | Rules "D-1 Rename" (MU-6267) | Rules "D-1 Invite" (MU-6268) |
+
+The shared completion (`completeTicket`) is MU-6260 over every R3 test; that a durable success also FINISHES its ticket is not pinned
+(deferred, below). Exits with no cell carry an argued reason in the inventory:
+`run()`'s and `invite()`'s refused admission and `retry()`'s guard (no UI path: the buttons are disabled while the same refusal holds),
+another identity displayed after a send, a lookup or a conflict's reads (no UI path: its models retire with page memory), and a connection
+lost while the lookup is on its way (a race). Off-diagonal Try again pairs other than the one above are not cells: a create's Try again
+shows the household it made from wherever it is pressed (D-1 New household), and the Invitations dialog closes nothing on a Try again.
+Rename's `value()` base reader is unreachable (a session never begins over a kept rename draft). **Known asymmetries**, listed in the
+inventory, not pinned as correct: a first-try conflict forgets the base in page memory only (O-R3-3: the model's last copy keeps it until
+the next keystroke; the server's version guard backstops it); DA-2 (latent, with D-1's follow-up card); and **N-1** (the second design
+assessment, class `new`, low): a restored rename whose Try again is refused as a conflict keeps its stale base, so the next Save is sent
+under it and refused again (never an overwrite), because `retry()` has no writer that forgets it. Whether to fix N-1 is decision **D-2**,
+open with the coordinator; cell `R4.rename.retry-conflict-keeps-stale-base` pins the product as it is, and MU-6282 (the fix applied
+without its decision) turns it red, so a fix must change that cell and this paragraph.
+
+**Not pinned, deferred to a follow-up card** (Review 5 of 7 November 2026, F-R5-1 and F-R5-2; Kieran's decision
+`WEB12B-R5-FINDINGS-TO-FOLLOW-UP-20261107`, `approval/web12b-r5-followup-20261107.json` in the orchestrator: test-sensitivity gaps on
+correct, unchanged product behaviour). The product does each of the following, but no test above fails when it breaks: a durable success
+finishes its ticket, so a later accepted update's "Save and reload" proceeds (F-R5-1); the Rename and Invitations drafts are kept per
+household; a copy of another codec version is offered, not restored; a rename base must be an integer of at least 1; a name of exactly
+300 characters and a username of exactly 100 restore, one more does not; after a held-back Try again, a Try again answered `closed`
+still says the earlier attempt may have been made (R8) (F-R5-2).
+
+Fixture evidence: `tests/features/sharing/households-recovery.test.tsx` (the production coordinator's accepted update, its save and its one
+reload, per dialog; mutants MU-6239..MU-6251), `households-submission-rules.test.tsx` and `households-submission-cells.test.tsx` (the cells above; MU-6252..MU-6299, MU-6307..MU-6332), the
+household cases of `tests/features/recovery-owner-discard.test.tsx`,
+`recovery-owner-contract.test.tsx` and `recovery-check-again.test.tsx` (ported from `HouseholdsMinimal`), and the native household cases of
+`tests/e2e/fixture.pwa-editors.spec.ts` (revisions 52, 53 and 55 over the dialogs). The old screen's composition of several household
+forms on one page is gone: F-R52-1's overlapping looks, F-R52-2's three restored invitations and F-R54-1's late earlier restore are carried
+by the defaults layers and the library suites (`tests/lib/recovery-observation.test.tsx`, `recovery-discard-focus.test.tsx`).
+
+**WEB-13b's editors (merge correction M-13b-1, 7 November 2026; Kieran's decision "Fix all three in the merge",
+`approval/web13b-m13b1-decision-20261107.json` in the orchestrator).** WEB-13b was built before this protocol and kept its input in
+page-memory editing sessions only, so on the merged tree an accepted update reloaded over it (R40's class). Now:
+
+- **G-1, the new task's anchor.** The task form's text is version 2 (`tasks/form/form-input.ts`): what the session began from, what is
+  typed, and WEB-13b's calendar ANCHOR (the draft the panel saved, the anchor it validated to, the names its summary shows) and the panel
+  its in-dialog sync control kept. Version 1 dropped both: the form came back without its anchor, saying nothing, and Save then created a
+  task with no anchor whose first day came from its own schedule. A saved anchor is read back only if its draft still validates to exactly
+  it (`calendars/anchor-recovery.ts`); a version-1 copy restores with none (that build held none); anything else is offered, never
+  restored in part.
+- **G-2, the anchor panel** (`AnchorDialog.tsx`, on the new task form and on a task's detail). The panel is a recoverable editor over its
+  editing session (`calendars/session-recovery.ts`): registered while shown, every change given to the model first (refused, unchanged,
+  while an update reload is prepared; Save and Remove are unavailable then, and the panel never closes as if it had saved), a save
+  taking the model's ticket in the same step as it reads what it sends. A session kept for the visit (the sync control) stays dirty and
+  listed; its END (Cancel, its own save, the visit's end, another identity) ends the copies. A detail panel's copy keeps its BASE: the read
+  of the task its change is checked against, the conflicted change it supersedes and whether a done save renewed it, so a task changed
+  meanwhile meets the outbox's own "changed" refusal, never a silent overwrite; the identities of changes pressed are not kept (a restored
+  change is a new operation). After the reload the section reopens the panel ONCE on the copy (for someone who may still edit, once the
+  task is read), with the restored notice and focus on the panel's first field (the dialog's `initialFocusSelector`: a modal takes focus
+  inside it, and the form behind it may have taken focus for its own restore in the same arrival, D2).
+- **G-3, the import dialog** (`ImportDialog.tsx`). The same, over the import's editing session: a copy holds the source the drop zone's
+  dialog chose and the window AS TYPED, version 1 (`calendars/import-recovery.ts`), under the entry that opened it; the row's "Import
+  events" or the drop zone reopens the dialog on it, focus on From. NEVER THE FILE: its text stays page memory (E11) and a file control
+  cannot be captured (D-P7), so while a file is chosen or read (or a date is partly typed) the model is unfinished and the update STOPS
+  (retry, or "Discard and reload anyway") instead of reloading over it. That holds whether the dialog is shown or its session is KEPT
+  with no dialog showing it (the person left by the sync control: the only way to the update banner from a modal dialog). The file is
+  the session's, so the model goes on asking the SESSION while it is kept (`editor.ts` `keep(value, unfinished)`, wired by
+  `session-recovery.ts`), until a dialog shows it again or the session ends (Cancel, its own save, the visit's end, another identity):
+  an ended session holds the update no longer. Before revision 37 (Review 46, F-R46-1) the dialog's unmount dropped that check, and the
+  update reloaded over the file unless something had happened to ask the model while the dialog was still shown. A partly typed date is
+  the dialog's own state and goes with the dialog. No import is begun while an update reload is prepared.
+
+Evidence: `tests/features/tasks/web13b-anchor-recovery.test.tsx` and `tests/features/calendars/web13b-import-recovery.test.tsx` (the
+production coordinator's accepted update, its save and its one reload, the hosts reopening each editor, freeze, the base, and the Cancel
+and visit-end controls; on the merge without the correction 11 of their 14 cases fail by assertion), the pure codec suite
+`tests/features/calendars/web13b-recovery-codecs.test.ts`, mutants MU-5276..MU-5295 (`scripts/mutation/catalogue-web13b-m1.mjs`), and the
+native case "WEB-13b M-13b-1 G-1" in `tests/e2e/fixture.pwa-editors.spec.ts` (generation A updated to B: the new task form restored WITH
+its anchor, nothing sent). Revision 57's focus-site registry has the two new sites (23).
+
+Revision 37 (Review 46, F-R46-1/F-R46-2): the import suite's STOP cases leave the dialog by its sync control with nothing asking the model
+in between (a file chosen; a file still being read, no window typed), with the control that a kept session's end holds the update no
+longer; on the tree before revision 37 both STOP cases fail by assertion (the update reloads). Native cases, generation A updated to B, in
+`tests/e2e/fixture.pwa-editors.spec.ts`: "WEB-13b M-13b-1 G-3" (kept with a window typed: reopened on the copy, restored notice, focus on
+From, no file, nothing sent; kept with a FILE chosen: the update stops with "Retry save" and "Discard and reload anyway", the page does not
+reload, and Back shows the kept file and window) and "WEB-13b M-13b-1 G-2" (a task's panel kept: reopened on its copy, restored notice,
+focus on its first field, nothing sent; the task changed while the page reloaded: Save says so and sends nothing). E-IMP7's revision-37
+case in `tests/e2e/fixture.calendar-import.spec.ts` reaches the same rule in the fixture build (the save an accepted update makes first
+fails), so a real-engine mutant can reach it. Mutants MU-5296..MU-5299 (unit) and MU-5300 (real engine).
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 
@@ -647,7 +805,7 @@ first field on mount, and `RecoveryBanner`'s revision-19 "Discard instead" contr
   field; otherwise its request ends, so focus the person moved is never taken by a later restore and nothing goes back and forth.
   Revision 52 (Review52 F-R52-2): the comparison is with the CURRENT grant, the restore that most recently took focus (and the element
   focus actually landed on), never the first restore that once did; a successful pre-emption replaces it. So any number of restored forms,
-  in any order, settle on the first in the page (three household invitations restored C, B, A end on A). Focus moved elsewhere, including
+  in any order, settle on the first in the page (three restored forms released C, B, A end on A; `recovery-discard-focus.test.tsx`). Focus moved elsewhere, including
   onto an earlier, superseded restored field, is never taken. When the current grant's owner withdraws its restore (its copy discarded, or
   it unmounted) with focus nowhere or where the arbiter put it, the grant ends; with focus moved elsewhere by anyone else, it stays until
   the next navigation, so a later restore still takes nothing. When the granted field itself is replaced and focus is nowhere, a later

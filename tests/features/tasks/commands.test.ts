@@ -156,6 +156,64 @@ describe("create_task then an immediate record (TASK-26, TASK-27 #1)", () => {
   });
 });
 
+describe("WEB-13b: create_task with a calendar anchor (R15)", () => {
+  const once: TaskDefinition = {
+    ...definition,
+    schedule: { ...definition.schedule, repeat: null },
+  };
+  const ANCHOR = {
+    reference: {
+      kind: "event_series" as const,
+      source_id: "00000000-0000-4000-8000-0000000000a1",
+      uid: "bin@example",
+    },
+    offset: { kind: "calendar_days" as const, days: -1, time: "18:00:00" },
+    weekdays: [],
+  };
+
+  test("an anchored create carries `anchor` and targets only the task and its details (no projected first occurrence)", async () => {
+    const w = await world();
+    const created = await w.outbox.enqueue(
+      commands.createTask({
+        taskId: TASK,
+        executionId: EXEC,
+        occurrenceId: null,
+        progressId: null,
+        title: "Put the bins out",
+        definition: once,
+        sharing: "only_me",
+        defaults: defaultsRecord(),
+        anchor: ANCHOR,
+      }),
+    );
+    expect(created.kind).toBe("queued");
+    const draft = w.drafts()[0];
+    expect(draft?.target_resource_ids).toEqual([TASK, EXEC]);
+    expect(bodyOf(w, draft?.local_id as string).command.anchor).toEqual(ANCHOR);
+  });
+
+  test("without an anchor (or with `null`) the field is OMITTED, never sent as null", async () => {
+    for (const anchor of [undefined, null]) {
+      const w = await world();
+      await w.outbox.enqueue(
+        commands.createTask({
+          taskId: TASK,
+          executionId: EXEC,
+          occurrenceId: OCC,
+          progressId: PROG,
+          title: "T",
+          definition: once,
+          sharing: "only_me",
+          defaults: defaultsRecord(),
+          ...(anchor === undefined ? {} : { anchor }),
+        }),
+      );
+      const body = bodyOf(w, w.drafts()[0]?.local_id as string).command;
+      expect("anchor" in body).toBe(false);
+    }
+  });
+});
+
 describe("record preconditions (TASK-12/12a)", () => {
   test("a quantity raises my stream as a side effect and sends no expected_version; a correction does the same", async () => {
     const w = await world();

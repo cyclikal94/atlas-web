@@ -14,6 +14,8 @@ import {
   type CacheRow,
   type DraftWithCommand,
   type ListedResource,
+  pageCacheLifetime,
+  useCacheGate,
   useDataActions,
   useOptionalDataEnv,
   usePendingCreates,
@@ -21,6 +23,7 @@ import {
   useStatusInputs,
 } from "../../data";
 import { useRecoveryHost } from "../../lib/form-recovery/editor";
+import { pageFormRegistry } from "../../lib/form-recovery/registry";
 import { useSession } from "../../session";
 import { CacheGate } from "../sync/CacheGate";
 import { ADD_CONTEXT, AddSourceDialog } from "./AddSourceDialog";
@@ -42,6 +45,17 @@ import {
   SHOW_PREVIOUS,
   WAITING_GROUP,
 } from "./copy";
+import { deviceToday, ImportDialog } from "./ImportDialog";
+import { ImportDropZone } from "./ImportDropZone";
+import { ImportsPanel } from "./ImportsPanel";
+import type { ImportEditor } from "./import-editor";
+import {
+  type ImportOwnerContext,
+  importOwned,
+  openImport as openImportSession,
+  resumeChooser,
+} from "./import-kept";
+import { type ImportOpener, ImportOpenerContext } from "./import-opener";
 import { LINK_CONTEXT, LinkCalendarDialog } from "./LinkCalendarDialog";
 import { ManageSourceDialog } from "./ManageSourceDialog";
 import { identityMemory } from "./memory";
@@ -50,12 +64,14 @@ import type {
   ObserverAttachment,
   SourceObserver,
 } from "./observation-controller";
+import { ReviewPanel } from "./ReviewPanel";
 import { CalendarRecoveryIdentity } from "./recovery";
 import {
   createRefreshController,
   type RefreshController,
 } from "./refresh-controller";
 import { projectSourceCreate } from "./register";
+import { registerCalendarExtensions } from "./register-13b";
 import { PendingRow, SourceRow } from "./SourceRow";
 import { type CalendarVisit, documentVisitBoundary, enterVisit } from "./visit";
 
@@ -101,6 +117,8 @@ export function CalendarSources() {
 export type Dialog =
   | { kind: "add" }
   | { kind: "link" }
+  /** WEB-13b: an import into `sourceId` (null: chosen in the dialog); revision 6 (R7): showing its editing session. */
+  | { kind: "import"; sourceId: string | null; editor: ImportEditor }
   | {
       kind: "manage";
       row: CacheRow;
@@ -200,6 +218,8 @@ const NO_LISTENER = () => () => undefined;
 
 function Sources() {
   const env = useOptionalDataEnv();
+  // Idempotent per registry: a test's or the fixture's own registry describes WEB-13b's queued kinds too.
+  if (env !== null) registerCalendarExtensions(env.commands);
   const inputs = useStatusInputs();
   const compat = useCompat();
   const api = useCalendarApi();
@@ -273,6 +293,53 @@ function Sources() {
   const markAwaiting = useCallback((id: string, version: number) => {
     setAwaiting((previous) => new Map(previous).set(id, version));
   }, []);
+  // Revision 6 (R7): the import dialog shows an editing session the import's visit owns (`import-kept.ts`), so the in-dialog sync control
+  // keeps it. What it is owned by: the displayed identity (observed while it is kept), the database, and the page's cache lifetime (revision
+  // 7: every controller's in turn, not this screen's, which a remount of the protected tree disposes).
+  const session = useSession();
+  const identityKey =
+    api === null ? null : `${api.identity.account}:${api.identity.epoch}`;
+  const ownerContext = useCallback((): ImportOwnerContext | null => {
+    if (identityKey === null || env === null) return null;
+    return {
+      identity: identityKey,
+      identities: session.identity,
+      incarnation: env.service()?.incarnationId ?? null,
+      cache: pageCacheLifetime,
+      // Revision 8 (R7a/R7b): the page runtime's service, observed while the session is kept and read afresh when it is shown again.
+      service: env.service(),
+      today: deviceToday(),
+    };
+  }, [identityKey, env, session]);
+  const opener = useMemo<ImportOpener>(
+    () => ({
+      open: (sourceId, file) => {
+        // M-13b-1 G-3: no import is begun while an update reload is prepared (nothing may be chosen after the last save).
+        if (pageFormRegistry.frozen()) return;
+        const context = ownerContext();
+        if (context === null) return;
+        const editor = openImportSession(
+          sourceId === null ? { kind: "chooser" } : { kind: "row", sourceId },
+          context,
+        );
+        // A file chosen or dropped on the zone is the session's newest choice (a kept chooser's source and window stay).
+        if (file !== undefined) editor.choose(file);
+        setDialog({ kind: "import", sourceId, editor });
+      },
+      resumeChooser: () => {
+        const context = ownerContext();
+        const editor = context === null ? null : resumeChooser(context);
+        if (editor === null) return false;
+        setDialog({ kind: "import", sourceId: null, editor });
+        return true;
+      },
+    }),
+    [ownerContext],
+  );
+  const closeImport = (editor: ImportEditor) =>
+    setDialog((shown) =>
+      shown?.kind === "import" && shown.editor === editor ? null : shown,
+    );
 
   return (
     <CalendarRecoveryIdentity value={recoveryIdentity}>
@@ -336,7 +403,7 @@ function Sources() {
             {NO_DATABASE}
           </p>
         ) : (
-          <>
+          <ImportOpenerContext.Provider value={opener}>
             <CacheGate>
               <CachedSources
                 environment={environment}
@@ -348,7 +415,12 @@ function Sources() {
               />
             </CacheGate>
             <PendingSources environment={environment} onDialog={setDialog} />
-          </>
+            <WhileCacheOpen>
+              <ImportDropZone />
+              <ImportsPanel />
+              <ReviewPanel />
+            </WhileCacheOpen>
+          </ImportOpenerContext.Provider>
         )}
       </section>
       {dialog?.kind === "add" ? (
@@ -356,6 +428,18 @@ function Sources() {
           online={online}
           identity={recoveryIdentity ?? "-"}
           onClose={() => setDialog(null)}
+        />
+      ) : null}
+      {dialog?.kind === "import" ? (
+        <ImportDialog
+          key={dialog.editor.session}
+          sourceId={dialog.sourceId}
+          editor={dialog.editor}
+          owned={() => {
+            const context = ownerContext();
+            return context !== null && importOwned(dialog.editor, context);
+          }}
+          onClose={() => closeImport(dialog.editor)}
         />
       ) : null}
       {dialog?.kind === "link" && api !== null ? (
@@ -377,6 +461,14 @@ function Sources() {
       ) : null}
     </CalendarRecoveryIdentity>
   );
+}
+
+/**
+ * WEB-13b: the import entry and the Imports list show only while the cache gate is open (E9), and say nothing while it is closed (the list
+ * above carries the gate's one message).
+ */
+function WhileCacheOpen({ children }: { children: React.ReactNode }) {
+  return useCacheGate() === "open" ? children : null;
 }
 
 function EntryPoint({

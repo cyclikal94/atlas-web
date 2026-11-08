@@ -74,14 +74,21 @@ function press(name: string, root: HTMLElement | Document = document) {
   fireEvent.click(found as HTMLElement);
 }
 const dialog = () => screen.queryByRole("dialog") as HTMLElement | null;
+/**
+ * The dialog, ASSERTED to be shown (F42-1 hand-off, WEB13B-F42-1-20261106, WEB-13b revision 35): a case whose dialog is gone fails by this
+ * assertion, never by `within(null)`'s thrown TypeError (MU-2525 was judged INVALID for it).
+ */
+function shownDialog(): HTMLElement {
+  const shown = dialog();
+  expect(shown, "the dialog is shown").not.toBeNull();
+  return shown as HTMLElement;
+}
 const nameField = () =>
-  within(dialog() as HTMLElement).getByLabelText(
-    CREATE.name,
-  ) as HTMLInputElement;
+  within(shownDialog()).getByLabelText(CREATE.name) as HTMLInputElement;
 const typeName = (value: string) =>
   fireEvent.change(nameField(), { target: { value } });
 async function toSyncByChip(t: Mounted) {
-  const chip = within(dialog() as HTMLElement)
+  const chip = within(shownDialog())
     .getAllByRole("button")
     .find((b) => b.hasAttribute("data-sync-tone"));
   expect(chip, "the in-dialog sync control").toBeDefined();
@@ -393,7 +400,7 @@ describe("L7: rename", () => {
     press(RENAME.submit, dialog() as HTMLElement);
     await t.settle();
     expect(
-      within(dialog() as HTMLElement).getByText(RENAME.changedElsewhere),
+      within(shownDialog()).queryByText(RENAME.changedElsewhere),
     ).not.toBeNull();
     expect(nameField().value).toBe("Mine");
     expect(bodies(t).map((x) => x.body.command)).toEqual([
@@ -447,7 +454,7 @@ describe("L7: rename", () => {
     press(RENAME.submit, dialog() as HTMLElement);
     await t.settle();
     expect(
-      within(dialog() as HTMLElement).getByText(RENAME.changedElsewhere),
+      within(shownDialog()).queryByText(RENAME.changedElsewhere),
     ).not.toBeNull();
     expect(nameField().value).toBe("Mine");
     expect(bodies(t).map((x) => x.body.command)).toEqual([
@@ -492,12 +499,10 @@ describe("L7: rename", () => {
     press(DETAIL.rename);
     await t.settle();
     typeName("Too early");
-    expect(
-      within(dialog() as HTMLElement).getByText(RENAME.waitSync),
-    ).not.toBeNull();
+    expect(within(shownDialog()).getByText(RENAME.waitSync)).not.toBeNull();
     expect(
       (
-        within(dialog() as HTMLElement).getByRole("button", {
+        within(shownDialog()).getByRole("button", {
           name: RENAME.submit,
         }) as HTMLButtonElement
       ).disabled,
@@ -555,9 +560,7 @@ describe("L7: rename", () => {
     ]);
     expect(dialog()).not.toBeNull();
     expect(nameField().value).toBe("BC");
-    expect(
-      within(dialog() as HTMLElement).getByText(RENAME.newer),
-    ).not.toBeNull();
+    expect(within(shownDialog()).getByText(RENAME.newer)).not.toBeNull();
   });
 
   test("a list removed while the dialog is open: what was typed stays, nothing is saved", async () => {
@@ -575,9 +578,7 @@ describe("L7: rename", () => {
     await t.commitSync([], [id]);
     expect(dialog()).not.toBeNull();
     expect(nameField().value).toBe("Still mine");
-    expect(
-      within(dialog() as HTMLElement).getByText(RENAME.gone),
-    ).not.toBeNull();
+    expect(within(shownDialog()).getByText(RENAME.gone)).not.toBeNull();
     expect(t.drafts()).toEqual([]);
   });
 });

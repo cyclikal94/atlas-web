@@ -106,13 +106,17 @@ function normalisePublicPath(): void {
 
 /** `extra`: fixture-only recoverable form, mounted inside the shared data provider after the routed shell. */
 export function createProtectedTree(session: Session, extra?: () => ReactNode) {
+  // WEB-13b: the registries are filled before boot starts the page's leader (`boot.tsx` builds this first), so no dispatcher of the page
+  // can send an import before its terminal answers are known.
+  appCommands();
   // Register People commands before any route renders.
   registerPeopleCommands(getPageDataHost().commands);
   // WEB-10a: the task kinds are registered once into the page's registry (the leader's dispatcher and the queue screens share it), so
   // `/sync` describes and offers task drafts whichever screen is open first.
   // Loaded as its own chunk (it is not needed to draw the shell, and the fixture's initial bundle has no room for it).
-  void import("../features/tasks/register").then(({ registerTaskCommands }) =>
-    registerTaskCommands(getPageDataHost().commands),
+  // WEB-13b: with them, the queued calendar kinds' descriptions (`lazy-commands.ts`).
+  void import("./lazy-commands").then(({ registerLazyCommands }) =>
+    registerLazyCommands(getPageDataHost().commands),
   );
   // Once per document, before the first router: the document's own record of where it is outlives every mount of the tree and every
   // router, so a screen can tell that the person left it while the tree was unmounted (WEB-13a revision 6, `route-changes.ts`).

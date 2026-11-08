@@ -1359,8 +1359,15 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     failure: import("../store/port").StoreFailure,
     budget: number | null = null,
   ): Promise<Next> {
+    // The binding the failed commit belongs to, taken before the sizing record below is awaited (`localFailure`, N1).
+    const run = alive(id) ? ownership : null;
     if (failure.cause === "quota") {
       await recordSizing(service, { kind: "quota" });
+      // DA-N2 (WEB-13b revision 8; handover `delivery/handoffs/web13b-r7b-n2-n3-approved-20261027.md`): the stop is the run's that met
+      // the failure, published only while that run still stands after the sizing record's wait. A run that ended meanwhile (the leader's
+      // unbind, a newer run) publishes nothing over its successor's state; the sizing record it committed stays.
+      if (run === null || run !== ownership || !alive(id) || !service.live)
+        return { when: "event" };
       setState({ kind: "stopped", cause: "storage_full" });
       return { when: "event" };
     }
@@ -1401,6 +1408,7 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       service,
       failure,
       `page:${captured.expectedPosition ?? ""}`,
+      run,
     );
   }
 
@@ -1409,11 +1417,24 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     service: AccountService,
     error: unknown,
     operation: string,
+    /** The binding the failed write belongs to: the ownership of the run that met it (N1). */
+    run: SyncOwnership | null = alive(id) ? ownership : null,
   ): Promise<Next> {
     if (isStoreFailure(error) && error.cause === "closed") {
       setState({ kind: "waiting", reason: "paused_by_session" });
       return { when: "event" };
     }
+    /**
+     * The authority this failure was met under (N1, WEB-13b revision 5; handover
+     * `delivery/handoffs/web13b-n1-approved-20261025.md`): its binding and its service, both still standing. The account's service can
+     * outlive the binding (the leader's unbind aborts the ownership and stops the engine, and the service goes on), so the service alone
+     * does not say that this callback may still record a stop or show one: a fallback marker created after the binding ended would stop
+     * the account's next owner on a failure that owner never met. Asked before anything is counted, after the counter's wait, and at the
+     * synchronous moment the fallback is created (`recordStop`, the marker and this tab's memory alike).
+     */
+    const authorised = (): boolean =>
+      run !== null && !run.signal.aborted && service.live;
+    if (!authorised()) return { when: "event" };
     let stop = false;
     let memoryOnly = false;
     const key = memoryStopKey(service, operation);
@@ -1426,9 +1447,12 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       // The service may have ended while the counter was being written (R56): what follows belongs to a lifetime that is over, and
       // neither stops nor records anything of the replacement (a page's cursor, the capture or the sizing is reused by it).
       if (!service.live) return lifetimeOver(id);
-      stop = result.stop;
       if (result.version !== null)
         stoppedVersions.set(operation, result.version);
+      // The binding ended while the counter was being written (N1): what the counter committed is in the record, which whoever owns the
+      // account next reads; nothing is stopped, shown or lifted here for a binding that is over.
+      if (!authorised()) return { when: "event" };
+      stop = result.stop;
       // An explicit retry of an admitted invalidation's write lifted the stop WITHOUT erasing its streak, so the streak is still at or
       // above the bound and says "stop" on the first failure. The cycle's own bound decides instead: the same number of consecutive
       // failures as any local write, counted from the retry.
@@ -1441,17 +1465,20 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     } catch {
       // The streak itself could not be written: stop at once, with no counting, and record the stop in the fallback marker of this
       // database's lifetime so a reload finds it. When that cannot be written either, the stop is held in this tab alone and says so.
+      // A callback that outlived its binding (N1) creates nothing, in the marker or in this tab's memory.
       if (!service.live) return lifetimeOver(id);
+      if (!authorised()) return { when: "event" };
       stop = true;
       lifted.delete(key);
       const recorded = recordStop(
         deps.markers,
         service,
         operation,
-        () => service.live,
+        authorised,
         { hold: () => holdMemory(key) },
       );
-      if (recorded === "obsolete") return lifetimeOver(id);
+      if (recorded === "obsolete")
+        return service.live ? { when: "event" } : lifetimeOver(id);
       memoryOnly = recorded === "memory";
     }
     if (stop) {

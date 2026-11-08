@@ -8,9 +8,13 @@ import {
 } from "react";
 import { Button } from "../../../components/ui/button";
 import { GroupedSection } from "../../../components/ui/grouped";
+import { HeldHeight } from "../../../components/ui/held-height";
 import { type CacheRow, type Policy, useSharingDefaults } from "../../../data";
 // The sharing feature's public chooser, from its own module (see `sharing/index.ts`).
-import { AudienceChooser } from "../../sharing/AudienceChooser";
+import {
+  AudienceChooser,
+  type AudienceChooserProps,
+} from "../../sharing/AudienceChooser";
 import type { TaskActions } from "../actions";
 import type { EnrolCommand } from "../api";
 import * as copy from "../copy";
@@ -640,6 +644,22 @@ function Act({
   );
 }
 
+/**
+ * The audience chooser as every form here shows it: while it is blocked it keeps the height it had when the block began (WEB-13b
+ * revision 36, Review 43 F43-1 and the design assessment's DA-1, family `task-detail-pending-layout-shift`). The chooser drops its editing
+ * controls while blocked, and the control pressed (Join, Save sharing, Try again) sits below it, so without the reserve that control moved
+ * up and the second press of a double press reached whatever came under the pointer ("Who sees my progress" on a long task page). The
+ * reserve wraps the chooser itself, never the audience block around it: in `Enrolled` the Cancel and Save row is inside that block. Every
+ * use in this file goes through here; `tests/static/held-audience.test.ts` fails on an `AudienceChooser` used directly.
+ */
+function HeldAudience(props: AudienceChooserProps) {
+  return (
+    <HeldHeight held={props.blocked !== null}>
+      <AudienceChooser {...props} />
+    </HeldHeight>
+  );
+}
+
 /** Enrolled: Leave, the consent and the audience, each resending everything it does not change. */
 function Enrolled({
   enrolment,
@@ -708,7 +728,7 @@ function Enrolled({
           </span>
         ) : (
           <>
-            <AudienceChooser
+            <HeldAudience
               policy={draft.policy}
               onChange={edit}
               blocked={blocked}
@@ -751,7 +771,7 @@ function KeptDraft({
           {draft.consent ? CONTROLS_COPY.consentYes : CONTROLS_COPY.consentNo}
         </p>
       )}
-      <AudienceChooser
+      <HeldAudience
         policy={draft.policy}
         onChange={() => undefined}
         blocked={CONTROLS_COPY.keptDraft}
@@ -903,7 +923,7 @@ function JoinForm({
         <p className="text-xs text-muted-foreground">
           {note} {CONTROLS_COPY.audienceNote}
         </p>
-        <AudienceChooser
+        <HeldAudience
           policy={draft?.policy ?? seed}
           onChange={(policy) => edit({ policy })}
           blocked={blocked}

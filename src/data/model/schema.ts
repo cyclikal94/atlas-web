@@ -116,10 +116,18 @@ export const D_INDEX_NAMES: Readonly<Record<string, string>> = Object.freeze({
  * in segments (`model/segmented-sync.ts`), never shown, applied whole by W1. No existing store or row changes, and the upgrade moves no
  * data. Like version 3 it is a barrier: an older build's connections latch `upgrade_pending` and close, so no build that does not know a
  * staged revision writes `sync_state` beside one.
+ *
+ * VERSION 5 (WEB-13b revision 8, review 8 R7b) changes no store: it is the same barrier for the cache's invalidation witness
+ * (`sync_state.cache_invalidation_seq`, `model/invalidation.ts`), which a build of version 4 or below leaves alone when it invalidates.
+ * Upgrading needs no data step: an absent witness reads 0, the protocol's starting point. (WEB-13b numbered it 4 on its own branch; the
+ * base merge of 5 November 2026 renumbered it after the accepted base's version 4, so a version-4 build of the accepted base, which
+ * invalidates without the witness, is closed by it and cannot open it.)
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 /** The version 3 schema (no `delta_staging`), kept so a database created by it is upgraded in order. */
 export const COMPOSITION_BARRIER_VERSION = 3;
+/** The version that added `delta_staging` (WEB-09c; a barrier too). Version 5 declares the same stores. */
+export const DELTA_STAGING_VERSION = 4;
 /** The version that moved the command bodies to `draft_commands` (its upgrade runs for a version-1 database). */
 export const SPLIT_BODIES_VERSION = 2;
 /**

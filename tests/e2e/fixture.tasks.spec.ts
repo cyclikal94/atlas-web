@@ -1999,6 +1999,10 @@ test.describe("E-T9f: an occurrence created offline is followed to its close on 
  * Holds the COMPLETION of the first read-only transaction that reads cached rows BY ID (`get` on `cache`: the related read of Today's local
  * snapshot, never its walk, which reads by index) once `__holdRelated` is set: its rows were read, its result waits. Installed before the
  * page loads (Dexie assigns `oncomplete` per transaction). Another tab can commit while it is held: the engine has finished the read.
+ *
+ * WEB-13b revision 35 (Review 42 F42-5): a page with OTHER readers by id needs to say which read it means. `__holdScope` (the transaction's
+ * stores, sorted and comma-joined) restricts the hold to a transaction of exactly that scope; unset, the first read by id is held as before.
+ * The scope of every transaction held is recorded in `__heldScopes`, so a case asserts its premise instead of assuming it.
  */
 const holdRelatedReadInit = (): void => {
   const desc = Object.getOwnPropertyDescriptor(
@@ -2010,11 +2014,16 @@ const holdRelatedReadInit = (): void => {
   if (get === undefined || set === undefined) return;
   const w = window as unknown as {
     __holdRelated?: boolean;
+    __holdScope?: string;
     __heldRelated?: Array<() => void>;
+    __heldScopes?: string[];
     __states?: string[];
   };
   w.__heldRelated = [];
+  w.__heldScopes = [];
   w.__states = [];
+  const scopeOf = (tx: IDBTransaction): string =>
+    [...tx.objectStoreNames].sort().join(",");
   const byId = new WeakSet<IDBTransaction>();
   const storeGet = IDBObjectStore.prototype.get;
   IDBObjectStore.prototype.get = function (
@@ -2038,8 +2047,13 @@ const holdRelatedReadInit = (): void => {
         return;
       }
       set.call(this, function (this: IDBTransaction, event: Event) {
-        if (w.__holdRelated === true && byId.has(tx)) {
+        if (
+          w.__holdRelated === true &&
+          byId.has(tx) &&
+          (w.__holdScope === undefined || scopeOf(tx) === w.__holdScope)
+        ) {
           w.__holdRelated = false;
+          w.__heldScopes?.push(scopeOf(tx));
           w.__heldRelated?.push(() => fn.call(tx, event));
           return;
         }
@@ -3579,9 +3593,21 @@ test.describe("E-T17: another tab commits while the task detail's read is betwee
               : {}),
           },
         }));
-      await page.evaluate(() => {
-        (window as unknown as { __holdRelated: boolean }).__holdRelated = true;
-      });
+      // Revision 35 (Review 42 F42-5): the task detail's OWN read by id is held (`data.readResourcesById`, scope cache + pending_effects +
+      // sync_state). The calendar section on this page also reads the task by id, through a live watch (`data.readResourceView`, which
+      // reads the drafts too), and its transaction came first in every instrumented run (540 of 540), so the case held THAT completion
+      // while later transactions completed, an order IndexedDB never produces; the page's live cache position then sometimes missed B's
+      // commit (WebKit, 2 of 360 here, 8 of 101 in Review 42). With the detail's own read held, as written here: 0 of 360. Revision 35's
+      // execution report has the diagnosis.
+      const DETAIL_READ = "cache,pending_effects,sync_state";
+      await page.evaluate((scope) => {
+        const w = window as unknown as {
+          __holdRelated: boolean;
+          __holdScope?: string;
+        };
+        w.__holdScope = scope;
+        w.__holdRelated = true;
+      }, DETAIL_READ);
       // An unrelated commit makes tab A read its detail again; one of its reads by id is held.
       await commitDelta(writer, net, 2, b.upserts);
       await expect
@@ -3593,6 +3619,12 @@ test.describe("E-T17: another tab commits while the task detail's read is betwee
           ),
         )
         .toBe(1);
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __heldScopes: string[] }).__heldScopes,
+        ),
+        "the read held is the task detail's own read by id",
+      ).toEqual([DETAIL_READ]);
       if (between) {
         await commitDelta(writer, net, 3, renamed);
         await expect

@@ -18,9 +18,13 @@ import {
 } from "../../scripts/integration/schedule.mjs";
 import {
   assignCases,
+  BACKEND_ENV_ALLOWED,
+  backendEnvOf,
+  CAP_REFUSALS,
   DEFAULT_STACKS,
   DESIGNED_SKIPS,
   designedSkip,
+  directoryModeOf,
   judgeStack,
   planStacks,
   reportCases,
@@ -433,7 +437,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         i14e: 4,
         i14d: 4,
         data: 37,
-        calendar: 13,
+        // WEB-13b: I-CAL-IMP1-4, I-CAL-ANC1 and I-CAL-REV1 join the calendar stack (13 + 6); revision 14 (R12) adds I-CAL-IMP5.
+        calendar: 20,
         // WEB-11b: I-PPL17..I-PPL23 (seven tests, revision 1's I-PPL21 both-linked case included) join WEB-11a's 16 People cases.
         // WEB-19: I-PPL24..I-PPL29 (six activity-timeline tests) join them in the People stack.
         people: 29,
@@ -444,7 +449,9 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         settings: 10,
         lifecycle: 17,
         "lifecycle-restart": 16,
-        sharing: 7,
+        // WEB-12b: I-SH10..I-SH17 join WEB-12a's seven; I-SH17b has a stack of its own (the backend's directory disabled).
+        sharing: 15,
+        "sharing-directory-off": 1,
         snapshot: 6,
         // WEB-10a's 22 and WEB-10c's 22 task cases (revision 11 split I-10C-M4 into M4a/M4b; revision 14, review 15's R38, added the
         // task-day rollover control I-10C-M4c); WEB-08d's labels retain their own stack. WEB-18: +10 (I-18-G1..G6, G7a, G7b, G8, G9).
@@ -453,17 +460,22 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      // 327 default-stack cases plus two separately scheduled PWA cases (WEB-14a: +10 default-stack cases and the 2 PWA cases). WEB-10c: +22
+      // 343 default-stack cases plus two separately scheduled PWA cases (WEB-14a: +10 default-stack cases and the 2 PWA cases). WEB-10c: +22
       // task cases; WEB-11b: +7 People cases (I-PPL17..I-PPL23); WEB-09c: +1 profiling case (W2-limits); WEB-18: +10 task cases; WEB-19: +6
-      // (I-PPL24..I-PPL29).
+      // (I-PPL24..I-PPL29); WEB-12b: +9 sharing cases (I-SH10..I-SH17, I-SH17b);
+      // WEB-13b: +7 calendar cases (I-CAL-IMP1..I-CAL-IMP5, I-CAL-ANC1, I-CAL-REV1; its base merge of 74b0bac: 307 + 7).
       expect(inBrowser(pwa, browser)).toHaveLength(2);
-      expect(inBrowser(whole, browser)).toHaveLength(329);
+      expect(inBrowser(whole, browser)).toHaveLength(345);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
       expect(
         s.keys.some((k) => /integration\.(sharing|snapshot)\.spec/.test(k)),
-      ).toBe(s.name === "sharing" || s.name === "snapshot");
+      ).toBe(
+        s.name === "sharing" ||
+          s.name === "sharing-directory-off" ||
+          s.name === "snapshot",
+      );
   }, 120_000);
 
   test("compared with the schedule review 14 ran, sharing, snapshot, pages, password-path, People and task cases have their own fresh stacks", async () => {
@@ -513,7 +525,9 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
     // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 29 (WEB-11b: +7;
     // WEB-19: +6).
     expect(moved).toEqual({
-      sharing: 21,
+      // WEB-12b: +8 sharing cases in three engines; I-SH17b in its own stack.
+      sharing: 45,
+      "sharing-directory-off": 3,
       snapshot: 18,
       pages: 54,
       "password-path": 24,
@@ -650,8 +664,13 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 327,
-        passed: 320,
+        // WEB-13b adds seven calendar cases (six, and revision 14's I-CAL-IMP5), all passing in the double, to accepted main's
+        // 307-case inventory (300 passes, 7 designed skips) at the base merge of 6 November 2026 (main 74b0bac); the maintenance merge of
+        // accepted main 480f508 adds WEB-14a's ten (+5 base, +5 data) and WEB-18's ten task cases: 334 cases, 327 passes,
+        // 7 designed skips; layered onto 8f33792, WEB-12b's nine sharing cases: 343 cases,
+        // 336 passes.
+        planned_cases: 343,
+        passed: 336,
         designed_skips: 7,
         failed: 0,
         interrupted: 0,
@@ -1273,6 +1292,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-lifecycle",
     "-lifecycle-restart",
     "-sharing",
+    "-sharing-directory-off",
     "-snapshot",
     "-tasks",
     "-labels",
@@ -2072,4 +2092,114 @@ describe("C5 (revision 16): one invocation owns its evidence directory", () => {
     const fresh = await world();
     expect(fresh.status).toBe(0);
   }, 120_000);
+});
+
+describe("WEB-12b: a stack's backend settings are allow-listed (the directory-off stack)", () => {
+  test("only ATLAS_DIRECTORY_ENABLED may be set, by the sharing-directory-off stack alone; anything else is refused before a backend starts", () => {
+    expect(BACKEND_ENV_ALLOWED).toEqual(["ATLAS_DIRECTORY_ENABLED"]);
+    expect(
+      DEFAULT_STACKS.filter((s) => s.backendEnv !== undefined).map((s) => [
+        s.name,
+        s.backendEnv,
+      ]),
+    ).toEqual([
+      ["sharing-directory-off", { ATLAS_DIRECTORY_ENABLED: "false" }],
+    ]);
+    const off = DEFAULT_STACKS.find((s) => s.name === "sharing-directory-off");
+    const on = DEFAULT_STACKS.find((s) => s.name === "sharing");
+    expect(off && directoryModeOf(off)).toBe("off");
+    expect(on && directoryModeOf(on)).toBe("on");
+    expect(off?.grep).toBe("I-SH17b");
+    expect(on?.grepInvert).toBe("I-SH17b");
+    const bad = { name: "x", suffix: "-x", oidc: false };
+    expect(() =>
+      backendEnvOf({ ...bad, backendEnv: { ATLAS_SECRET_KEY: "00" } }),
+    ).toThrow(/not allowed: ATLAS_SECRET_KEY/);
+    expect(() =>
+      backendEnvOf({
+        ...bad,
+        backendEnv: { ATLAS_DIRECTORY_ENABLED: false as unknown as string },
+      }),
+    ).toThrow(/not allowed/);
+    expect(backendEnvOf(bad)).toEqual({});
+  });
+
+  test("I-SH17b is a designed skip only where the directory is enabled", () => {
+    const skipped = {
+      annotations: [
+        {
+          type: "skip",
+          description:
+            "this stack's directory is enabled (I-SH17b runs in sharing-directory-off)",
+        },
+      ],
+      results: [],
+    };
+    const context = { oidc: false, postgres: false };
+    expect(
+      designedSkip("integration.sharing.spec.ts", skipped as never, {
+        ...context,
+        env: {},
+      }),
+    ).not.toBeNull();
+    expect(
+      designedSkip("integration.sharing.spec.ts", skipped as never, {
+        ...context,
+        env: { ATLAS_INTEGRATION_DIRECTORY: "off" },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("WEB-12b: a product cap's own 429 is expected only where its case is planned (I-SH14)", () => {
+  const ISH14 =
+    "integration-firefox › integration.sharing.spec.ts › I-SH14: the 20-per-issuer cap (A5) › 21st";
+  const OTHER =
+    "integration-firefox › integration.sharing.spec.ts › I-SH1 and I-SH2: x › y";
+  const cap = {
+    method: "POST",
+    path: "/api/experimental/v1/account-invitations",
+    at: 1,
+  };
+  const throttled = (keys: string[], refusals: Array<typeof cap>) =>
+    judgeStack({
+      planned: new Map(keys.map((k) => [k, 1])),
+      report: null,
+      exitCode: 0,
+      startedAt: 0,
+      project: "integration-firefox",
+      context: { env: {}, oidc: false, postgres: false },
+      refusals,
+    }).reasons.some((r) => r.includes("throttle budget was not its own"));
+
+  test("the cap is the account-invitations issuance, provoked by I-SH14", () => {
+    expect(CAP_REFUSALS).toEqual([
+      {
+        method: "POST",
+        path: "/api/experimental/v1/account-invitations",
+        provokedBy: "I-SH14:",
+      },
+    ]);
+  });
+  test("with I-SH14 planned, its cap refusal is expected; any other 429 still fails the stack", () => {
+    expect(throttled([ISH14, OTHER], [cap])).toBe(false);
+    expect(
+      throttled(
+        [ISH14],
+        [
+          cap,
+          {
+            method: "POST",
+            path: "/api/experimental/v1/browser-sessions",
+            at: 2,
+          },
+        ],
+      ),
+    ).toBe(true);
+    expect(throttled([ISH14], [{ ...cap, method: "GET" }])).toBe(true);
+  });
+  test("without I-SH14 planned, the same refusal fails the stack (control)", () => {
+    expect(throttled([OTHER], [cap])).toBe(true);
+    expect(throttled([OTHER], [])).toBe(false);
+  });
 });

@@ -1,5 +1,6 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { act, render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { ProtectedProviders } from "../../src/app/providers";
 import { createAppRouter } from "../../src/app/router";
 import { ShellEnvProvider } from "../../src/app/shell/env";
@@ -9,15 +10,36 @@ import {
   createDataEnv,
   type DataEnv,
   DataEnvProvider,
+  DataProvider,
   type DraftWithCommand,
+  useDataEnv,
 } from "../../src/data";
 import { createQuotaGuard } from "../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../src/data/engine/sync-channel";
+import {
+  createPageDataHost,
+  type PageDataHost,
+} from "../../src/data/leader/page-host";
+import { snapshotPageOperation } from "../../src/data/model/recovery";
 import { accountDatabaseName } from "../../src/data/model/schema";
+import type { SyncStateRow } from "../../src/data/model/types";
+import {
+  acquireOwnership,
+  activateSnapshot,
+  captureRecoveryRequest,
+} from "../../src/data/plans/recovery-writers";
+import { invalidateRecoveryPosition } from "../../src/data/plans/sync-writers";
+import { scanSyncPage } from "../../src/data/scan/scan";
+import {
+  createKeyDerivers,
+  createValueValidators,
+} from "../../src/data/scan/validate";
 import { w as writes } from "../../src/data/store/port";
+import { forgetImportSessions } from "../../src/features/calendars/import-kept";
 import { forgetIdentityMemories } from "../../src/features/calendars/memory";
 import { registerCalendarCommands } from "../../src/features/calendars/register";
 import { documentRouteChanges } from "../../src/lib/route-changes";
+import type { SyncStatusModel } from "../../src/lib/sync-chip";
 import {
   type ApiCompatibility,
   type Identity,
@@ -26,6 +48,7 @@ import {
 } from "../../src/session";
 import { sessionDouble } from "../helpers/session-double";
 import { DataTestWorld } from "./data/env";
+import { bytesOf, pageJson } from "./data/sync-pages";
 
 /**
  * The calendar screens' test world (WEB-13a): the PRODUCTION controller (`createDataEnv`), plans and outbox facade over the double of
@@ -82,7 +105,12 @@ export const atlasBody = (
 
 export interface CalendarWorld {
   world: DataTestWorld;
+  /** The controller mounted now (revision 7: with `production`, every mount builds a new one). */
   env: DataEnv;
+  /** Revision 7 (R7): every controller a mount used, in order (one, unless `production`). */
+  controllers(): DataEnv[];
+  /** Revision 8 (R7b): the page's host the production provider composes over (its write-failure markers are the page's). */
+  host: PageDataHost;
   online: Cell<boolean>;
   compat: Cell<ApiCompatibility>;
   identity: Cell<Identity | null>;
@@ -130,6 +158,18 @@ export interface CalendarWorld {
     versions?: object[];
     retire?: string[];
   }): Promise<void>;
+  /**
+   * Revision 7 (R7; design assessment C4): the PRODUCTION ordinary-phase invalidation (W18, as a `410 resync_required` makes it): the cache
+   * `invalid`, its cursor dropped, its generation moved on. Then settles. Needs an open database (the page's runtime, mounted or not).
+   */
+  invalidate(): Promise<void>;
+  /**
+   * Revision 7 (R7): the PRODUCTION recovery of an invalid cache, in its own writers: the ownership (W20, a restart), the capture (W21), and
+   * one final snapshot page activated with `rows` (W23: the cache replaced and `valid`, the generation kept). Then settles.
+   */
+  recover(rows: CacheRow[]): Promise<void>;
+  /** Revision 7: the durable `sync_state` singleton. */
+  sync(): SyncStateRow;
 }
 
 export function sourceRow(over: Partial<CacheRow> = {}): CacheRow {
@@ -164,10 +204,30 @@ export async function calendarWorld(
     /** Revision 4: answers queued BEFORE the screen mounts (its first live read is made as it opens). */
     replies?: ReadonlyArray<readonly [string, WireReply[]]>;
     compat?: ApiCompatibility;
+    /**
+     * WEB-13b revision 6 (R7): the shell's sync control navigates as production's protected tree does (`/sync`, `tab` queue or
+     * conflicts), instead of doing nothing.
+     */
+    productionSync?: boolean;
+    /** The shell's sync status (default: synced, nothing pending): conflicts send the sync control to the conflicts tab. */
+    syncModel?: SyncStatusModel;
+    /**
+     * Revision 7 (R7; design assessment C4): the PRODUCTION provider (`DataProvider`) over the page's runtime (`PageDataHost.runtime`, as
+     * the page's leader composes it): every mount of the tree builds a NEW controller and its unmount disposes it, as the protected tree's
+     * remount does in production. Without it, every mount shares ONE controller (`DataEnvProvider env={env}`), which a remount keeps alive.
+     */
+    production?: boolean;
+    /**
+     * Revision 7 (R7): the cache as the first snapshot left it (`valid`, in the delta phase at a cursor), as every cache that holds rows is
+     * in production. Without it the world's cache rows sit in a cache whose status is still `empty`, which production never shows rows of.
+     */
+    validCache?: boolean;
   } = {},
 ): Promise<CalendarWorld> {
   // The per-identity memory outlives a mount by design (`memory.ts`); each test starts without one.
   forgetIdentityMemories();
+  // Revision 6 (R7): nor a kept import session (page memory that outlives a mount by design, `import-kept.ts`).
+  forgetImportSessions();
   const world = new DataTestWorld();
   world.idb.autoDrive = true;
   const page = world.page("A");
@@ -177,6 +237,15 @@ export async function calendarWorld(
     if (created.kind !== "opened") throw new Error("setup");
     if (options.cache) world.idb.seed(DB, "cache", options.cache);
     if (options.drafts) world.idb.seed(DB, "drafts", options.drafts);
+    if (options.validCache)
+      world.idb.seed(DB, "sync_state", [
+        {
+          ...(world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow),
+          cache_status: "valid",
+          phase: "delta",
+          cursor: "delta-0",
+        },
+      ]);
   }
   const identity = new Cell<Identity | null>({
     account_id: ACCOUNT,
@@ -202,7 +271,7 @@ export async function calendarWorld(
   };
   const commands = createCommandRegistry();
   registerCalendarCommands(commands);
-  const env = createDataEnv({
+  const shared = createDataEnv({
     identity,
     loadRuntime: async () => runtime,
     online,
@@ -216,6 +285,21 @@ export async function calendarWorld(
     channel,
     commands,
   });
+  let env = shared;
+  const controllers: DataEnv[] = options.production ? [] : [shared];
+  // The page's runtime, as a production leader composes it: the provider uses it and never disposes it (`createProductionEnv`).
+  const host = createPageDataHost();
+  if (options.production) {
+    shared.dispose();
+    host.setRuntime({ runtime, channel });
+  }
+  /** Records the controller the production provider built for this mount. */
+  function Mounted() {
+    const mounted = useDataEnv();
+    if (controllers.at(-1) !== mounted) controllers.push(mounted);
+    env = mounted;
+    return null;
+  }
 
   const calls: WireCall[] = [];
   const replies = new Map<string, WireReply[]>(
@@ -275,19 +359,43 @@ export async function calendarWorld(
   documentRouteChanges();
   window.history.replaceState(null, "", options.route ?? "/settings/calendars");
   let router = createAppRouter();
+  const data = (children: ReactNode) =>
+    options.production ? (
+      <DataProvider session={session} host={host} commands={commands}>
+        <Mounted />
+        {children}
+      </DataProvider>
+    ) : (
+      <DataEnvProvider env={shared}>{children}</DataEnvProvider>
+    );
   const tree = () => (
     <SessionProvider session={session}>
       <ProtectedProviders>
-        <DataEnvProvider env={env}>
+        {data(
           <ShellEnvProvider
             value={{
-              syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
-              onOpenSync: () => {},
+              // One change waiting by default: a dialog's sync control shows only while there is news (the Final design).
+              syncModel: options.syncModel ?? {
+                phase: "synced",
+                pendingCount: 1,
+                conflictCount: 0,
+              },
+              onOpenSync: options.productionSync
+                ? (destination) => {
+                    void router.navigate({
+                      to: "/sync",
+                      search: {
+                        tab:
+                          destination === "conflicts" ? "conflicts" : "queue",
+                      },
+                    });
+                  }
+                : () => {},
             }}
           >
             <RouterProvider router={router} />
-          </ShellEnvProvider>
-        </DataEnvProvider>
+          </ShellEnvProvider>,
+        )}
       </ProtectedProviders>
     </SessionProvider>
   );
@@ -302,9 +410,101 @@ export async function calendarWorld(
   };
   await screen.findByRole("heading", { level: 1, name: "Calendar sources" });
   await settle();
+  const service = () => {
+    const open = runtime.serviceFor(ACCOUNT);
+    if (open === null || !open.live) throw new Error("no account database");
+    return open;
+  };
+  const sync = () =>
+    world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow;
   return {
     world,
-    env,
+    get env() {
+      return env;
+    },
+    controllers: () => [...controllers],
+    host,
+    sync,
+    async invalidate() {
+      const s = sync();
+      const open = service();
+      await act(async () => {
+        const out = await open.commit(invalidateRecoveryPosition, {
+          captured: open.capture(identity.get()?.epoch ?? 1, {
+            requestSeq: s.request_seq,
+            ownershipToken: s.owner?.ownership_token ?? null,
+            recoveryGeneration: s.recovery_generation,
+            expectedPosition: s.cursor,
+          }),
+          reason: "resync_required",
+        });
+        if (out.kind !== "applied") throw new Error(`W18: ${out.kind}`);
+      });
+      await settle();
+    },
+    async recover(rows) {
+      const open = service();
+      const token = crypto.randomUUID();
+      await act(async () => {
+        const owned = await open.store.run(acquireOwnership, {
+          incarnationId: open.incarnationId,
+          tabId: "tab-a",
+          token,
+          now: Date.now(),
+        });
+        if (owned.kind !== "owned") throw new Error(`W20: ${owned.kind}`);
+        const asked = await open.store.run(captureRecoveryRequest, {
+          incarnationId: open.incarnationId,
+          token,
+          path: "snapshot",
+          now: Date.now(),
+          signals: { hasStorageEstimate: true },
+        });
+        if (asked.kind !== "captured") throw new Error(`W21: ${asked.kind}`);
+        const s = sync();
+        const bytes = bytesOf(
+          pageJson({
+            phase: "snapshot",
+            hasMore: false,
+            nextCursor: "delta-recovered",
+            batches: [
+              {
+                revision: 90,
+                changes: rows.map(({ kind_date: _k, ...resource }) => ({
+                  kind: "upsert" as const,
+                  resource: resource as never,
+                })),
+              },
+            ],
+          }),
+        );
+        const scan = scanSyncPage(bytes);
+        if (!scan.ok) throw new Error(`page: ${scan.reason}`);
+        const captured = open.capture(identity.get()?.epoch ?? 1, {
+          requestSeq: s.request_seq,
+          ownershipToken: s.owner?.ownership_token ?? null,
+          recoveryGeneration: s.recovery_generation,
+          expectedPosition: s.staging_position,
+        });
+        const operation = snapshotPageOperation(captured.expectedPosition);
+        const out = await open.commit(activateSnapshot, {
+          captured,
+          bytes,
+          scan,
+          decode: {
+            validators: createValueValidators(),
+            derivers: createKeyDerivers(),
+          },
+          operation,
+          now: new Date().toISOString(),
+          mode: "ordinary",
+          activateOperation: operation,
+        });
+        if (out.kind !== "applied" || out.value.kind !== "activated")
+          throw new Error(`W23: ${JSON.stringify(out)}`);
+      });
+      await settle();
+    },
     online,
     compat,
     identity,

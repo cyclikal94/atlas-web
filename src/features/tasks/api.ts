@@ -1,5 +1,6 @@
 import type { Policy } from "../../data";
 import { recogniseAtlasError } from "../../lib/api-client/problem";
+import type { components } from "../../lib/api-types";
 import { type Session, StampedRequestError } from "../../session";
 import {
   type AccountTimerPage,
@@ -95,6 +96,47 @@ export interface EnrolCommand {
   initial_policy: Policy;
 }
 
+/** WEB-13b: a task's calendar binding (`GET /tasks/{id}/anchor`), as the server shows it to this account. */
+export type CalendarBinding = NonNullable<
+  components["schemas"]["CalendarBinding"]["binding"]
+>;
+
+/**
+ * The binding answer read strictly (`{binding: {anchor, version ≥ 1, active} | null}`): the anchor must be an object whose reference and
+ * offset name a kind; anything else is not the contract's answer (`uncertain`). `null` is "not anchored" (also when its reference is not
+ * visible to this account: never "deleted").
+ */
+export function parseBinding(
+  body: unknown,
+): { binding: CalendarBinding | null } | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return null;
+  const { binding } = body as { binding?: unknown };
+  if (binding === null) return { binding: null };
+  if (
+    typeof binding !== "object" ||
+    binding === undefined ||
+    Array.isArray(binding)
+  )
+    return null;
+  const { anchor, version, active } = binding as Record<string, unknown>;
+  const kind = (v: unknown) =>
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as { kind?: unknown }).kind === "string";
+  if (
+    typeof anchor !== "object" ||
+    anchor === null ||
+    !kind((anchor as { reference?: unknown }).reference) ||
+    !kind((anchor as { offset?: unknown }).offset) ||
+    !Number.isSafeInteger(version) ||
+    (version as number) < 1 ||
+    typeof active !== "boolean"
+  )
+    return null;
+  return { binding: binding as CalendarBinding };
+}
+
 /** WEB-10c's online-only access commands (`/task-access-commands`; `set_rota`/`rota_consent` are refused on `/task-commands`). */
 export interface SetRotaCommand {
   kind: "set_rota";
@@ -138,6 +180,15 @@ export interface TasksApi {
     progressId: string,
     after: number,
   ): Promise<TasksResult<ProgressJournal>>;
+  /**
+   * WEB-13b: the task's calendar binding, online only (case 3: offline says so; nothing is cached). `live` (R6) is the caller's lifetime,
+   * asked before EVERY admission of the request, the first and each one after a `not_sent` wait: once it says no, nothing more is sent
+   * and the answer is `closed`; going offline meanwhile answers `offline`, also without sending.
+   */
+  readAnchor(
+    taskId: string,
+    live?: () => boolean,
+  ): Promise<TasksResult<{ binding: CalendarBinding | null }>>;
   /** `POST /task-access-commands` with the caller's key and the canonical body of one attempt. */
   enrol(
     command: EnrolCommand,
@@ -353,6 +404,29 @@ export async function untilSent<T>(
   }
 }
 
+/**
+ * `untilSent` for a caller with a lifetime (WEB-13b R6, the WEB-13a calendar reads' rule): `live`, then the device's connectivity, are
+ * asked before EVERY admission of the request, the first included and each one after a `not_sent` wait. Once `live` says no nothing more
+ * is sent and the answer is `closed`; offline, nothing is sent and the answer is `offline`. An answer to a request that WAS sent is
+ * returned as it is, whatever became of the caller.
+ */
+export async function untilSentWhile<T>(
+  run: () => Promise<TasksResult<T>>,
+  live: () => boolean,
+  offline: () => TasksResult<never> | null,
+): Promise<TasksResult<T>> {
+  for (let attempt = 0; ; attempt += 1) {
+    if (!live()) return { ok: false, kind: "closed" };
+    const away = offline();
+    if (away !== null) return away;
+    const result = await run();
+    if (result.ok || result.kind !== "not_sent") return result;
+    const delay = NOT_SENT_DELAYS_MS[attempt];
+    if (delay === undefined) return result;
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+}
+
 /** The production client over the session, for the displayed `(account, epoch)`. */
 export function createTasksApi(
   session: Session,
@@ -376,23 +450,24 @@ export function createTasksApi(
     params: Record<string, unknown>,
     parse: (body: unknown) => T | null,
     admitted?: () => boolean,
-  ): Promise<TasksResult<T>> =>
-    Promise.resolve(
-      offline() ??
-        untilSent(
-          () =>
-            call(
-              () =>
-                (
-                  client(admitted) as unknown as {
-                    GET(p: string, o: unknown): Promise<Answered>;
-                  }
-                ).GET(path, { params, parseAs: "text" }),
-              parse,
-            ),
-          admitted,
-        ),
-    );
+    live?: () => boolean,
+  ): Promise<TasksResult<T>> => {
+    const send = () =>
+      call(
+        () =>
+          (
+            client(admitted) as unknown as {
+              GET(p: string, o: unknown): Promise<Answered>;
+            }
+          ).GET(path, { params, parseAs: "text" }),
+        parse,
+      );
+    // `admitted` (WEB-10c, the catch-up's permission) travels to the send boundary and is asked before each call; a read with a lifetime
+    // (`live`, WEB-13b R6) is admitted only while its caller is live, answering `closed` once it is not. Neither caller passes both.
+    return live === undefined
+      ? Promise.resolve(offline() ?? untilSent(send, admitted))
+      : untilSentWhile(send, live, offline);
+  };
   const access = async (
     command: AccessCommand,
     key: string,
@@ -434,6 +509,14 @@ export function createTasksApi(
       get("/tasks/{id}", { path: { id } }, parseTaskDetail, admitted),
     readEnrolment: (taskId) =>
       get("/tasks/{id}/enrolment", { path: { id: taskId } }, parseEnrolment),
+    readAnchor: (taskId, live) =>
+      get(
+        "/tasks/{id}/anchor",
+        { path: { id: taskId } },
+        parseBinding,
+        undefined,
+        live,
+      ),
     readJournal: (progressId, after) =>
       get(
         "/progress/{id}/entries",

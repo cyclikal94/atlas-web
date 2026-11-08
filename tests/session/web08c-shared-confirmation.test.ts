@@ -134,7 +134,15 @@ describe("the settlement shares its token and confirmation (HF1-SHARED-CONFIRMAT
     // From the record alone, the page adopts nothing; it obtains its own token (its identity read, released by `adoptedBy`).
     const { n, token } = await adoptedBy(f, l.account, l.epoch);
     expect(token).toBeUndefined();
-    await f.runWith(ordinaryGet(n, l.account, l.epoch));
+    // F42-1 hand-off (WEB13B-F42-1-20261106, WEB-13b revision 35): the request's outcome is recorded and asserted, so a page that is held
+    // back (`not_sent`) fails this case by an assertion, never by the thrown `StampedRequestError` (MU-8C-HF1d was judged INVALID for it).
+    const outcome = await f.runWith(
+      ordinaryGet(n, l.account, l.epoch).then(
+        () => "sent",
+        (e: { kind?: string }) => e.kind,
+      ),
+    );
+    expect(outcome, "the page's own request is sent").toBe("sent");
     await f.world.runUntilIdle();
     expect(reads(f, n.id).length).toBeGreaterThanOrEqual(1);
     const sent = f.server.requests.filter(

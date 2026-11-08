@@ -47,6 +47,7 @@ import {
   type FormRecoveryTarget,
 } from "../ports/form-recovery";
 import type { AccountStore, Loadable, Watchable } from "../store/port";
+import type { CacheLifetime } from "./cache-lifetime";
 
 /**
  * The data layer as the UI sees it (plan 5.7, 6.1): ONE React-free controller per mounted protected tree. It follows the displayed
@@ -141,6 +142,8 @@ export interface DataEnv {
   readonly quota: QuotaGuard;
   /** The same, observable: a database that another tab creates later appears here without a reload. */
   readonly serviceStore: Store<AccountService | null>;
+  /** WEB-13b revision 7 (R7): the lifetime of the bound database's cache, for what outlives this controller (`cache-lifetime.ts`). */
+  readonly cacheLifetime: Store<CacheLifetime | null>;
   /**
    * Form recovery around an app-update reload (Q4, WEB-14a) over the DISPLAYED account's `form_recovery` store: every call reaches the
    * service bound when it is called (one database per account, so a copy can never land in another account's). With no open database
@@ -353,6 +356,7 @@ export function createDataEnv(
   const summary = new MutableStore<Loadable<QueueSummary>>(LOADING);
   const commands = deps.commands ?? createCommandRegistry();
   const serviceStore = new MutableStore<AccountService | null>(null);
+  const cacheLifetime = new MutableStore<CacheLifetime | null>(null);
   /**
    * Whether this controller has finished LOOKING for the displayed account's database: opened it, or learnt that there is none. Until
    * it has, "no service" means "not known yet", not "there is none", and the profile read and the device mirror ask nothing, because
@@ -613,6 +617,21 @@ export function createDataEnv(
     const recovery = leader.recovery ?? defaultRecoverySeam;
     const leading = leader.outbox ?? null;
     const readSummary = summary.get();
+    const cache = cacheOf();
+    const invalidated = cache === "invalid" || engine?.invalidating === true;
+    const lifetime: CacheLifetime | null =
+      current === null
+        ? null
+        : {
+            account: current.account,
+            incarnationId: current.service.incarnationId,
+            invalidations: established?.invalidations ?? null,
+            invalidated,
+            valid: cache === "valid" && !invalidated,
+          };
+    // Published only when it changes (the same comparison as `patch`).
+    if (JSON.stringify(lifetime) !== JSON.stringify(cacheLifetime.get()))
+      cacheLifetime.set(lifetime);
     patch({
       online: deps.online.get(),
       engine,
@@ -632,7 +651,7 @@ export function createDataEnv(
       established?.syncStops !== undefined
         ? { followerStops: established.syncStops }
         : {}),
-      cache: cacheOf(),
+      cache,
       lastSyncedAt: established?.lastSyncedAt ?? null,
       summary: readSummary.status === "ready" ? readSummary.value : null,
       outbox: leading?.state.get() ?? null,
@@ -1242,6 +1261,7 @@ export function createDataEnv(
     service: () => (current?.service.live ? current.service : null),
     quota: deps.quota,
     serviceStore,
+    cacheLifetime,
     formRecovery,
     formRecoveryOpen,
     attachLeader(next) {

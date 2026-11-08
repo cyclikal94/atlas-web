@@ -1,5 +1,6 @@
 import type {
   CacheRow,
+  Continuity,
   EnqueueRequest,
   JsonObject,
   LocalId,
@@ -147,6 +148,8 @@ export function configureSourceRequest(
  * The import draft of WEB-13b (case 2, the dynamic-routing extension): addressed to `/calendar-sources/{id}/import` through
  * `targetId`, with the source as an UNVERSIONED primary target, so a pending create of that source is a dependency (`depends_on`) and
  * the import is never sent before the source exists. The body is `{ics, from, through}` exactly, so a resend is byte-identical.
+ * Importing needs edit access to the source (WEB-13b): a cached `can_edit: false` refuses the save as `denied`; a source this device has
+ * not received yet (its own pending create) is no known denial.
  */
 export function importRequest(input: {
   sourceId: ResourceId;
@@ -154,8 +157,13 @@ export function importRequest(input: {
   from: string;
   through: string;
   localId?: LocalId;
+  /**
+   * The cache's history the session was verified against, captured at the press (revision 9, C2): W2 compares it. Required (revision 10,
+   * R7e): an import never takes the shared request's path for callers that state none.
+   */
+  continuity: Continuity;
 }): EnqueueRequest {
-  const { sourceId, ics, from, through } = input;
+  const { sourceId, ics, from, through, continuity } = input;
   return {
     endpoint: IMPORT_ENDPOINT,
     targetId: sourceId,
@@ -166,10 +174,12 @@ export function importRequest(input: {
         basis: "resource",
         versionChecked: false,
         seedIfUntracked: 1,
+        requiresEdit: true,
       },
     ],
     build: () => ({ command: { ics, from, through } }),
     ...(input.localId === undefined ? {} : { localId: input.localId }),
+    continuity,
   };
 }
 

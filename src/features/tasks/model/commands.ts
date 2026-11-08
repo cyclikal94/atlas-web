@@ -10,6 +10,7 @@ import {
   type TargetSpec,
   type TemplateKind,
 } from "../../../data";
+import type { components } from "../../../lib/api-types";
 import {
   type Evidence,
   type OccurrenceData,
@@ -140,6 +141,12 @@ export interface CreateTaskInput {
   /** D-10a-4: "Use my defaults" (the task audience from the defaults) or "Only me" (an explicit empty policy; still queueable). */
   sharing: "defaults" | "only_me";
   defaults: DefaultsRecord | null;
+  /**
+   * WEB-13b: the task's calendar anchor (an event series or a person's date), or none. With one, the server makes NO first occurrence
+   * from the schedule (its occurrences come from the reference), so the caller passes `occurrenceId: null` and `progressId: null`. Sent only
+   * when present: an absent field is omitted, never `null`. The schedule must not repeat (the server answers `422`).
+   */
+  anchor?: components["schemas"]["CalendarAnchor"] | null;
   localId?: string;
 }
 
@@ -184,6 +191,7 @@ export function createTask(input: CreateTaskInput): EnqueueRequest {
     title: input.title,
     definition: canonicalDefinition(input.definition),
     ...(input.sharing === "only_me" ? { initial_policy: EMPTY_POLICY } : {}),
+    ...(input.anchor ? { anchor: input.anchor as unknown as JsonObject } : {}),
   };
   return {
     endpoint: TASK_ENDPOINT,

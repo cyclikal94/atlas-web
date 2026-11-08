@@ -313,6 +313,7 @@ export function stubEnv(
       invalidate: () => undefined,
     },
     serviceStore: serviceCell as never,
+    cacheLifetime: new Cell(null),
     formRecovery: new MemoryRecoveryAdapter(),
     // The fake resource service has no recovery database.
     formRecoveryOpen: new Cell(false),

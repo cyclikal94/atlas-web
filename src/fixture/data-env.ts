@@ -314,6 +314,7 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       invalidate: () => undefined,
     },
     serviceStore: new Cell(null),
+    cacheLifetime: new Cell(null),
     // No database: a form is handed no port (as `serviceStore` says), so this port is never reached; it answers as a store that cannot be
     // reached would. WEB-14a revision 8: no in-memory store in the fixture's initial chunk (the fixed fixture ceiling, FB-20261010-08C-14A).
     formRecovery: NO_RECOVERY_STORE,

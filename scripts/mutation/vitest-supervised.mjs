@@ -26,6 +26,11 @@
 // Revision 30 (review r29 R31/R33, design assessment b8e8e25d C3/C4): workers also run with `--experimental-async-context-frame` (the
 // runtime's asynchronous invocation context without promise hooks), and each witnessed module carries the runtime's per-file health
 // attestation from its task meta (vitest-origin-setup.mjs); envelope schema 4.
+//
+// Mutation-runner time limit (7 November 2026, MUTATION-RUNNER-TIMEOUT-20261107): a request may name `testTimeoutMs`, which is given to
+// Vitest as `testTimeout` (the per-test DEFAULT; a test's or suite's own explicit timeout still wins). Every project must resolve to
+// exactly that limit (`origin.projects[].testTimeout`) or the lifecycle is unsupported, and each witnessed test records the limit it ran
+// under (`timeout`). Without it, Vitest's own default applies. The envelope schema is unchanged: both records are additions.
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -53,6 +58,15 @@ if (request.schema !== REQUEST_SCHEMA) {
 
 if (typeof request.nonce !== "string" || request.nonce.length === 0) {
   console.error("vitest-supervised: the request has no nonce");
+  process.exit(70);
+}
+if (
+  request.testTimeoutMs !== undefined &&
+  !(Number.isSafeInteger(request.testTimeoutMs) && request.testTimeoutMs > 0)
+) {
+  console.error(
+    `vitest-supervised: the request's per-test time limit is not a positive whole number of milliseconds: ${JSON.stringify(request.testTimeoutMs)}`,
+  );
   process.exit(70);
 }
 // Workers inherit this process's environment: the origin setup binds every record it writes to this request.
@@ -177,6 +191,7 @@ const witnessReporter = {
             name: test.name,
             state: result.state,
             fails: test.options?.fails === true,
+            timeout: test.options?.timeout ?? null,
             ms: test.diagnostic()?.duration ?? null,
             ...errorsOf(result.errors),
           });
@@ -217,6 +232,11 @@ try {
         )),
       ],
       outputFile: { json: request.json },
+      // The mutation runner's per-test limit, as Vitest's `testTimeout` (a CLI-level option: it overrides the config file and every
+      // project's value, but not a test's or suite's own explicit timeout).
+      ...(request.testTimeoutMs !== undefined
+        ? { testTimeout: request.testTimeoutMs }
+        : {}),
       // An optional test-name filter (a narrowed catalogue selection): `{ source, flags }` of a RegExp. Cases it excludes are reported
       // as skipped; the consumer checks the selected inventory exactly.
       ...(request.testNamePattern
@@ -236,6 +256,7 @@ try {
     setupFiles: [...(p.config?.setupFiles ?? [])],
     execArgv: [...(p.config?.execArgv ?? [])],
     pool: p.config?.pool ?? null,
+    testTimeout: p.config?.testTimeout ?? null,
   }));
   // Only a process pool runs the worker with these execArgv and this realm's loading hook (`threads`/`vm*` are not qualified).
   origin.installed =
@@ -251,6 +272,13 @@ try {
   if (!origin.installed)
     unsupported.push(
       "the assertion-origin setup and loading hook are not installed in every project (setup first, --import hook, async context, forks pool)",
+    );
+  if (
+    request.testTimeoutMs !== undefined &&
+    !origin.projects.every((p) => p.testTimeout === request.testTimeoutMs)
+  )
+    unsupported.push(
+      `the per-test time limit ${request.testTimeoutMs} ms is not the limit of every project (${origin.projects.map((p) => JSON.stringify(p.testTimeout)).join(", ")})`,
     );
   if (ctx.version !== PINNED_VITEST)
     unsupported.push(`Vitest ${ctx.version}, qualified ${PINNED_VITEST}`);

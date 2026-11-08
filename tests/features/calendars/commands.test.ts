@@ -142,11 +142,13 @@ describe("queued commands (create_source, configure_source)", () => {
   });
 
   test("the import recipe for WEB-13b: templated endpoint, the source as an UNVERSIONED primary (so a pending create gates it), and exactly {ics, from, through}", () => {
+    const continuity = { incarnationId: "inc-1", invalidations: 2 };
     const request = importRequest({
       sourceId: ID,
       ics: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
       from: "2026-01-01",
       through: "2026-12-31",
+      continuity,
     });
     expect(request.endpoint).toBe(IMPORT_ENDPOINT);
     expect(request.targetId).toBe(ID);
@@ -157,6 +159,9 @@ describe("queued commands (create_source, configure_source)", () => {
         basis: "resource",
         versionChecked: false,
         seedIfUntracked: 1,
+        // WEB-13b (§4.2 of its plan, labelled adaptation): importing needs edit access to the source; a known `can_edit: false` refuses
+        // the save as `denied`. The recipe is otherwise unchanged.
+        requiresEdit: true,
       },
     ]);
     expect(Object.keys(request.build({}).command)).toEqual([
@@ -164,6 +169,8 @@ describe("queued commands (create_source, configure_source)", () => {
       "from",
       "through",
     ]);
+    // Revision 10 (review 10 R7e): the history the press captured is always stated, for W2 to compare; it is never in the body.
+    expect(request.continuity).toEqual(continuity);
   });
 });
 

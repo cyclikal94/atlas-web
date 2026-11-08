@@ -192,6 +192,7 @@ export const FACTS = {
   timer: "Timer",
   streak: "Streak",
   follows: "Follows",
+  needsFirst: "Needs first",
   seenBy: "Seen by",
 } as const;
 /** The task page's summary line (the Final design): "18:30 today · every Monday · your turn". */

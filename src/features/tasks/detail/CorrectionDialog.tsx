@@ -18,6 +18,7 @@ import type {
 import type { DiscardResult } from "../../../lib/form-recovery/port";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { pageFormRegistry } from "../../../lib/form-recovery/registry";
+import { FROM_REVIEW } from "../../calendars/copy-review";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { weekdayLabel } from "../format";
@@ -28,6 +29,7 @@ import {
   correctionFrom,
   correctionResult,
 } from "../model/correction";
+import type { MoveSeed } from "../model/move";
 import {
   correctionFormContext,
   correctionRecoveryValues,
@@ -203,6 +205,7 @@ export function CorrectionDialog({
   actions,
   progressIds,
   writable,
+  seed,
 }: {
   row: RowModel;
   identity: string;
@@ -212,10 +215,26 @@ export function CorrectionDialog({
   /** Every progress stream under the occurrence this device knows (the server raises each). */
   progressIds: readonly string[];
   writable: boolean;
+  /**
+   * WEB-13b: a calendar review's proposed date and time ("Review this move…"), the INITIAL values of a NEW editing session only: a session
+   * that is resumed keeps what was typed in it. Opening from it never resolves the review.
+   */
+  seed?: MoveSeed | null;
 }) {
   const key = correctionKey(identity, row.id);
+  const fresh = (data: RowModel["data"]): CorrectionState => {
+    const from = correctionFrom(data);
+    return seed === undefined || seed === null
+      ? from
+      : {
+          ...from,
+          date: seed.date,
+          time: seed.time?.slice(0, 5) ?? "",
+          keptTime: seed.time,
+        };
+  };
   const [state, setState] = useState<CorrectionState>(
-    () => resumable(key) ?? correctionFrom(row.data),
+    () => resumable(key) ?? fresh(row.data),
   );
   // Revision 37 (WEB-14a R40): the session's recoverable model (the registry's, while the dialog shows it), its view and the update's hold.
   const model = useCorrectionModel(row, identity, true);
@@ -249,8 +268,8 @@ export function CorrectionDialog({
   // (PRODUCT-DECISIONS-20261011): newer input stays in the open dialog, or retained while the person is in the queue, and is never consumed
   // by the older save's acknowledgement, whichever mount made it.
   const session = useRef<number | null>(null);
-  const latest = useRef({ onClose, row });
-  latest.current = { onClose, row };
+  const latest = useRef({ onClose, row, fresh });
+  latest.current = { onClose, row, fresh };
   // The session is the visit's (revision 22, `visit.ts`): asked for when the dialog opens, not when it renders.
   const visitOf = useTaskVisit();
   // Closing on a consumed save acts on the screen: only a dialog the person is still at does (revision 23, R35; `visit.ts`).
@@ -281,7 +300,7 @@ export function CorrectionDialog({
       const opened = openCorrection(
         key,
         identity,
-        () => correctionFrom(latest.current.row.data),
+        () => latest.current.fresh(latest.current.row.data),
         owner,
       );
       session.current = opened.session;
@@ -501,6 +520,14 @@ export function CorrectionDialog({
     >
       <div ref={body} className="flex flex-col gap-4" data-correction-form="">
         <RecoveryNotice recovery={recovery} firstFieldRef={firstField} />
+        {seed ? (
+          <p
+            data-correction-from-review=""
+            className="text-xs text-muted-foreground"
+          >
+            {FROM_REVIEW}
+          </p>
+        ) : null}
         {goal.kind !== "checkbox" ? (
           <fieldset className="flex flex-col gap-2">
             <legend className="text-sm font-medium text-foreground">

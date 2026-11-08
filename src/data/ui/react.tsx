@@ -54,6 +54,7 @@ import {
 import type { Loadable, Plan, Watchable } from "../store/port";
 import { getPageRegistry } from "../store/registry";
 import type { BrowserRuntime } from "./browser-env";
+import { publishCacheLifetime } from "./cache-lifetime";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import {
   currentDeviceThrough,
@@ -79,6 +80,8 @@ export function DataEnvProvider({
   env: DataEnv;
   children: ReactNode;
 }) {
+  // WEB-13b revision 7 (R7): the mounted controller's cache lifetime is the page's, for as long as it is mounted (`cache-lifetime.ts`).
+  useEffect(() => publishCacheLifetime(env.cacheLifetime), [env]);
   return (
     <DataEnvContext.Provider value={env}>{children}</DataEnvContext.Provider>
   );

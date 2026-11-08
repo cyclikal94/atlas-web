@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import type { CacheRow } from "../../data";
+import { ImportAction } from "./import-action";
 
 /**
  * The actions a calendar row offers beyond Refresh and Manage, as an APPEND-ONLY registry (like the Settings registry): WEB-13b adds
@@ -21,7 +22,10 @@ export interface CalendarRowAction {
   Render: ComponentType<{ source: CalendarSourceView }>;
 }
 
-const ROW_ACTIONS: readonly CalendarRowAction[] = [];
+const ROW_ACTIONS: readonly CalendarRowAction[] = [
+  // WEB-13b: "Import events" (`import-action.tsx`).
+  { id: "import", owner: "WEB-13", Render: ImportAction },
+];
 
 export const calendarRowActions = (): readonly CalendarRowAction[] =>
   ROW_ACTIONS;

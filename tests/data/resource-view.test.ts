@@ -12,6 +12,7 @@ import {
   createSourceRequest,
   importRequest,
 } from "../../src/features/calendars/model/commands";
+import { historyOf } from "../support/data/continuity";
 import { type OutboxWorld, outboxWorld } from "../support/data/outbox-world";
 import { draftRow } from "../support/data/rows";
 import type { PageSpec } from "../support/data/sync-pages";
@@ -131,6 +132,7 @@ describe("readResourceView: one read of one resource", () => {
         ics: ICS,
         from: "2026-01-01",
         through: "2026-12-31",
+        continuity: historyOf(w),
       }),
     );
     const seen = await view(w);

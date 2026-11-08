@@ -385,6 +385,11 @@ export interface SyncStateRow {
    */
   recovery_reconcile_pending?: boolean;
   /**
+   * WEB-13b revision 8 (review 8 R7b): the cache's invalidation witness, moved by one by every committed invalidation (W18, and W24's
+   * abandonment of a `valid` cache) and by nothing else (`model/invalidation.ts`, `invalidationsOf`). Absent: 0.
+   */
+  cache_invalidation_seq?: number;
+  /**
    * WEB-09c: the delta revision being received in segments (`model/segmented-sync.ts`), staged in `delta_staging` and applied whole by W1.
    * Absent or null: none. In force only while `cursor` is the continuation it stored (`stageOf`).
    */

@@ -1,4 +1,5 @@
 import { DATA_CONFIG } from "../model/config";
+import { invalidationsOf } from "../model/invalidation";
 import {
   blockedBy,
   SNAPSHOT_PAGE_PREFIX,
@@ -39,6 +40,12 @@ export interface SyncFacts {
    * these, and says so.
    */
   syncStops: SyncStops;
+  /**
+   * WEB-13b revision 8 (review 8 R7b; revision 7 read `recovery_generation` here, which a first fill and an empty attempt's restart move
+   * too): the cache's invalidation witness (`invalidationsOf`). Two readings of one incarnation that agree saw no committed invalidation
+   * between them, even when nothing observed it in between. Null: unreadable, so unknown.
+   */
+  invalidations: number | null;
 }
 
 /** The operations of `local_write_streaks` that are the sync writers' (the engine's and the recovery job's), never the outbox's. */
@@ -84,5 +91,6 @@ export const readSyncFacts = readPlan<
           invalidateOperation: invalidateOperation(sync.cursor),
           recoveryBlocked: blockedBy(sync) !== null,
           syncStops: syncStopsOf(sync),
+          invalidations: invalidationsOf(sync),
         },
 });

@@ -3245,11 +3245,13 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/catchup-retry.test.ts"],
     expect:
       /the position read \(position\) held in the session until \+1001 ms|the discovery read held past its window's end/,
+    // Re-anchored at the base merge of main 74b0bac into WEB-13b (6 November 2026): the merged `get` builds one `send` closure for both
+    // lifetimes (WEB-10c's `admitted`, WEB-13b's `live`), so the line moved; the same defect.
     patch: (t) =>
       sub(
         t,
-        "                  client(admitted) as unknown as {",
-        "                  client() as unknown as {",
+        "            client(admitted) as unknown as {",
+        "            client() as unknown as {",
       ),
   },
   {
@@ -4135,11 +4137,13 @@ export const UNIT_10C = [
       "tests/features/tasks/catchup-retry.test.ts",
     ],
     expect: /R39/,
+    // Re-anchored at the base merge of main 74b0bac into WEB-13b (6 November 2026): the merged `get` builds one `send` closure for both
+    // lifetimes (WEB-10c's `admitted`, WEB-13b's `live`), so the line moved; the same defect.
     patch: (t) =>
       sub(
         t,
-        '                ).GET(path, { params, parseAs: "text" }),',
-        "                ).GET(path, { params }),",
+        '          ).GET(path, { params, parseAs: "text" }),',
+        "          ).GET(path, { params }),",
       ),
   },
   {

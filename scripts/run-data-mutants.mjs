@@ -35,6 +35,10 @@
 // and the FIRST of them stops it: nothing new starts, running mutants are joined, the rest is recorded `not_run`. A few mutants run a
 // declared, narrowed selection of their files' cases (scripts/mutation/unit-selections.mjs, a recorded human decision), each against
 // a control over the same selection and an exact check of the cases that ran.
+//
+// Every control and mutant child runs each test under the runner's fixed per-test limit (20 s, `MUTANT_TEST_TIMEOUT_MS` in
+// scripts/mutation/unit-runner.mjs; Vitest's default is 5 s), so a test slowed by host load is judged by its assertions; a test's own
+// explicit timeout is kept, and a test that hangs still ends as a time-out. `pnpm test` keeps Vitest's limits (docs/data-layer.md).
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {

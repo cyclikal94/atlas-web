@@ -180,3 +180,12 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   contract), the frames' people and birthdays (no data).
 
 Each phase: typecheck, lint, the unit suite, the e2e groups, the budgets, docs, and the Safari capture before it is reported.
+
+## Main merged (8 November 2026, WEB-12b and WEB-13b)
+
+Main's households (WF-SHARING-01: households, invitations, sign-up, names) and calendar import, review and anchors came in on the
+redesign: their screens use the redesign's tokens and buttons (the earlier merges' mapping); the Sharing page keeps the frame anatomy
+with WEB-12b's actions in its header and its households above the defaults' grouped box; the anchor is "Follows an event or a date"
+(a section of the task's grouped box and of the create form's, and a one-off task's "Follows" cell); the prerequisites' cell is "Needs
+first". The tests main added follow the redesign's two contracts (a dialog's sync control shows only with news; a new form's save is
+"Add task").

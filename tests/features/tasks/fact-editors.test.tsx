@@ -201,9 +201,11 @@ describe("the task's editors", () => {
     ).toEqual({ frequency: "weekly", interval: 2 });
   });
 
-  test("a one-off's Repeats cell is plain (a one-off stays one)", async () => {
-    await open();
-    expect(cell("repeat")?.tagName).toBe("DIV");
+  test("a one-off shows what it follows (its calendar anchor) where a repeating task shows how it repeats", async () => {
+    const { t } = await open();
+    await t.until(() => cell("anchor") !== null);
+    expect(cell("repeat")).toBeNull();
+    expect(cell("anchor")?.tagName).toBe("BUTTON");
   });
 
   test("If missed revises the carry and says what the choice means", async () => {

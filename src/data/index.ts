@@ -33,6 +33,7 @@ export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
+  Continuity,
   EnqueueRequest,
   ExpectedPredecessor,
   TargetNeeds,
@@ -152,6 +153,7 @@ export type {
   OutstandingPage,
 } from "./plans/outstanding-reads";
 export type {
+  DraftHeadersPage,
   Outstanding,
   PendingCreatesPage,
   ResourceView,
@@ -181,6 +183,11 @@ export {
 } from "./store/retained-accounts";
 // The applied server revision (WEB-11a's summary invalidation): only lazy screens import it.
 export { useAppliedRevision } from "./ui/applied-revision";
+export {
+  type CacheLifetime,
+  type CacheLifetimes,
+  pageCacheLifetime,
+} from "./ui/cache-lifetime";
 export { useDraftWithCommand } from "./ui/draft-body";
 export {
   type DraftEvidence,
@@ -201,12 +208,22 @@ export {
   useCachedResources,
   useCachePosition,
   useChildPage,
+  useDraftHeaders,
   useFormCopiesUnder,
   useInventory,
   useOutstanding as useOutstandingResources,
   useOutstandingByKind,
   useOutstandingCreates,
 } from "./ui/outstanding";
+// WEB-13b revision 8 (R7b): only the kept import (the calendars chunk) observes the page's cache itself.
+export {
+  type CacheObservation,
+  type CacheObserver,
+  type CacheReading,
+  type CacheService,
+  observeCache,
+  readCache,
+} from "./ui/page-cache-observer";
 export {
   type ConflictRow,
   DataEnvProvider,

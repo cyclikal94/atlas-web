@@ -1,6 +1,6 @@
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Check, ChevronRight, X } from "lucide-react";
-import { useCallback, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useLayoutMode } from "../../../app/shell/layout-mode";
 import { ActionMenu, type MenuItem } from "../../../components/ui/action-menu";
 import { useAnnouncer } from "../../../components/ui/announcer";
@@ -33,6 +33,7 @@ import {
   submittedCorrection,
 } from "../model/correction";
 import { prerequisitesOf, progressOf } from "../model/dependencies";
+import { type MoveSeed, parseMove } from "../model/move";
 import { addDays, resolveWallTime, timeIn, todayIn } from "../model/time";
 import { isTimerGoal } from "../model/timers";
 import { editable } from "../reasons";
@@ -40,6 +41,7 @@ import { STREAK_COPY } from "../streak/StreakPage";
 import { TODAY_TITLE } from "../titles";
 import { pillTone } from "../today/TodayRow";
 import type { RowModel } from "../view";
+import { AnchorSection, type AnchorStatus } from "./AnchorSection";
 import { ClosureControls, CONTROLS_COPY, Participation } from "./Controls";
 import {
   CORRECTION_COPY,
@@ -161,6 +163,9 @@ export function TaskDetail({
   // The day the correction dialog was opened for (revision 2): it never follows another day under the person.
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
+  // The calendar anchor's status, for the strip's "Follows" cell, and its section, which the cell brings into view.
+  const [anchorStatus, setAnchorStatus] = useState<AnchorStatus | null>(null);
+  const anchorSection = useRef<HTMLElement | null>(null);
   // "Show this task's days" chose the default day in place (DA19-I1): its control is gone, so the day's record card takes focus.
   const [choseAgain, setChoseAgain] = useState(false);
   const dayId = useId();
@@ -174,6 +179,48 @@ export function TaskDetail({
       ? view.row.attention.local_id
       : null;
   const conflictDraft = useDraftWithCommand(conflictId);
+  // WEB-13b: "Review this move…" from a calendar review (`?move=`, read strictly here, never in the entry route): it opens the one-day
+  // correction of the day the address names, with the proposed date and time as the initial values of a NEW session, once; then the value
+  // leaves the address (replace), so Back, a reload or a later visit neither reopens nor refills it.
+  const rawMove = useRouterState({
+    select: (state) =>
+      (state.location.search as Record<string, unknown> | undefined)?.move,
+  });
+  const [seed, setSeed] = useState<MoveSeed | null>(null);
+  // The `move` value this screen has consumed (once each): a value the address still shows is never applied twice.
+  const consumed = useRef<unknown>(undefined);
+  const day = view.row;
+  useEffect(() => {
+    if (rawMove === undefined || rawMove === consumed.current) return;
+    if (view.status === "loading" || view.selection === "loading") return;
+    consumed.current = rawMove;
+    const move = parseMove(rawMove);
+    if (
+      move !== null &&
+      day !== null &&
+      occurrence === day.id &&
+      day.canEdit &&
+      env.writable
+    ) {
+      setSeed(move);
+      setCorrecting(day.id);
+    }
+    void navigate({
+      to: "/tasks/$taskId",
+      params: { taskId },
+      search: occurrence === undefined ? {} : { occurrence },
+      replace: true,
+    });
+  }, [
+    rawMove,
+    view.status,
+    view.selection,
+    day,
+    occurrence,
+    env.writable,
+    navigate,
+    taskId,
+  ]);
   if (view.status === "loading")
     return (
       <p aria-busy="true" className="text-sm text-muted-foreground">
@@ -562,7 +609,22 @@ export function TaskDetail({
                   progressIds={progressIds}
                   revision={revision}
                   canCorrect={row.canEdit && env.writable}
-                  onCorrect={() => setCorrecting(row.id)}
+                  anchor={anchorStatus}
+                  onAnchor={() => {
+                    const node = anchorSection.current;
+                    if (!node) return;
+                    node.scrollIntoView?.({
+                      block: "nearest",
+                      behavior: "smooth",
+                    });
+                    node
+                      .querySelector<HTMLElement>("button:not([disabled])")
+                      ?.focus({ preventScroll: true });
+                  }}
+                  onCorrect={() => {
+                    setSeed(null);
+                    setCorrecting(row.id);
+                  }}
                   day={day}
                 />
               )}
@@ -586,7 +648,12 @@ export function TaskDetail({
                     />
                   ) : null}
                   {row.canEdit ? (
-                    <Button onClick={() => setCorrecting(row.id)}>
+                    <Button
+                      onClick={() => {
+                        setSeed(null);
+                        setCorrecting(row.id);
+                      }}
+                    >
                       {CORRECTION_COPY.open}
                     </Button>
                   ) : (
@@ -650,6 +717,18 @@ export function TaskDetail({
                     actions={actions}
                     writable={env.writable}
                   />
+                  {view.definition !== null ? (
+                    <AnchorSection
+                      task={task}
+                      repeats={view.definition.schedule.repeat !== null}
+                      canEdit={editable(task, view.execution)}
+                      synced={view.synced}
+                      onStatus={setAnchorStatus}
+                      sectionRef={(node) => {
+                        anchorSection.current = node;
+                      }}
+                    />
+                  ) : null}
                 </>
               }
             />
@@ -677,14 +756,28 @@ export function TaskDetail({
               row={row}
               identity={env.identity}
               open
-              onClose={() => setCorrecting(null)}
+              onClose={() => {
+                setCorrecting(null);
+                setSeed(null);
+              }}
               actions={actions}
               progressIds={progressIds}
               writable={env.writable}
+              seed={seed}
             />
           ) : null}
         </>
       )}
+      {view.definition !== null && row === null ? (
+        // WEB-13b: the task's calendar anchor, after the day (a task that repeats on its own schedule has none). With a day shown it is a
+        // section of the day's grouped box instead (the Final design: "Follows an event or a date").
+        <AnchorSection
+          task={task}
+          repeats={view.definition.schedule.repeat !== null}
+          canEdit={editable(task, view.execution)}
+          synced={view.synced}
+        />
+      ) : null}
       {sharing !== null ? (
         <ResourcePolicyEditor
           resourceId={sharing}
@@ -742,8 +835,14 @@ function Facts({
   revision,
   canCorrect,
   onCorrect,
+  anchor,
+  onAnchor,
   day,
 }: {
+  /** The calendar anchor's status (a one-off task's "Follows"), once its section has said it. */
+  anchor: AnchorStatus | null;
+  /** Brings the anchor's section into view. */
+  onAnchor(): void;
   row: RowModel;
   taskId: string;
   me: string;
@@ -874,7 +973,20 @@ function Facts({
             </>
           )}
         </FactCell>
-        {revision !== null && cadence !== null ? (
+        {cadence === null && anchor !== null ? (
+          // A one-off task: what it follows (its calendar anchor) in place of "Once" (the Final design's "Follows").
+          <FactCell
+            as="button"
+            label={copy.FACTS.follows}
+            data-fact="anchor"
+            data-anchor-fact={anchor.state}
+            dot={anchor.attention ? "warning" : undefined}
+            onClick={onAnchor}
+          >
+            <span>{anchor.text}</span>
+            {chevron}
+          </FactCell>
+        ) : revision !== null && cadence !== null ? (
           <FactCell
             as="button"
             ref={repeatRef}
@@ -924,7 +1036,7 @@ function Facts({
         )}
         <FactCell
           as="button"
-          label={copy.FACTS.follows}
+          label={copy.FACTS.needsFirst}
           data-fact="follows"
           data-follows={read.kind}
           dot={follows.dot}

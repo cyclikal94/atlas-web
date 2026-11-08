@@ -344,6 +344,31 @@ const queue = async (page: Page, account: string) =>
       created_seq: number;
     }>
   ).sort((a, b) => a.created_seq - b.created_seq);
+/**
+ * IF-4 (WEB-09d, DELEGATED-INHERITED-FLAKES-3-20261107; I-LS1 on m2-pro-02, harness only): the create dialog's mount starts the read of
+ * the sharing defaults, and `createList` captures them at the act ("defaults this device never fetched hold the create for review",
+ * D-10b-3). A create pressed before that read lands is held for the person's review and is never sent by a retry. This waits, after the
+ * dialog opened at `opened` (the page's `Date.now()`), until the persisted record was fetched no earlier than that: the source offers a
+ * fetched record to memory before it persists it (`defaults-source.ts`), so the dialog's own read is then what the act captures.
+ */
+const untilDefaultsTakenIn = (page: Page, account: string, opened: number) =>
+  expect
+    .poll(
+      () =>
+        page.evaluate(
+          ({ a, since }) =>
+            window.__atlasData
+              ?.defaultsRecord(a)
+              .then((r) => r !== null && r.fetched_at >= since),
+          { a: account, since: opened },
+        ),
+      {
+        timeout: 30_000,
+        message:
+          "premise: the create dialog's read of the sharing defaults has been taken in before the create",
+      },
+    )
+    .toBe(true);
 const pickerBox = (page: Page, taskId: string) =>
   page.getByRole("dialog").locator(`[data-picker-task="${taskId}"] input`);
 
@@ -357,9 +382,11 @@ test.describe("I-LS1: create, add, rename and remove through the UI (L2, L6, L7,
     const t2 = await makeTask(page, id, `I-LS1 two ${stamp}`);
     await untilCached(page, id.account_id, t1);
     await untilCached(page, id.account_id, t2);
+    const opened = await page.evaluate(() => Date.now());
     await page
       .getByRole("button", { name: "New list" })
       .click({ timeout: 60_000 });
+    await untilDefaultsTakenIn(page, id.account_id, opened);
     await page.getByRole("dialog").getByLabel("Name").fill(`I-LS1 ${stamp}`);
     await page
       .getByRole("dialog")

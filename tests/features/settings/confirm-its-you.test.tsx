@@ -198,8 +198,15 @@ describe("Confirm it's you (G-23)", () => {
     fireEvent.click(
       within(region).getByRole("button", { name: CONFIRM_LABEL }),
     );
+    // F42-1 hand-off (WEB13B-F42-1-20261106, WEB-13b revision 35): the refusal is awaited by an ASSERTION (a query that finds nothing is
+    // null), so a page that loses it (MU-8C-R3d) fails here by an assertion, never by `findByText`'s thrown error.
+    await waitFor(() =>
+      expect(
+        within(region).queryByText("That username or password isn't right."),
+      ).not.toBeNull(),
+    );
     expect(
-      await within(region).findByText("That username or password isn't right."),
+      within(region).queryByText("That username or password isn't right."),
     ).toBeInTheDocument();
     expect(returnDestination.peek()).toBeNull();
     expect(authFeedback.carriedFailure()).toBeNull();
@@ -265,8 +272,14 @@ describe("Confirm it's you (G-23)", () => {
       definitive: true,
       stage: "exchange",
     } as AttemptOutcome);
+    // F42-1 hand-off (WEB-13b revision 35): awaited by an assertion, as above.
+    await waitFor(() =>
+      expect(
+        screen.queryByText("That username or password isn't right."),
+      ).not.toBeNull(),
+    );
     expect(
-      await screen.findByText("That username or password isn't right."),
+      screen.queryByText("That username or password isn't right."),
     ).toBeInTheDocument();
     expect(returnDestination.peek()).toBe(newer);
   });

@@ -710,9 +710,7 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
     expect(confirmButton()).toBeDisabled();
-    expect(
-      within(screen.getByRole("dialog")).getByText(copy.REVIEW_NOW_FAILED),
-    ).toBeVisible();
+    expectReviewNowFailureShown();
     const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
     expect(retry).not.toBeNull();
     return retry as HTMLElement;
@@ -727,6 +725,42 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     fireEvent.click(retry);
     await waitFor(() => expect(confirmButton()).not.toBeDisabled());
   });
+
+  /**
+   * The current review's "Now" panel, which must exist (exactly one review is mounted: MU-S50 reviews one kind). The review's failure is
+   * asserted where the review shows it, at the opening (expectStaleOpeningRefused) and after a Retry. Its Banner also announces the same
+   * sentence: the assertive live region is emptied and re-written on the next animation frame (announcer.tsx), so once that frame has
+   * run the document holds the sentence twice and a document-wide single-element query throws "Found multiple elements" whatever the
+   * review shows. Whether the frame runs before `waitFor` returns is a scheduling race (family sharing-review-announcer-query-race).
+   * Post-Retry: review 17/18, coordinator assignment of 1 November 2026, SHA-256 9f8074f2…3b16. Opening: review 20, approved action A
+   * of 1 November 2026, SHA-256 9d348077…2ec5.
+   */
+  function reviewNowPanel() {
+    const panels = document.querySelectorAll<HTMLElement>("[data-review-now]");
+    expect(panels).toHaveLength(1);
+    return panels[0] as HTMLElement;
+  }
+
+  /**
+   * The review's failure sentence is shown where the review shows it: in its "Now" panel (WEB-13b reviews 17/18/20) and, visibly, inside
+   * the dialogue (accepted main's scope, kept by the base merge of 5 November 2026). Every check is an ASSERTION, never a throwing query:
+   * a mutant that takes the sentence away (MU-1184, the opening's boundary reused, accepts the Retry's stale answer) must fail here as an
+   * assertion, or the mutation runner judges the run unsound (INVALID beside the expected catch). Review 41 F41-1, family
+   * sharing-review-announcer-query-race: the merge had kept main's `within(dialog).getByText(...)` ahead of the panel-scoped check, and
+   * under MU-1184 it threw. Both scopes exclude the announcer's second copy of the sentence (the live region is outside the dialogue).
+   */
+  function expectReviewNowFailureShown() {
+    expect(
+      within(reviewNowPanel()).queryByText(copy.REVIEW_NOW_FAILED),
+    ).not.toBeNull();
+    const dialog = screen.queryByRole("dialog");
+    expect(dialog).not.toBeNull();
+    const shown = within(dialog as HTMLElement).queryByText(
+      copy.REVIEW_NOW_FAILED,
+    );
+    expect(shown).not.toBeNull();
+    expect(shown).toBeVisible();
+  }
 
   test("MU-S50: a Retry answered with a record issued before the Retry (199 for a Retry at 200) is still not 'Now'", async () => {
     const world = staleOpening();
@@ -743,9 +777,7 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
         document.querySelector('[aria-live="assertive"]'),
       ).toHaveTextContent(copy.REVIEW_NOW_FAILED),
     );
-    expect(
-      within(screen.getByRole("dialog")).getByText(copy.REVIEW_NOW_FAILED),
-    ).toBeVisible();
+    expectReviewNowFailureShown();
     expect(
       screen.queryByRole("button", { name: copy.TRY_AGAIN }),
     ).not.toBeNull();

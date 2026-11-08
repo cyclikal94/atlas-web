@@ -66,6 +66,11 @@ interface Entry {
   /** The last editor's session was kept for a visit to the sync screens: the next editor resumes it (no new session at its mount). */
   kept: boolean;
   /**
+   * WEB-13b revision 37 (Review 46, F-R46-1): what the model asks, while no editor shows the context, of a kept session whose input outlives
+   * its editor (`keep`'s `unfinished`): a file chosen or being read stays input no copy can hold after its dialog has gone. Null otherwise.
+   */
+  keptProbe: (() => boolean) | null;
+  /**
    * Revision 38 (S12): the last editor unmounted in this turn; its dismissal is decided after it (an editor mounted again in the same turn,
    * as React's development remount does, resumes the session: no dismissal, no new session over what it shows).
    */
@@ -101,6 +106,7 @@ function entryFor(
     editor: null,
     hosts: new Set(),
     kept: false,
+    keptProbe: null,
     leaving: null,
     model: createRecoverableModel({
       formContext: context,
@@ -220,8 +226,15 @@ export interface RecoverableEditor<T> extends RecoveryControls {
   /**
    * The editor's session is kept for a visit to the sync screens: its unmount is not a dismissal. Revision 39 (DA-DEVICE-NAME): given the
    * editor's input, the editor's host opens it again on that input when it mounts (the person comes back), as for a restored copy.
+   *
+   * WEB-13b revision 37 (Review 46, F-R46-1): given `unfinished`, the kept input OUTLIVES the editor (an editing session its owner keeps in
+   * page memory, `session-recovery.ts`), and so may input no copy can hold (a file chosen or still being read). From the editor's unmount
+   * until an editor shows the context again or the session ends (`end`, `discard`, `begin`), the model asks `unfinished` instead of the
+   * editor's own check, so an accepted update STOPS while it says true (retry, or "Discard and reload anyway") instead of reloading over
+   * that input. It must read the session, never the unmounted editor. Without it (an editor whose input is its own state), nothing changes:
+   * what the editor showed is what the model holds once it has gone.
    */
-  keep(value?: T): void;
+  keep(value?: T, unfinished?: () => boolean): void;
   /** The person dismissed the editor (Cancel, Close, Escape): its copies are discarded. */
   end(): Promise<DiscardResult>;
   /**
@@ -299,8 +312,12 @@ export function useRecoverableEditor<T>(options: {
     }
     entry.leaving = null;
     const hide = entry.model.show();
+    // An editor shows the context again: what it shows is what the model asks (a kept session's own check stops being asked).
+    const keptProbe = entry.keptProbe;
+    entry.keptProbe = null;
     if (latest.current.unfinished)
       entry.model.probe(() => latest.current.unfinished?.() ?? false);
+    else if (keptProbe !== null) entry.model.probe(null);
     // A copy the opener's look restored before this editor mounted: its input from now on (the model already holds it).
     const pending = entry.pending;
     entry.pending = null;
@@ -327,7 +344,8 @@ export function useRecoverableEditor<T>(options: {
     entry.kept = false;
     return () => {
       if (entry.editor === editor) entry.editor = null;
-      entry.model.probe(null);
+      // Kept with its session's own check before this unmount (`keep`): the model asks that from now on; otherwise no editor's.
+      entry.model.probe(entry.kept ? entry.keptProbe : null);
       hide();
       // Revision 40 (R40-GATE): a pre-account editor's unmount is never its journey's end (a gate, a host replaced for a moment).
       if (entry.kept || entry.preAccount) return;
@@ -354,11 +372,18 @@ export function useRecoverableEditor<T>(options: {
     pageFormRegistry.frozen,
   );
   const model = entry.model;
+  /** WEB-13b revision 37 (F-R46-1): the kept session's own check is no longer asked (its session ended, or another began). */
+  const release = (): void => {
+    if (entry.keptProbe === null) return;
+    entry.keptProbe = null;
+    if (entry.editor === null) model.probe(null);
+  };
   return {
     view,
     locked,
     begin(value) {
       entry.kept = false;
+      release();
       model.begin(latest.current.encode(value));
     },
     edit(value) {
@@ -367,17 +392,26 @@ export function useRecoverableEditor<T>(options: {
       return true;
     },
     submitting: () => model.submitting(),
-    keep(value) {
+    keep(value, unfinished) {
       entry.kept = true;
+      if (unfinished !== undefined) {
+        entry.keptProbe = unfinished;
+        // Kept after the editor's own unmount (the session bridge's order): the model asks the session from now on.
+        if (entry.editor === null) model.probe(unfinished);
+      }
       if (value === undefined) return;
       // The host's next mount opens the editor on it (a session kept: the editor resumes it, never a new one).
       entry.pending = latest.current.encode(value);
     },
-    end: () => model.end(),
+    end: () => {
+      release();
+      return model.end();
+    },
     discard() {
       if (!model.accepting()) return Promise.resolve<DiscardResult>("failed");
       const value = (latest.current.baseline ?? latest.current.start)();
       entry.kept = false;
+      release();
       const removal = model.discard(latest.current.encode(value));
       latest.current.reset(value);
       return removal;

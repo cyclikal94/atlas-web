@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import * as sharingCopy from "../../src/features/sharing/copy";
-import { HouseholdsMinimal } from "../../src/features/sharing/HouseholdsMinimal";
+import * as householdsCopy from "../../src/features/sharing/households/copy";
 import { encodePolicyDraft } from "../../src/features/sharing/model/recovery-fields";
 import { ResourcePolicyEditor } from "../../src/features/sharing/ResourcePolicyEditor";
 import { forgetAllRetained } from "../../src/features/sharing/retained";
@@ -26,7 +26,6 @@ import { recoveryLockName } from "../../src/lib/form-recovery/tab-identity";
 import { noteNavigation } from "../../src/lib/pwa/navigation";
 import { installMatchMedia } from "../helpers/match-media";
 import {
-  FLAT,
   HOME,
   household,
   PRIYA,
@@ -45,6 +44,15 @@ import {
   withRecovery,
 } from "../support/recovery-editors";
 import { fakeSharingApi, ok } from "../support/sharing/fake-api";
+import {
+  type FakeHouseholdApi,
+  fakeHouseholdApi,
+} from "../support/sharing/fake-households";
+import {
+  homeOf,
+  JAMIE_ID,
+  mountHouseholds as mountHouseholdRoute,
+} from "../support/sharing/households";
 import { merged, mountSharing, RESOURCE } from "../support/sharing/mount";
 
 /**
@@ -67,57 +75,65 @@ afterEach(() => {
   for (const holder of ["OLD", "LIVE"]) recoveryLocks().leave(holder);
 });
 
-const home = household({
-  id: HOME,
-  members: [
-    { account_id: SHARING_ME, username: "me", role: "manager" },
-    { account_id: SAM, username: "sam", role: "member" },
-  ],
-});
 const textCopy = (text: string) => JSON.stringify({ v: 1, text });
 const CREATE = "household-create";
 const INVITE = `household-invite:${HOME}`;
 const OLDER = "2026-11-03T10:00:00.000Z";
 const NEWER = "2026-11-03T11:00:00.000Z";
 
-function mountHouseholds() {
-  const api = fakeSharingApi();
-  api.defaults.households = ok([home]);
-  const view = mountSharing(<HouseholdsMinimal />, {
-    env: withRecovery(stubEnv()),
-    api,
-  });
+/**
+ * WEB-12b merge of 2f42ac35, correction M-1: the household screen's two inline forms (`HouseholdsMinimal`) are WEB-12b's route-addressed
+ * dialogs now, New household (`/sharing/new`) and a household's Invitations (`/sharing/households/<id>/invitations`), each with its own
+ * look when it opens; their recovery is `households/form-recovery.ts` over WEB-14a's model. A case that had both forms on the page has
+ * them one dialog after the other.
+ */
+function mountHouseholds(path = "/sharing/new") {
+  const api = fakeHouseholdApi();
+  api.defaults.households = ok([homeOf()]);
+  api.defaults.lookup = (username) => ok([{ id: JAMIE_ID, username }]);
+  const view = mountHouseholdRoute(path, { env: withRecovery(stubEnv()), api });
   return { api, view };
 }
+const INVITATIONS = `/sharing/households/${HOME}/invitations`;
 const createName = () =>
-  screen.getByLabelText(sharingCopy.CREATE_NAME) as HTMLInputElement;
+  screen.getByLabelText(householdsCopy.NAME_LABEL) as HTMLInputElement;
 const createForm = () => createName().closest("form") as HTMLElement;
 const invitee = () =>
-  screen.getByLabelText(sharingCopy.INVITE_LABEL("Home")) as HTMLInputElement;
+  screen.getByLabelText(householdsCopy.USERNAME_LABEL) as HTMLInputElement;
 const inviteForm = () => invitee().closest("form") as HTMLElement;
+/** A focusable place in the New household dialog other than its field (the old case used the invitation field beside it). */
+const elsewhere = () =>
+  screen.getByRole("button", { name: householdsCopy.CANCEL_ACTION });
 const checkIn = (form: HTMLElement) =>
   within(form).queryByRole("button", { name: CHECK_AGAIN });
 const restoreIn = (form: HTMLElement, savedAt: string) =>
   within(form).queryByRole("button", { name: RESTORE_COPY(savedAt) });
 const restoredIn = (form: HTMLElement) =>
   form.querySelector('[data-recovery-state="restored"]');
-const sent = (api: ReturnType<typeof fakeSharingApi>) =>
-  api.calls.filter((call) => !call.op.startsWith("read"));
+const sent = (api: FakeHouseholdApi) =>
+  api.calls.filter((call) => call.op === "command" || call.op === "lookup");
 
-describe("D-R53-1: Check saved copies again (household screen)", () => {
-  test("OMITTED-ALL under an older build's exclusive probe: both forms say a copy is withheld and restore nothing; after release each form's explicit check offers its copy, never restores it; nothing sent or removed", async () => {
+describe("D-R53-1: Check saved copies again (the household dialogs; M-1)", () => {
+  test("OMITTED-ALL under an older build's exclusive probe: both forms say a copy is withheld and restore nothing; after release the open form's explicit check offers its copy, never restores it; each dialog's look is its own; nothing sent or removed", async () => {
     await left(CREATE, textCopy("Left flat"), { tab: "gone-tab" });
     await left(INVITE, "left-invitee", { tab: "gone-tab" });
     recoveryLocks().held.set(recoveryLockName("gone-tab"), "OLD");
-    const { api } = mountHouseholds();
+    const { api, view } = mountHouseholds();
     await waitFor(() => expect(checkIn(createForm())).not.toBeNull());
-    await waitFor(() => expect(checkIn(inviteForm())).not.toBeNull());
-    for (const form of [createForm(), inviteForm()]) {
-      expect(within(form).queryByText(WITHHELD)).not.toBeNull();
-      expect(restoredIn(form), "nothing restored").toBeNull();
-      expect(form.querySelector("[data-recovery-alternatives]")).toBeNull();
-    }
+    expect(within(createForm()).queryByText(WITHHELD)).not.toBeNull();
+    expect(restoredIn(createForm()), "nothing restored").toBeNull();
+    expect(
+      createForm().querySelector("[data-recovery-alternatives]"),
+    ).toBeNull();
     expect(createName().value).toBe("");
+    // WEB-12b: the invitation form is another dialog; it looks when it opens, under the same probe.
+    await view.navigate(INVITATIONS);
+    await waitFor(() => expect(checkIn(inviteForm())).not.toBeNull());
+    expect(within(inviteForm()).queryByText(WITHHELD)).not.toBeNull();
+    expect(restoredIn(inviteForm()), "nothing restored").toBeNull();
+    expect(
+      inviteForm().querySelector("[data-recovery-alternatives]"),
+    ).toBeNull();
     expect(invitee().value).toBe("");
     // The old probe ends; nothing looks again by itself.
     recoveryLocks().leave("OLD");
@@ -129,31 +145,42 @@ describe("D-R53-1: Check saved copies again (household screen)", () => {
       lists,
       "no read without the person's request",
     ).not.toHaveBeenCalled();
-    const check = checkIn(createForm()) as HTMLElement;
+    const check = checkIn(inviteForm()) as HTMLElement;
     check.focus();
     fireEvent.click(check);
     await waitFor(() =>
       expect(
-        within(createForm()).queryByText(CHECKED_FOUND),
+        within(inviteForm()).queryByText(CHECKED_FOUND),
         "the check says what it found",
       ).not.toBeNull(),
     );
     expect(
-      createForm().querySelector("[data-recovery-alternatives]"),
+      inviteForm().querySelector("[data-recovery-alternatives]"),
       "the copy is offered",
     ).not.toBeNull();
-    expect(createName().value, "offered, never restored by the check").toBe("");
-    expect(restoredIn(createForm())).toBeNull();
-    expect(checkIn(createForm()), "the action stays once used").toHaveFocus();
-    expect(
-      within(inviteForm()).queryByText(WITHHELD),
-      "the invitation's look is its own: still withheld",
-    ).not.toBeNull();
-    fireEvent.click(checkIn(inviteForm()) as HTMLElement);
+    expect(invitee().value, "offered, never restored by the check").toBe("");
+    expect(restoredIn(inviteForm())).toBeNull();
+    expect(checkIn(inviteForm()), "the action stays once used").toHaveFocus();
+    // Back in New household: its look is its own and nothing looks again by itself (its model is the page's, resumed): still withheld;
+    // its check offers its copy, never restores it.
+    const reads = lists.mock.calls.length;
+    await view.navigate("/sharing/new");
     await waitFor(() =>
-      expect(within(inviteForm()).queryByText(CHECKED_FOUND)).not.toBeNull(),
+      expect(
+        within(createForm()).queryByText(WITHHELD),
+        "the create form's look is its own: still withheld",
+      ).not.toBeNull(),
     );
-    expect(invitee().value).toBe("");
+    expect(
+      lists.mock.calls.length,
+      "opening it again reads nothing by itself",
+    ).toBe(reads);
+    fireEvent.click(checkIn(createForm()) as HTMLElement);
+    await waitFor(() =>
+      expect(within(createForm()).queryByText(CHECKED_FOUND)).not.toBeNull(),
+    );
+    expect(createName().value).toBe("");
+    expect(restoredIn(createForm())).toBeNull();
     expect(await store().list(CREATE)).toHaveLength(1);
     expect(await store().list(INVITE)).toHaveLength(1);
     expect(sent(api), "nothing is sent").toEqual([]);
@@ -210,12 +237,17 @@ describe("D-R53-1: Check saved copies again (household screen)", () => {
   });
 
   test("CONTROL: with nothing withheld no check is shown", async () => {
-    mountHouseholds();
+    const { view } = mountHouseholds();
     await waitFor(() => expect(createName()).not.toBeNull());
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     expect(checkIn(createForm())).toBeNull();
+    await view.navigate(INVITATIONS);
+    await waitFor(() => expect(invitee()).not.toBeNull());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
     expect(checkIn(inviteForm())).toBeNull();
   });
 
@@ -286,7 +318,7 @@ describe("D-R53-2: choosing another saved copy while the restored banner stays s
 
   test("a browser that does not focus a clicked button (focus stays where it was at the choice) still lands on the first field", async () => {
     await twoCopies();
-    invitee().focus();
+    elsewhere().focus();
     fireEvent.click(restoreIn(createForm(), OLDER) as HTMLElement);
     await waitFor(() => expect(createName().value).toBe("Older flat"));
     await waitFor(() => expect(createName()).toHaveFocus());
@@ -316,13 +348,13 @@ describe("D-R53-2: choosing another saved copy while the restored banner stays s
     older.focus();
     fireEvent.click(older);
     await waitFor(() => expect(read.entered()).toBe(true));
-    invitee().focus();
+    elsewhere().focus();
     await act(async () => read.open());
     await waitFor(() => expect(createName().value).toBe("Older flat"));
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
-    expect(invitee(), "the person's new place keeps focus").toHaveFocus();
+    expect(elsewhere(), "the person's new place keeps focus").toHaveFocus();
   });
 
   test("a navigation while the choice is read ends its request", async () => {
@@ -493,158 +525,15 @@ describe("revision 55: an applied choice keeps focus against a late earlier rest
     sessionStorage.clear();
     noteNavigation();
   });
-  /** Holds the recovery listing of `context` once read (entered/release barrier). */
-  function holdList(context: string) {
-    let open: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    let entered = false;
-    const list = store().list.bind(store());
-    vi.spyOn(store(), "list").mockImplementation(async (which) => {
-      const answer = await list(which);
-      if (which === context) {
-        entered = true;
-        await gate;
-      }
-      return answer;
-    });
-    return { entered: () => entered, release: () => open() };
-  }
   const settle = () =>
     act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-  test.each([true, false])(
-    "T-F10 (Review 54 F2): the create form holds the automatic grant; deliberate choice=%s; then the invitation form (earlier) restores late",
-    async (choice) => {
-      noteNavigation();
-      await left(INVITE, textCopy("delayed-invitee"), {
-        tab: "gone-invite",
-        savedAt: NEWER,
-      });
-      await left(CREATE, textCopy("Older name"), {
-        tab: "gone-create-old",
-        savedAt: OLDER,
-      });
-      await left(CREATE, textCopy("Newer name"), {
-        tab: "gone-create-new",
-        savedAt: NEWER,
-      });
-      const gate = holdList(INVITE);
-      const { api } = mountHouseholds();
-      await waitFor(() => expect(gate.entered()).toBe(true));
-      await waitFor(() => expect(createName().value).toBe("Newer name"));
-      await waitFor(() => expect(createName()).toHaveFocus());
-      expect(
-        (invitee().compareDocumentPosition(createName()) &
-          Node.DOCUMENT_POSITION_FOLLOWING) !==
-          0,
-        "premise: the invitation form precedes the create form",
-      ).toBe(true);
-      if (choice) {
-        const older = restoreIn(createForm(), OLDER) as HTMLElement;
-        older.focus();
-        fireEvent.click(older);
-        await waitFor(() => expect(createName().value).toBe("Older name"));
-        await waitFor(() => expect(createName()).toHaveFocus());
-        expect(older.isConnected).toBe(false);
-      }
-      await act(async () => gate.release());
-      await waitFor(() => expect(invitee().value).toBe("delayed-invitee"));
-      await settle();
-      expect(sent(api), "nothing is sent").toEqual([]);
-      expect(createName().value).toBe(choice ? "Older name" : "Newer name");
-      if (choice)
-        expect(
-          createName(),
-          "F-R54-1 (a): the applied choice keeps focus",
-        ).toHaveFocus();
-      else
-        expect(
-          invitee(),
-          "CONTROL (D2): the earlier form's late restore takes the automatic grant",
-        ).toHaveFocus();
-    },
-  );
-
-  test.each([true, false])(
-    "T-F10 (manifestation b): an invitation form holds the grant; deliberate choice=%s in the create form; that invitation's copy is discarded; a second invitation restores late",
-    async (choice) => {
-      noteNavigation();
-      const flat = household({
-        id: FLAT,
-        name: "Flat",
-        members: home.members,
-      });
-      const HOME_INVITE = `household-invite:${HOME}`;
-      const FLAT_INVITE = `household-invite:${FLAT}`;
-      await left(HOME_INVITE, textCopy("home-invitee"), {
-        tab: "gone-home",
-        savedAt: NEWER,
-      });
-      await left(FLAT_INVITE, textCopy("flat-invitee"), {
-        tab: "gone-flat",
-        savedAt: NEWER,
-      });
-      await left(CREATE, textCopy("Older name"), {
-        tab: "gone-create-old",
-        savedAt: OLDER,
-      });
-      await left(CREATE, textCopy("Newer name"), {
-        tab: "gone-create-new",
-        savedAt: NEWER,
-      });
-      const gate = holdList(FLAT_INVITE);
-      const api = fakeSharingApi();
-      api.defaults.households = ok([home, flat]);
-      mountSharing(<HouseholdsMinimal />, {
-        env: withRecovery(stubEnv()),
-        api,
-      });
-      const homeInvitee = () =>
-        screen.getByLabelText(
-          sharingCopy.INVITE_LABEL("Home"),
-        ) as HTMLInputElement;
-      const flatInvitee = () =>
-        screen.getByLabelText(
-          sharingCopy.INVITE_LABEL("Flat"),
-        ) as HTMLInputElement;
-      await waitFor(() => expect(gate.entered()).toBe(true));
-      await waitFor(() => expect(homeInvitee().value).toBe("home-invitee"));
-      await waitFor(() => expect(createName().value).toBe("Newer name"));
-      await waitFor(() => expect(homeInvitee()).toHaveFocus());
-      if (choice) {
-        const older = restoreIn(createForm(), OLDER) as HTMLElement;
-        older.focus();
-        fireEvent.click(older);
-        await waitFor(() => expect(createName().value).toBe("Older name"));
-        await waitFor(() => expect(createName()).toHaveFocus());
-      }
-      // The Home invitation's copy is discarded by pointer (the person's focus stays where it is): that form's restored banner goes.
-      const homeForm = homeInvitee().closest("form") as HTMLElement;
-      fireEvent.click(
-        within(homeForm).getByRole("button", { name: /Discard instead/ }),
-      );
-      await waitFor(() => expect(restoredIn(homeForm)).toBeNull());
-      await act(async () => gate.release());
-      await waitFor(() => expect(flatInvitee().value).toBe("flat-invitee"));
-      await settle();
-      expect(sent(api).filter((call) => call.op !== "discard")).toEqual([]);
-      if (choice)
-        expect(
-          createName(),
-          "F-R54-1 (b): the grant holder's withdrawal opens no window: the applied choice keeps focus",
-        ).toHaveFocus();
-      else
-        expect(
-          flatInvitee(),
-          "CONTROL (documented D2 withdrawal): with no choice the late restore takes nobody's focus",
-        ).toHaveFocus();
-    },
-  );
-
+  // WEB-12b merge correction M-1: the two T-F10 cases (F-R54-1 (a) and (b)) needed the old household screen's composition, the create
+  // form and one invitation form per managed household on ONE page, so that an earlier form restores late while a later one holds the
+  // grant. WEB-12b shows those forms in separate route-addressed dialogs, so no product page composes them; F-R54-1 stays carried by
+  // `tests/lib/recovery-discard-focus.test.tsx` ("revision 55 (F-R54-1)", (a) and (b)) and `tests/pwa/update-focus.test.tsx` (T-F8).
   test.each(["none", "check", "try again"] as const)(
     "T-L10 (Review 54 C3): the create form's claimed hand-off offered after early input survives an offer look by %s; restoring it works; nothing sent",
     async (how) => {

@@ -277,6 +277,10 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
       count("readEnrolment");
       return { ok: false, kind: "uncertain" };
     },
+    readAnchor: async () => {
+      count("readAnchor");
+      return { ok: true, value: { binding: null } };
+    },
     readJournal: async () => {
       count("readJournal");
       return { ok: true, value: { entries: [], next_after: null } };
@@ -453,7 +457,10 @@ export async function mountTasks(options: {
   timerCopy?: unknown;
   /** WEB-10c revision 2: failed catch-up discoveries by task (`sync_state.materialise_discovery`), as another page recorded them. */
   discovery?: Record<string, object>;
-  /** WEB-10c revision 1: overlay rows (`pending_effects`) seeded with the drafts, so an acknowledged draft's effect still stands. */
+  /**
+   * WEB-10c revision 1: overlay rows (`pending_effects`) seeded with the drafts, so an acknowledged draft's effect still stands. WEB-13b
+   * added the same option (a receipted draft's effect, as its receipt leaves it); the base merge of 6 November 2026 keeps one.
+   */
   effects?: object[];
   /** WEB-10c revision 4: further `sync_state` fields seeded as another page left them (the timer order, fence, scopes and floor). */
   sync?: Partial<SyncStateRow>;

@@ -5,6 +5,7 @@ import {
   accountDatabaseName,
   COMPOSITION_BARRIER_VERSION,
   DECLARED_IDB_VERSION,
+  DELTA_STAGING_VERSION,
   DEXIE_SCHEMA,
   DEXIE_SCHEMA_V1,
   DEXIE_SCHEMA_V3,
@@ -505,6 +506,8 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
         // writes without advancing the composition generation (`model/composition.ts`).
         db.version(COMPOSITION_BARRIER_VERSION).stores({ ...DEXIE_SCHEMA_V3 });
         // Version 4 (WEB-09c) adds `delta_staging` (segmented delta delivery) and moves no data; it is a barrier like version 3.
+        db.version(DELTA_STAGING_VERSION).stores({ ...DEXIE_SCHEMA });
+        // Version 5 (WEB-13b revision 8) changes no store: the same barrier for the cache's invalidation witness (`model/invalidation.ts`).
         db.version(SCHEMA_VERSION).stores({ ...DEXIE_SCHEMA });
         db.on("populate", (tx: Transaction) => {
           // Runs inside the versionchange transaction that CREATES the database. A refusal aborts it: the engine discards the new

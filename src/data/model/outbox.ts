@@ -156,6 +156,14 @@ export interface EnqueueRequest {
    */
   expectDraft?(draft: DraftRow): boolean;
   /**
+   * A content-free precondition of the cache's HISTORY (WEB-13b revision 9, design assessment C2, invariant 6), for an enqueue (W2) only:
+   * the database incarnation and invalidation witness (`SyncFacts.invalidations`) the caller verified its choice against, captured once
+   * when the person pressed and never refreshed. The draft is written only if the enqueue transaction reads the SAME pair, on every
+   * attempt (a fence's retry, a quota hold's readmission); otherwise nothing is written and the answer is `refused / expired`: the cache
+   * was invalidated since. A retry of a save that was already made is recognised first, so an admitted save is never refused afterwards.
+   */
+  continuity?: Continuity;
+  /**
    * For an enqueue only (WEB-11a review 12, R12.1): the save this one FOLLOWS, as its caller reviewed it. The writing transaction reads
    * that draft by its id and writes the new one only while it is stored with exactly this command digest, still names `resourceId` among
    * its primary targets and raised it, and is the save the new one is built on (the transaction's base for `resourceId` is its base plus
@@ -186,6 +194,12 @@ export interface ExpectedPredecessor {
   localId: LocalId;
   /** The `command_digest` of the predecessor's body as the caller read it. */
   digest: string;
+}
+
+/** What `EnqueueRequest.continuity` states: one database's incarnation and its invalidation witness. */
+export interface Continuity {
+  readonly incarnationId: string;
+  readonly invalidations: number;
 }
 
 /**
@@ -563,6 +577,14 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
           expectDraft: (draft: DraftRow) =>
             request.expectDraft?.call(request, draft) === true,
         }),
+    ...(request.continuity === undefined
+      ? {}
+      : {
+          continuity: {
+            incarnationId: request.continuity.incarnationId,
+            invalidations: request.continuity.invalidations,
+          },
+        }),
     ...(request.expectPredecessor === undefined
       ? {}
       : {
@@ -614,6 +636,15 @@ export function validateRequest(request: EnqueueRequest): void {
     )
       throw new OutboxRequestError("join_requires_edit");
   if (versioned > 1) throw new OutboxRequestError("two_versioned_primaries");
+  const continuity = request.continuity;
+  if (
+    continuity !== undefined &&
+    (typeof continuity.incarnationId !== "string" ||
+      continuity.incarnationId === "" ||
+      !Number.isSafeInteger(continuity.invalidations) ||
+      continuity.invalidations < 0)
+  )
+    throw new OutboxRequestError("continuity");
   const predecessor = request.expectPredecessor;
   if (predecessor !== undefined) {
     // A predecessor is named for a version-checked primary target of THIS request: one of another resource would check the wrong row.

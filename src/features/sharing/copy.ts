@@ -18,8 +18,7 @@ export const DEFAULTS_EDIT = "Edit defaults";
 export const DEFAULTS_NONE_YET =
   "These defaults haven't been loaded on this device yet.";
 export const DEFAULTS_LOADING = "Loading your sharing defaults…";
-/** `when` is "at 12:04" or "on 3 Oct at 12:04" (`formatWhen`), so the sentence reads "Checked at 12:04" (8 November 2026: it read "As of at"). */
-export const AS_OF = (when: string) => `Checked ${when}`;
+export const AS_OF = (when: string) => `Last read ${when}`;
 export const ITEM_SHARING_HEADING = "Sharing a single item";
 export const ITEM_SHARING_BODY =
   "Each item you own has its own sharing, opened from the item itself. Its policy overrides these defaults.";
@@ -58,7 +57,7 @@ export const OWNER_KEEPS =
 export const EXCLUSION_RULE =
   "Exclusions apply to every grant: a direct grant cannot override an exclusion or remove a household grant.";
 export const MEMBERS_AS_OF = (when: string) =>
-  `Household members as of ${when}. The server checks membership when someone opens the item.`;
+  `Household members as last read ${when}. The server checks membership when someone opens the item.`;
 export const PARENT_LIMITED = (parent: string) =>
   `Who can see this is also limited by who can see “${parent}”.`;
 export const PARENT_UNNAMED = "the item it belongs to";
@@ -153,6 +152,10 @@ export const LOOKUP_SELF = "That's your own account.";
 export const LOOKUP_NEEDS_CONNECTION = "Needs a connection.";
 export const LOOKUP_FAILED = "Couldn't look that up. Try again.";
 export const LOOKUP_BACK = "Back";
+/** WEB-12b (D-12b-5): the browse read was refused, or listed its first 100 accounts. */
+export const LOOKUP_EXACT_ONLY =
+  "This server finds accounts only by exact username.";
+export const LOOKUP_FIRST_100 = "Showing matches among the first 100 accounts.";
 
 // ---- the defaults editor (WF-SHARING-03) --------------------------------------------------------------------------------------------
 export const DEFAULTS_TITLE = (kind: string) => `Sharing defaults — ${kind}`;
@@ -289,48 +292,9 @@ export const REVIEW_DISCARD_FAILED = "Couldn't discard this change. Try again.";
 export const REVIEW_ROW_BODY =
   "Check who this will be shared with before it is sent.";
 
-// ---- the households demonstration (WEB-12a's subset; WEB-12b owns WF-SHARING-01/02) ------------------------------------------------
-export const HOUSEHOLDS_HEADING = "Your households";
-export const HOUSEHOLDS_SUBSET_NOTE =
-  "Create a household and invite people to it. Full household management comes later.";
-export const HOUSEHOLDS_EMPTY = "You're not in a household.";
-/**
- * Offline, before the complete list was read (WEB-12a design assessment DA-M2): the households the last sharing snapshot recorded, which
- * are only your primary household and the households your defaults name, never every household you're in.
- */
-export const HOUSEHOLDS_FROM_SNAPSHOT =
-  "You're offline. These are the households your last sharing defaults named, not necessarily every household you're in.";
-export const HOUSEHOLDS_SNAPSHOT_NONE =
-  "You're offline. Your last sharing defaults named no households; connect to see every household you're in.";
-export const HOUSEHOLDS_LAST_READ = (when: string) =>
-  `You're offline. Your households as last read ${when}.`;
-export const HOUSEHOLDS_OFFLINE_NONE =
-  "Offline, and this device hasn't loaded your households yet.";
+// ---- shared with the household screens (WEB-12b replaced WEB-12a's demonstration subset; its own copy is `households/copy.ts`) --------
 export const HOUSEHOLDS_LOADING = "Loading your households…";
 export const HOUSEHOLDS_FAILED = "Couldn't load your households.";
-export const HOUSEHOLD_ROLE = (role: "manager" | "member") =>
-  role === "manager" ? "You manage this household" : "You're a member";
-export const HOUSEHOLD_MEMBERS = (n: number) =>
-  n === 1 ? "1 member" : `${n} members`;
-export const PRIMARY_BADGE = "Primary";
-export const CREATE_HEADING = "Create a household";
-export const CREATE_NAME = "Household name";
-export const CREATE_BUTTON = "Create household";
-export const CREATE_NAME_REASON = "Enter a name of 1 to 300 characters.";
-export const CREATED = "Household created.";
-export const INVITE_LABEL = (name: string) =>
-  `Invite to “${name}” by exact username`;
-export const INVITE_BUTTON = "Invite";
-export const INVITE_REASON = "Enter their exact username.";
-export const INVITED = "Invitation sent.";
 export const INVITE_NOT_FOUND = "No account has that exact username.";
-export const INVITATIONS_HEADING = "Invitations for you";
-export const INVITATIONS_EMPTY = "No pending invitations";
-export const INVITATION_FROM = (household: string, expires: string) =>
-  `To join “${household}” · expires ${expires}`;
-export const ACCEPT = "Accept";
-export const DECLINE = "Decline";
-export const ACCEPTED = "Invitation accepted.";
-export const DECLINED = "Invitation declined.";
 export const INVITATION_EXPIRED =
   "That invitation expired or was answered since this list was loaded.";

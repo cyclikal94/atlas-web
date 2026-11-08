@@ -1643,6 +1643,16 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
   ): Promise<Next> {
     const service = b.service;
     if (isStoreFailure(error) && error.cause === "closed") return quiet();
+    /**
+     * The authority this failure was met under (DA-N3, WEB-13b revision 8; handover
+     * `delivery/handoffs/web13b-r7b-n2-n3-approved-20261027.md`): the binding that met it, still standing, and its service. The service
+     * outlives the binding (the leader's unbind ends the binding and the service goes on), so a failure delivered after the binding ended
+     * (its sizing record awaited first, by both callers) must not ADMIT a new count: that count would stop the account's next owner on a
+     * failure it never met. Asked before the counter is written, after its wait, and at the synchronous moment a fallback stop is
+     * created. A count already admitted while the binding stood is committed and stays: only what follows it is this binding's.
+     */
+    const authorised = (): boolean => service.live && alive(b);
+    if (!authorised()) return { when: "event" };
     let stopNow = false;
     let memoryOnly = false;
     try {
@@ -1651,18 +1661,18 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         operation,
         outcome: { kind: "failure" },
       });
-      if (!service.live || !alive(b)) return { when: "event" };
+      if (!authorised()) return { when: "event" };
       stopNow = result.stop;
       stoppedVersion = result.version;
     } catch {
-      if (!service.live || !alive(b)) return { when: "event" };
+      if (!authorised()) return { when: "event" };
       stopNow = true;
       stoppedVersion = null;
       const recorded = recordStop(
         deps.markers,
         service,
         operation,
-        () => service.live,
+        authorised,
         {
           hold: () => memoryStops.add(memoryKey(service, operation)),
         },

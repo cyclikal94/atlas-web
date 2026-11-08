@@ -553,6 +553,39 @@ test("healthy control (serial): both controls, both mutants caught, exit 0, one 
   cleanup(r);
 });
 
+// The mutation-runner time limit (7 November 2026, MUTATION-RUNNER-TIMEOUT-20261107): ONE per-test limit, 20 s, asked of every child,
+// each control and each mutant alike, so their verdicts are comparable; written out here, not imported. Its effect on real Vitest runs
+// (and that ordinary runs keep Vitest's limits) is in scripts/validation/unit-runner-time-limit.test.mjs.
+test("time limit: every control and every mutant child is asked for the same 20 s per-test limit, and the account records it", {
+  timeout: 60_000,
+}, async () => {
+  const r = await start({
+    only: ["MU-1600", "MU-1601"],
+    answer: (l) => (l.id === "control" ? pass(l) : caught(l)),
+  }).done;
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(
+    r.launches.map((l) => [l.request.label, l.request.testTimeoutMs]),
+    [
+      ["control-0", 20_000],
+      ["control-1", 20_000],
+      ["MU-1600", 20_000],
+      ["MU-1601", 20_000],
+    ],
+  );
+  // The request kept beside each child's evidence says the same.
+  for (const label of ["control-0", "control-1", "MU-1600", "MU-1601"])
+    assert.equal(
+      JSON.parse(
+        readFileSync(join(r.out, "work", label, "request.json"), "utf8"),
+      ).testTimeoutMs,
+      20_000,
+      label,
+    );
+  assert.equal(account(r).summary.test_timeout_ms, 20_000);
+  cleanup(r);
+});
+
 test("H7 Q3: the first control fails, so nothing else starts (one launch); every selected mutant is not run", {
   timeout: 60_000,
 }, async () => {

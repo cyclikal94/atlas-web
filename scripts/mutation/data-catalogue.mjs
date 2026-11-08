@@ -21,6 +21,31 @@ import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
 import { ENGINE_10C, UNIT_10C } from "./catalogue-web10c.mjs";
 import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
+import { ENGINE_WEB12B, UNIT_WEB12B } from "./catalogue-web12b.mjs";
+import { ENGINE_13B, UNIT_13B } from "./catalogue-web13b.mjs";
+import { ENGINE_13B_M1, UNIT_13B_M1 } from "./catalogue-web13b-m1.mjs";
+import { UNIT_13B_R1 } from "./catalogue-web13b-r1.mjs";
+import { UNIT_13B_R2 } from "./catalogue-web13b-r2.mjs";
+import { UNIT_13B_R3 } from "./catalogue-web13b-r3.mjs";
+import { UNIT_13B_R4 } from "./catalogue-web13b-r4.mjs";
+import { UNIT_13B_R5 } from "./catalogue-web13b-r5.mjs";
+import { UNIT_13B_R6 } from "./catalogue-web13b-r6.mjs";
+import { UNIT_13B_R7 } from "./catalogue-web13b-r7.mjs";
+import { UNIT_13B_R8 } from "./catalogue-web13b-r8.mjs";
+import { UNIT_13B_R9 } from "./catalogue-web13b-r9.mjs";
+import { UNIT_13B_R10 } from "./catalogue-web13b-r10.mjs";
+import { UNIT_13B_R11 } from "./catalogue-web13b-r11.mjs";
+import { UNIT_13B_R12 } from "./catalogue-web13b-r12.mjs";
+import { UNIT_13B_R13 } from "./catalogue-web13b-r13.mjs";
+import { UNIT_13B_R14 } from "./catalogue-web13b-r14.mjs";
+import { UNIT_13B_R15 } from "./catalogue-web13b-r15.mjs";
+import { ENGINE_13B_R22, UNIT_13B_R22 } from "./catalogue-web13b-r22.mjs";
+import { ENGINE_13B_R23, UNIT_13B_R23 } from "./catalogue-web13b-r23.mjs";
+import { ENGINE_13B_R24, UNIT_13B_R24 } from "./catalogue-web13b-r24.mjs";
+import { UNIT_13B_R25 } from "./catalogue-web13b-r25.mjs";
+import { UNIT_13B_R33 } from "./catalogue-web13b-r33.mjs";
+import { ENGINE_13B_R35 } from "./catalogue-web13b-r35.mjs";
+import { ENGINE_13B_R36, UNIT_13B_R36 } from "./catalogue-web13b-r36.mjs";
 import { ENGINE_WEB18, UNIT_WEB18 } from "./catalogue-web18.mjs";
 import { ENGINE_WEB19, UNIT_WEB19 } from "./catalogue-web19.mjs";
 
@@ -10842,10 +10867,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /shown by the facade at once/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
-        "      if (result.stop) {\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
+        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        // Only the run",
+        "      if (result.stop) {\n        stopsChanged(service);\n        // Only the run",
       ),
   },
   {
@@ -10857,10 +10883,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /shown by the facade at once/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      stops.announce(service, self, { recorded: [operation] });\n      return stall(id, service, operation);\n    }\n    if (!alive(id))",
-        "      return stall(id, service, operation);\n    }\n    if (!alive(id))",
+        '      stops.announce(service, self, { recorded: [operation] });\n      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
+        '      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
       ),
   },
   {
@@ -13150,10 +13177,11 @@ export const UNIT = [
     expect:
       /(nothing is recorded under `queue`|nothing is recorded under `draft:<id>`)/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        () => service.live,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
-        "        () => true,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        authorised,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        () => run !== null && !run.signal.aborted,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
       ),
   },
   {
@@ -13163,11 +13191,17 @@ export const UNIT = [
     file: "src/data/engine/outbox-dispatcher.ts",
     tests: ["tests/data/marker-lifetime.test.ts"],
     expect: /dispatcher: two earlier failures/,
+    // The revision-5 guard after the counter also asks the service: the defect removes the service half of both looks.
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        '      if (!service.live) {\n        if (result.stop) stopsChanged(service);\n        return { when: "event" };\n      }\n      if (result.version !== null) observed.set(operation, result.version);',
-        "      if (result.version !== null) observed.set(operation, result.version);",
+        sub(
+          t,
+          '      if (!service.live) {\n        if (result.stop) stopsChanged(service);\n        return { when: "event" };\n      }\n      if (result.version !== null) observed.set(operation, result.version);',
+          "      if (result.version !== null) observed.set(operation, result.version);",
+        ),
+        "      if (!authorised()) {\n        if (result.stop) {",
+        "      if (run === null || run.signal.aborted) {\n        if (result.stop) {",
       ),
   },
   {
@@ -13178,10 +13212,15 @@ export const UNIT = [
     tests: ["tests/data/marker-lifetime.test.ts"],
     expect: /nothing is recorded under `capture`/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "      if (!service.live) return lifetimeOver(id);\n      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => service.live,",
-        "      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => true,",
+        sub(
+          t,
+          '      if (!service.live) return lifetimeOver(id);\n      if (!authorised()) return { when: "event" };\n      stop = true;',
+          '      if (run === null || run.signal.aborted) return { when: "event" };\n      stop = true;',
+        ),
+        "        authorised,\n        { hold: () => holdMemory(key) },",
+        "        () => run !== null && !run.signal.aborted,\n        { hold: () => holdMemory(key) },",
       ),
   },
   {
@@ -13192,10 +13231,15 @@ export const UNIT = [
     tests: ["tests/data/marker-lifetime.test.ts"],
     expect: /engine: two earlier failures/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "      if (!service.live) return lifetimeOver(id);\n      stop = result.stop;",
-        "      stop = result.stop;",
+        sub(
+          t,
+          "      if (!service.live) return lifetimeOver(id);\n      if (result.version !== null)",
+          "      if (result.version !== null)",
+        ),
+        '      if (!authorised()) return { when: "event" };\n      stop = result.stop;',
+        '      if (run === null || run.signal.aborted) return { when: "event" };\n      stop = result.stop;',
       ),
   },
   {
@@ -13855,10 +13899,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /(receipt write fails three times|claim fails three times)/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        stopsChanged(service);\n        return stall(id, service, operation);",
-        "        return stall(id, service, operation);",
+        "        stopsChanged(service);\n        // Only the run",
+        "        // Only the run",
       ),
   },
   {
@@ -14108,8 +14153,10 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '        if (out.kind === "applied") answered(service);\n        return { when: "event" };\n',
-        '        return { when: "event" };\n',
+        // Re-expressed in WEB-13b revision 4 (same defect): the record of an issued answer after its run ended is disposed of by
+        // `retained`, which the receipt's branch calls; an applied receipt is no longer handed to it.
+        "      if (!alive(id))\n        return retained(\n",
+        '      if (!alive(id) && out.kind === "applied") return { when: "event" };\n      if (!alive(id))\n        return retained(\n',
       ),
   },
   {
@@ -14124,8 +14171,10 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '    if (!alive(id)) {\n      if (out.kind === "applied") answered(service);\n      return { when: "event" };\n    }\n',
-        '    if (!alive(id)) return { when: "event" };\n',
+        // Re-expressed in WEB-13b revision 4 (same defect): the outcome's branch hands the record to `retained`; an applied one is
+        // no longer handed to it.
+        "    if (!alive(id))\n      return retained(\n",
+        '    if (!alive(id) && out.kind === "applied") return { when: "event" };\n    if (!alive(id))\n      return retained(\n',
       ),
   },
   {
@@ -14920,14 +14969,15 @@ export const UNIT = [
     id: "MU-1174",
     title:
       "WEB-12a review 2 R7: after a household change the snapshot is refreshed by a read that may predate the change",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S53/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "      void defaults.acquire(defaults.boundary());\n",
-        "      void defaults.refresh();\n",
+        "  void ctx.defaults.acquire(ctx.defaults.boundary());\n}\n",
+        "  void (ctx.defaults as unknown as { refresh(): Promise<unknown> }).refresh();\n}\n",
       ),
   },
   {
@@ -14952,87 +15002,93 @@ export const UNIT = [
     id: "MU-1178",
     title:
       "WEB-12a review 3 R8: a household Try again that is not sent (offline, closed) forgets the earlier uncertain attempt (a new create is admitted under a new id and key)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S55/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "        if (earlier !== null) {\n          setProblem({\n            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,\n          });\n          return false;\n        }\n        break;\n",
-        "        hold(null);\n        break;\n",
+        "      if (earlier !== null) {\n        hold(memory, { ...earlier, heldBack: false });\n        return result;\n      }\n",
+        "      hold(memory, null);\n",
       ),
   },
   {
     id: "MU-1179",
     title:
       "WEB-12a review 3 R8: the household Try again is admitted offline (two sites: the button is offered, and the action does not check the connection)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S56/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         sub(
           t,
-          "  const retryBlocked = !env.online\n    ? copy.SAVE_OFFLINE_REASON\n    : !env.writable\n",
-          "  const retryBlocked = !env.writable\n",
+          "  return now === null || !now.online\n    ? base.SAVE_OFFLINE_REASON\n",
+          "  return now === null\n    ? base.SAVE_OFFLINE_REASON\n",
         ),
-        "    if (!now.online) return copy.SAVE_OFFLINE_REASON;\n",
-        "",
+        "  if (now === null || !now.online) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
+        "  if (now === null) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
       ),
   },
   {
     id: "MU-1180",
     title:
       "WEB-12a review 3 R8: Reload ends the unresolved household attempt before anything shows what happened to it",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S57/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "                    // Shows the households and invitations again; the unconfirmed change stays to be tried again (R8).\n                    reloadHouseholds();\n",
-        "                    hold(null);\n                    reloadHouseholds();\n",
+        "export function reloadAll(ctx: Ctx): void {\n",
+        "export function reloadAll(ctx: Ctx): void {\n  hold(ctx.memory, null);\n",
       ),
   },
   {
     id: "MU-1181",
     title:
       "WEB-12a review 3 DA-H1: an invitation's directory lookup is not part of the operation (the page is admitted only once it answers, so another command can be sent meanwhile)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S58/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "    const token = admit(false);\n    if (token === null) return false;\n    const api = live.current.api;\n    const found = await untilSent(() => api.lookup(username), {\n      isCurrent: () => owns(token),\n    });\n",
-        "    const api = live.current.api;\n    const found = await untilSent(() => api.lookup(username));\n    const token = admit(false);\n    if (token === null) return false;\n",
+        "  const token = admit(memory, false);\n  if (token === null) return false;\n  memory.note(surface, null);\n  const api = ctx.api;\n  const found = await untilSent(() => api.lookup(username), {\n    isCurrent: () => owns(memory, token),\n  });\n",
+        "  const api = ctx.api;\n  const found = await untilSent(() => api.lookup(username));\n  const token = admit(memory, false);\n  if (token === null) return false;\n  memory.note(surface, null);\n",
       ),
   },
   {
     id: "MU-1182",
     title:
       "WEB-12a review 3 DA-H1: a lookup's continuation sends the invite without checking the connection and the server's compatibility as they are now",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S59/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "    const reason = !live.current.online\n      ? copy.SAVE_OFFLINE_REASON\n      : !live.current.writable\n        ? copy.SAVE_COMPAT_REASON\n        : null;\n",
-        "    const reason: string | null = null;\n",
+        "  const reason = liveReason(memory);\n",
+        "  const reason: string | null = null;\n",
       ),
   },
   {
     id: "MU-1183",
     title:
       "WEB-12a review 3 DA-H1: household admission ignores the operation already owning the page (two submissions in one turn send two commands)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S60/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        "    if (operation.current !== null) return copy.SAVE_BUSY_REASON;\n",
+        "  if (memory.operation !== null) return base.SAVE_BUSY_REASON;\n",
         "",
       ),
   },
@@ -15440,28 +15496,30 @@ export const UNIT = [
     id: "MU-1293",
     title:
       "WEB-12a design assessment DA-M2: offline, an empty B5 household subset says you are in no household",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/HouseholdsPane.tsx",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S82/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
         '      ) : shown.from === "snapshot" && shown.list.length === 0 ? (\n',
-        "      ) : false ? (\n",
+        "      ) : (false as boolean) ? (\n",
       ),
   },
   {
     id: "MU-1294",
     title:
       "WEB-12a design assessment DA-M2: offline, a complete list read on the page is labelled with the B5 snapshot's time",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/HouseholdsPane.tsx",
     tests: ["tests/features/sharing/sharing-page.test.tsx"],
     expect: /MU-S83/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         t,
-        '      ? { from: "complete", list: households.value, at: households.at }\n',
-        '      ? { from: "complete", list: households.value, at: defaults.record?.fetched_at ?? households.at }\n',
+        '      ? { from: "complete", list: complete.value, at: complete.at }\n',
+        '      ? { from: "complete", list: complete.value, at: snapshot?.at ?? complete.at }\n',
       ),
   },
 
@@ -15800,9 +15858,10 @@ export const UNIT = [
     tests: ["tests/data/snapshot-plans.test.ts"],
     expect: /R-2 an abandonment/,
     patch: (t) =>
+      // Re-anchored in WEB-13b revision 8 (R7b): the same branch, which now also moves the invalidation witness; the whole branch removed.
       sub(
         t,
-        '        ...(sync.cache_status === "valid"\n          ? { cache_status: "invalid" as const, cursor: null }\n          : {}),',
+        '        ...(sync.cache_status === "valid"\n          ? {\n              cache_status: "invalid" as const,\n              cursor: null,\n              cache_invalidation_seq: nextInvalidation(sync),\n            }\n          : {}),',
         "",
       ),
   },
@@ -21853,6 +21912,29 @@ export const UNIT = [
   ...UNIT_R24,
   ...UNIT_R25,
   ...UNIT_R26,
+  ...UNIT_13B,
+  ...UNIT_13B_R1,
+  ...UNIT_13B_R2,
+  ...UNIT_13B_R3,
+  ...UNIT_13B_R4,
+  ...UNIT_13B_R5,
+  ...UNIT_13B_R6,
+  ...UNIT_13B_R7,
+  ...UNIT_13B_R8,
+  ...UNIT_13B_R9,
+  ...UNIT_13B_R10,
+  ...UNIT_13B_R11,
+  ...UNIT_13B_R12,
+  ...UNIT_13B_R13,
+  ...UNIT_13B_R14,
+  ...UNIT_13B_R15,
+  ...UNIT_13B_R22,
+  ...UNIT_13B_R23,
+  ...UNIT_13B_R24,
+  ...UNIT_13B_R25,
+  ...UNIT_13B_R33,
+  ...UNIT_13B_R36,
+  ...UNIT_13B_M1,
   // WEB-11a (plan §7.4): unit mutants MU-2101..MU-2132, each caught by the named assertion of its own test.
   {
     id: "MU-2437",
@@ -25053,7 +25135,14 @@ export const UNIT = [
       "WEB-11a R9 F2: a failed read of the person in the editor is taken as no person (the editor shows nothing)",
     file: "src/features/people/field/prerequisites.ts",
     tests: ["tests/features/people/editor-reads.test.tsx"],
-    expect: /the editor's read of the PERSON fails/,
+    // F42-3 inherited hand-off (DELEGATED-WEB13B-F42-3-20261106, beside WEB13B-F42-1-20261106; WEB-13b revision 35): the EXPECTATION
+    // drifted, not the test. WEB-11a revision 17 (e235936, R16.1) made an existing field's person and field one read, said as the field's:
+    // FieldEditorDialog passes the constant READ_WITH_FIELD as the person for an edit, so this line can fail only for "Add a field"
+    // (fieldId null). That revision adapted the edit case (it now expects the field's message, correctly) and added the Add-a-field case
+    // below, but kept this expectation. A/B with each revision's own runner: 4af662a (e235936^) caught by "the editor's read of the
+    // PERSON fails"; e235936 and accepted main 74b0bac wrong_test, caught only by the revision-17 case. The defect and the patch are
+    // unchanged; the expectation names the case that can observe it.
+    expect: /Add a field's read of the person alone fails/,
     patch: (t) =>
       sub(
         t,
@@ -32412,6 +32501,7 @@ export const UNIT = [
       ),
   },
   ...UNIT_WEB11B,
+  ...UNIT_WEB12B,
   // WEB-18 (catalogue-web18.mjs).
   ...UNIT_WEB18,
   ...UNIT_WEB19,
@@ -34345,10 +34435,11 @@ export const ENGINE = [
     grep: "the dispatcher's streak stop of a draft ends on the facade's",
     expect: /the dispatcher's streak stop of a draft ends on the facade's/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
-        "      if (result.stop) {\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
+        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        // Only the run",
+        "      if (result.stop) {\n        stopsChanged(service);\n        // Only the run",
       ),
   },
   {
@@ -34361,10 +34452,11 @@ export const ENGINE = [
     expect:
       /the dispatcher's (marker|memory) stop of a draft ends on the facade's/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      stops.announce(service, self, { recorded: [operation] });\n      return stall(id, service, operation);\n    }\n    if (!alive(id))",
-        "      return stall(id, service, operation);\n    }\n    if (!alive(id))",
+        '      stops.announce(service, self, { recorded: [operation] });\n      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
+        '      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
       ),
   },
   {
@@ -34851,10 +34943,11 @@ export const ENGINE = [
     grep: "R56 dispatcher",
     expect: /R56 dispatcher: the service closed and the database deleted/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        () => service.live,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
-        "        () => true,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        authorised,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        () => run !== null && !run.signal.aborted,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
       ),
   },
   {
@@ -34866,10 +34959,15 @@ export const ENGINE = [
     grep: "R56 engine",
     expect: /R56 engine: the service closed and the database deleted/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "      if (!service.live) return lifetimeOver(id);\n      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => service.live,",
-        "      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => true,",
+        sub(
+          t,
+          '      if (!service.live) return lifetimeOver(id);\n      if (!authorised()) return { when: "event" };\n      stop = true;',
+          '      if (run === null || run.signal.aborted) return { when: "event" };\n      stop = true;',
+        ),
+        "        authorised,\n        { hold: () => holdMemory(key) },",
+        "        () => run !== null && !run.signal.aborted,\n        { hold: () => holdMemory(key) },",
       ),
   },
   {
@@ -35368,23 +35466,24 @@ export const ENGINE = [
     id: "MU-1188",
     title:
       "WEB-12a review 3 R8: (REAL ENGINE) the reviewed defect restored: the household Try again is admitted offline and a Try again not sent forgets the uncertain create (three sites)",
-    file: "src/features/sharing/HouseholdsMinimal.tsx",
+    file: "src/features/sharing/households/operations.ts",
     spec: "tests/e2e/fixture.sharing.spec.ts",
     grep: "E-SH14:",
     expect: /E-SH14:/,
+    // Re-anchored by WEB-12b (HouseholdsMinimal replaced by the household screens): the same defect over the moved code.
     patch: (t) =>
       sub(
         sub(
           sub(
             t,
-            "  const retryBlocked = !env.online\n    ? copy.SAVE_OFFLINE_REASON\n    : !env.writable\n",
-            "  const retryBlocked = !env.writable\n",
+            "  return now === null || !now.online\n    ? base.SAVE_OFFLINE_REASON\n",
+            "  return now === null\n    ? base.SAVE_OFFLINE_REASON\n",
           ),
-          "    if (!now.online) return copy.SAVE_OFFLINE_REASON;\n",
-          "",
+          "  if (now === null || !now.online) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
+          "  if (now === null) return base.SAVE_OFFLINE_REASON;\n  if (!now.writable) return base.SAVE_COMPAT_REASON;\n  if (memory.operation !== null)",
         ),
-        "        if (earlier !== null) {\n          setProblem({\n            message: earlier.sent ? copy.UNCERTAIN : copy.NOT_SENT,\n          });\n          return false;\n        }\n        break;\n",
-        "        hold(null);\n        break;\n",
+        "      if (earlier !== null) {\n        hold(memory, { ...earlier, heldBack: false });\n        return result;\n      }\n",
+        "      hold(memory, null);\n",
       ),
   },
   {
@@ -36009,21 +36108,28 @@ export const ENGINE = [
   {
     id: "MU-2122",
     title:
-      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at version 2: an older build's connection is never closed and it can still open",
+      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at the previous version: an older build's connection is never closed and it can still open",
     file: "src/data/model/schema.ts",
     spec: "tests/e2e/fixture.data-composition.spec.ts",
     grep: "E-CG2:",
     expect: /E-CG2:/,
-    // WEB-09c (schema version 4): "stays at version 2" now means no barrier at all: both the barrier and the current version are 2.
+    // Re-anchored in WEB-13b revision 8 (R7b) at 4 -> 3, and by WEB-09c (schema version 4) at "no barrier at all": both the barrier and
+    // the current version are 2. Re-expressed at the WEB-13b base merge of 5 November 2026 (current version 5, the witness barrier after
+    // WEB-09c's version 4): WEB-09c's form is kept, with the intermediate version 4 brought down to 2 as well, so no barrier is ever
+    // reached. Same defect; E-CG2 (adapted: 50, and version-2, -3 and -4 opens refused) catches it.
     patch: (t) =>
       sub(
         sub(
-          t,
-          "export const SCHEMA_VERSION = 4;",
-          "export const SCHEMA_VERSION = 2;",
+          sub(
+            t,
+            "export const SCHEMA_VERSION = 5;",
+            "export const SCHEMA_VERSION = 2;",
+          ),
+          "export const COMPOSITION_BARRIER_VERSION = 3;",
+          "export const COMPOSITION_BARRIER_VERSION = 2;",
         ),
-        "export const COMPOSITION_BARRIER_VERSION = 3;",
-        "export const COMPOSITION_BARRIER_VERSION = 2;",
+        "export const DELTA_STAGING_VERSION = 4;",
+        "export const DELTA_STAGING_VERSION = 2;",
       ),
   },
 
@@ -36252,6 +36358,13 @@ export const ENGINE = [
   ...ENGINE_R21,
   ...ENGINE_R22,
   ...ENGINE_R23,
+  ...ENGINE_13B,
+  ...ENGINE_13B_R22,
+  ...ENGINE_13B_R23,
+  ...ENGINE_13B_R24,
+  ...ENGINE_13B_R35,
+  ...ENGINE_13B_R36,
+  ...ENGINE_13B_M1,
   // WEB-11a (plan §7.4, N-P1..N-P3): real-engine mutants, each caught by its native case.
   {
     id: "MU-2719",
@@ -36922,6 +37035,7 @@ export const ENGINE = [
       ),
   },
   ...ENGINE_WEB11B,
+  ...ENGINE_WEB12B,
   // WEB-18 (catalogue-web18.mjs).
   ...ENGINE_WEB18,
   ...ENGINE_WEB19,

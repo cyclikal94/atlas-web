@@ -15,10 +15,14 @@ import { DataEnvProvider } from "../../../src/data";
 import { sharingItemPath } from "../../../src/features/sharing";
 import * as copy from "../../../src/features/sharing/copy";
 import { SharingEnvProvider } from "../../../src/features/sharing/env";
+import * as households from "../../../src/features/sharing/households/copy";
+import { HouseholdsEnvProvider } from "../../../src/features/sharing/households/env";
+import { forgetHouseholdsMemory } from "../../../src/features/sharing/households/memory";
 import { installMatchMedia } from "../../helpers/match-media";
 import { record } from "../../support/data/sharing";
 import { stubEnv } from "../../support/data/ui-env";
 import { fakeSharingApi, sharingEnv } from "../../support/sharing/fake-api";
+import { fakeHouseholdApi } from "../../support/sharing/fake-households";
 import { merged, RESOURCE } from "../../support/sharing/mount";
 
 /**
@@ -26,7 +30,10 @@ import { merged, RESOURCE } from "../../support/sharing/mount";
  * providers, over the data env and sharing env doubles. FIXTURE evidence.
  */
 installMatchMedia({ width: 1440 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  forgetHouseholdsMemory();
+});
 
 async function mount(path: string) {
   const env = stubEnv();
@@ -44,7 +51,10 @@ async function mount(path: string) {
       >
         <DataEnvProvider env={env}>
           <SharingEnvProvider value={sharingEnv(api)}>
-            <RouterProvider router={router} />
+            {/* WEB-12b: the household screens' client (production builds it from the session). */}
+            <HouseholdsEnvProvider value={{ api: fakeHouseholdApi() }}>
+              <RouterProvider router={router} />
+            </HouseholdsEnvProvider>
           </SharingEnvProvider>
         </DataEnvProvider>
       </ShellEnvProvider>
@@ -69,7 +79,8 @@ describe("the sharing routes", () => {
       document.querySelector('[data-defaults-kind="field"]'),
     ).toHaveTextContent("Private");
     expect(
-      await screen.findByRole("heading", { name: copy.HOUSEHOLDS_HEADING }),
+      // WEB-12b: the households pane (WF-SHARING-01) replaced the demonstration subset; its heading is the same sentence.
+      await screen.findByRole("heading", { name: households.PANE_HEADING }),
     ).toBeInTheDocument();
   });
 

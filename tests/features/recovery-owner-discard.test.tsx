@@ -13,7 +13,7 @@ import {
 } from "../../src/features/calendars/AddSourceDialog";
 import * as sharingCopy from "../../src/features/sharing/copy";
 import { DefaultsEditor } from "../../src/features/sharing/DefaultsEditor";
-import { HouseholdsMinimal } from "../../src/features/sharing/HouseholdsMinimal";
+import * as householdsCopy from "../../src/features/sharing/households/copy";
 import { emptyPolicy } from "../../src/features/sharing/model/policy-draft";
 import { encodePolicyDraft } from "../../src/features/sharing/model/recovery-fields";
 import { ResourcePolicyEditor } from "../../src/features/sharing/ResourcePolicyEditor";
@@ -58,6 +58,13 @@ import {
   withRecovery,
 } from "../support/recovery-editors";
 import { fakeSharingApi, ok } from "../support/sharing/fake-api";
+import { fakeHouseholdApi, held } from "../support/sharing/fake-households";
+import {
+  HOME_ID,
+  homeOf,
+  JAMIE_ID,
+  mountHouseholds,
+} from "../support/sharing/households";
 import { merged, mountSharing, RESOURCE } from "../support/sharing/mount";
 import { ME } from "../support/tasks/world";
 
@@ -241,40 +248,41 @@ describe("calendar Add source (AddSourceDialog.tsx)", () => {
   });
 });
 
-describe("households: create and invite (HouseholdsMinimal.tsx)", () => {
-  const home = household({
-    id: HOME,
-    members: [
-      { account_id: SHARING_ME, username: "me", role: "manager" },
-      { account_id: SAM, username: "sam", role: "member" },
-    ],
-  });
+/**
+ * WEB-12b maintenance merge of 2f42ac35, correction M-1: WEB-12b replaced `HouseholdsMinimal`'s inline create and invitation forms with
+ * route-addressed dialogs (New household, a household's Invitations) whose drafts live in the households page memory; their recovery is
+ * `households/form-recovery.ts` over WEB-14a's model. The revision 38 schedules (S1, I7) are kept over the dialogs. Revision 52's three
+ * restored invitation forms on ONE screen were an existing composition of the old subset only (one form per managed household); WEB-12b
+ * shows one household's invitation form at a time, so those four cases become one closed tab's copies of two household forms, each
+ * restored when its dialog opens. F-R52-1 stays carried by the two defaults layers below and `tests/lib/recovery-observation.test.tsx`,
+ * F-R52-2 by `tests/lib/recovery-discard-focus.test.tsx`.
+ */
+describe("households: New household and an invitation (WEB-12b's dialogs; M-1, ported from HouseholdsMinimal.tsx)", () => {
   const textCopy = (text: string) => JSON.stringify({ v: 1, text });
-  const mount = () => {
-    const api = fakeSharingApi();
-    api.defaults.households = ok([home]);
-    return mountSharing(<HouseholdsMinimal />, {
-      env: withRecovery(stubEnv()),
-      api,
-    });
+  const INVITE = `household-invite:${HOME_ID}`;
+  const mount = (path: string) => {
+    const api = fakeHouseholdApi();
+    api.defaults.households = ok([homeOf()]);
+    api.defaults.lookup = (username) => ok([{ id: JAMIE_ID, username }]);
+    const t = mountHouseholds(path, { env: withRecovery(stubEnv()), api });
+    return { t, api };
   };
   const createForm = () =>
-    screen
-      .getByLabelText(sharingCopy.CREATE_NAME)
-      .closest("form") as HTMLElement;
+    document.querySelector("[data-households-new]") as HTMLElement;
   const createName = () =>
-    screen.getByLabelText(sharingCopy.CREATE_NAME) as HTMLInputElement;
-  const inviteForm = () =>
-    screen
-      .getByLabelText(sharingCopy.INVITE_LABEL("Home"))
-      .closest("form") as HTMLElement;
+    within(createForm()).getByLabelText(
+      householdsCopy.NAME_LABEL,
+    ) as HTMLInputElement;
   const invitee = () =>
-    screen.getByLabelText(sharingCopy.INVITE_LABEL("Home")) as HTMLInputElement;
+    screen.getByLabelText(householdsCopy.USERNAME_LABEL) as HTMLInputElement;
+  const inviteForm = () => invitee().closest("form") as HTMLElement;
+  const created = () =>
+    screen.findByRole("dialog", { name: householdsCopy.NEW_TITLE });
 
   test("S1 create: newer input survives a late removal, on screen and in the model", async () => {
     await left("household-create", textCopy("Restored flat"));
-    mount();
-    await screen.findByText("Home");
+    mount("/sharing/new");
+    await created();
     await lateDiscard({
       scope: createForm,
       shown: () => createName().value,
@@ -290,10 +298,10 @@ describe("households: create and invite (HouseholdsMinimal.tsx)", () => {
     });
   });
 
-  test("S1 invite: newer input survives a late removal; the create form is untouched", async () => {
-    await left(`household-invite:${HOME}`, textCopy("restored-user"));
-    mount();
-    await screen.findByText("Home");
+  test("S1 invite: newer input survives a late removal; nothing else is dirty", async () => {
+    await left(INVITE, textCopy("restored-user"));
+    mount(`/sharing/households/${HOME_ID}/invitations`);
+    await screen.findByLabelText(householdsCopy.USERNAME_LABEL);
     await lateDiscard({
       scope: inviteForm,
       shown: () => invitee().value,
@@ -303,8 +311,8 @@ describe("households: create and invite (HouseholdsMinimal.tsx)", () => {
       newer: "newer-user",
     });
     expect(invitee().value).toBe("newer-user");
-    expect(createName().value).toBe("");
-    expect(await savedAs(`household-invite:${HOME}`)).toContainEqual({
+    expect(contextsOf(pageFormRegistry.dirty())).toEqual([INVITE]);
+    expect(await savedAs(INVITE)).toContainEqual({
       v: 1,
       text: "newer-user",
     });
@@ -312,7 +320,8 @@ describe("households: create and invite (HouseholdsMinimal.tsx)", () => {
 
   test("CONTROL create: with no newer input the discard clears the name and removes its copy", async () => {
     await left("household-create", textCopy("Restored flat"));
-    mount();
+    mount("/sharing/new");
+    await created();
     await waitFor(() => expect(createName().value).toBe("Restored flat"));
     fireEvent.click(discardButton(createForm()));
     expect(createName().value).toBe("");
@@ -322,152 +331,75 @@ describe("households: create and invite (HouseholdsMinimal.tsx)", () => {
   });
 
   test("I7: a create answered after newer input was typed keeps that input (a send never clears what it did not send)", async () => {
-    const api = fakeSharingApi();
-    api.defaults.households = ok([home]);
-    let answer!: () => void;
-    const answered = new Promise<void>((resolve) => {
-      answer = resolve;
-    });
+    const { t, api } = mount("/sharing/new");
+    const answer = held<{ revision: number }>();
     // The create's answer is held until the newer input has been typed.
-    api.next.management.push(async () => {
-      await answered;
-      return ok({ revision: 1 });
-    });
-    mountSharing(<HouseholdsMinimal />, {
-      env: withRecovery(stubEnv()),
-      api,
-    });
-    await screen.findByText("Home");
+    api.next.command.push(answer.answer);
+    await created();
     fireEvent.change(createName(), { target: { value: "Flat 2" } });
     fireEvent.click(
-      screen.getByRole("button", { name: sharingCopy.CREATE_BUTTON }),
+      screen.getByRole("button", { name: householdsCopy.CREATE }),
     );
-    await waitFor(() => expect(api.sent).toHaveLength(1));
+    await waitFor(() => expect(answer.asked()).toBe(true));
     fireEvent.change(createName(), { target: { value: "Flat 3" } });
     await act(async () => {
-      answer();
-      await answered;
+      answer.release(ok({ revision: 1 }));
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(createName().value).toBe("Flat 3");
+    // WEB-12b: a created household is shown (the dialog closes); the newer name stays New household's draft, dirty.
+    await waitFor(() => expect(createForm()).toBeNull());
     expect(contextsOf(pageFormRegistry.dirty())).toContain("household-create");
+    await t.navigate("/sharing/new");
+    await created();
+    expect(createName().value).toBe("Flat 3");
   });
 
   test("CONTROL I7: a create answered with nothing typed since clears the name", async () => {
-    const api = fakeSharingApi();
-    api.defaults.households = ok([home]);
-    const t = mountSharing(<HouseholdsMinimal />, {
-      env: withRecovery(stubEnv()),
-      api,
-    });
-    await screen.findByText("Home");
+    const { t, api } = mount("/sharing/new");
+    await created();
     fireEvent.change(createName(), { target: { value: "Flat 2" } });
     fireEvent.click(
-      screen.getByRole("button", { name: sharingCopy.CREATE_BUTTON }),
+      screen.getByRole("button", { name: householdsCopy.CREATE }),
     );
-    await waitFor(() => expect(t.api.sent).toHaveLength(1));
-    await waitFor(() => expect(createName().value).toBe(""));
+    await waitFor(() => expect(api.sentCommands).toHaveLength(1));
+    await waitFor(() => expect(createForm()).toBeNull());
+    await t.navigate("/sharing/new");
+    await created();
+    expect(createName().value).toBe("");
+    expect(contextsOf(pageFormRegistry.dirty())).not.toContain(
+      "household-create",
+    );
   });
 
   /**
-   * Revision 52 (Review52 F-R52-2; design assessment Q8): the production household screen renders one invitation form per managed
-   * household, so three restored owners on one screen are an existing composition. Each household's recovery read is held, then released
-   * C, B, A (reverse document order): every value is restored, and focus ends on the first in the page, A, with no gesture before any
-   * focus assertion and nothing sent.
+   * Revision 52's composition, as WEB-12b has it: one closed tab saved both household forms under its one recovery id (a peer flush), then
+   * closed. Each dialog looks when it opens and restores its own copy (a passive observation of that closed owner each time); the invitation
+   * form, restored, has focus; nothing is sent. The CONTROL has the same copies from two closed tabs.
    */
-  const threeHouseholds = () =>
-    [0, 1, 2].map((n) =>
-      household({
-        id: `66666666-6666-4666-8666-66666666666${n}`,
-        name: `House ${n}`,
-        members: [
-          { account_id: SHARING_ME, username: "me", role: "manager" },
-          { account_id: SAM, username: "sam", role: "member" },
-        ],
-      }),
-    );
-  async function threeRestoredInvites(
-    tabs: string[],
-    together = false,
-  ): Promise<void> {
-    const houses = threeHouseholds();
-    const contexts = houses.map((h) => `household-invite:${h.id}`);
-    for (const [n, context] of contexts.entries())
-      await left(context, textCopy(`restored-${n}`), { tab: tabs[n] });
-    const release = new Map<string, () => void>();
-    const entered = new Set<string>();
-    const gates = new Map(
-      contexts.map((c) => [
-        c,
-        new Promise<void>((resolve) => release.set(c, resolve)),
-      ]),
-    );
-    const original = store().list.bind(store());
-    vi.spyOn(store(), "list").mockImplementation(async (c) => {
-      const gate = gates.get(c);
-      if (gate) {
-        entered.add(c);
-        await gate;
-      }
-      return original(c);
+  async function twoRestored(tabs: [string, string]): Promise<void> {
+    await left("household-create", textCopy("restored-create"), {
+      tab: tabs[0],
     });
-    const api = fakeSharingApi();
-    api.defaults.households = ok(houses);
-    mountSharing(<HouseholdsMinimal />, { env: withRecovery(stubEnv()), api });
-    await waitFor(() => expect(entered.size).toBe(3));
-    const fields = houses.map(
-      (h) =>
-        screen.getByLabelText(
-          sharingCopy.INVITE_LABEL(h.name),
-        ) as HTMLInputElement,
+    await left(INVITE, textCopy("restored-invite"), { tab: tabs[1] });
+    const { t, api } = mount("/sharing/new");
+    await created();
+    await waitFor(() => expect(createName().value).toBe("restored-create"));
+    await t.navigate(`/sharing/households/${HOME_ID}/invitations`);
+    await waitFor(() => expect(invitee().value).toBe("restored-invite"));
+    await waitFor(() =>
+      expect(invitee(), "the restored invitation form has focus").toHaveFocus(),
     );
-    if (together) {
-      // Every read answers at once: the three looks observe the same closed owner concurrently.
-      await act(async () => {
-        for (const n of [2, 1, 0]) release.get(contexts[n] as string)?.();
-      });
-      for (const [n, field] of fields.entries())
-        await waitFor(() =>
-          expect(field.value, `invitation ${n} restored`).toBe(`restored-${n}`),
-        );
-      expect(fields[0], "the first in the page has focus").toHaveFocus();
-    }
-    for (const n of together ? [] : [2, 1, 0]) {
-      await act(async () => {
-        release.get(contexts[n] as string)?.();
-      });
-      await waitFor(() => expect(fields[n]?.value).toBe(`restored-${n}`));
-      expect(
-        fields[n],
-        n === 0
-          ? "the first in the page takes focus from the current restored holder"
-          : "this restored form, first in the page so far, takes focus",
-      ).toHaveFocus();
-    }
-    for (const [n, field] of fields.entries())
-      expect(field.value).toBe(`restored-${n}`);
     expect(
-      api.calls.filter((call) => !call.op.startsWith("read")),
+      api.calls.filter((call) => call.op === "command" || call.op === "lookup"),
       "nothing is sent (no invitation, lookup or management command)",
     ).toEqual([]);
   }
 
-  test("revision 52 (F-R52-2): three restored invitations released C, B, A end with focus on A (distinct closed tabs)", async () => {
-    await threeRestoredInvites(["gone-0", "gone-1", "gone-2"]);
+  test("revision 52 (F-R52-1), WEB-12b's dialogs: New household and an invitation left by ONE closed tab are each restored when its dialog opens", async () => {
+    await twoRestored(["gone-tab", "gone-tab"]);
   });
 
-  test("revision 52 (F-R52-2): the same three invitations left by ONE closed tab, reads released C, B, A one at a time, end with focus on A", async () => {
-    await threeRestoredInvites(["gone-tab", "gone-tab", "gone-tab"]);
-  });
-
-  test("revision 52 (F-R52-1): the three invitations left by ONE closed tab, read at once, are all restored; focus on A", async () => {
-    await threeRestoredInvites(["gone-tab", "gone-tab", "gone-tab"], true);
-  });
-
-  test("CONTROL (F-R52-1): three invitations left by three closed tabs, read at once, are all restored; focus on A", async () => {
-    await threeRestoredInvites(["gone-0", "gone-1", "gone-2"], true);
+  test("CONTROL (F-R52-1), WEB-12b's dialogs: the same two forms left by two closed tabs are each restored", async () => {
+    await twoRestored(["gone-0", "gone-1"]);
   });
 });
 

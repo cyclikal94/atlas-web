@@ -86,6 +86,11 @@ export type RefusalReason =
   /** A hand-off's form copies are not as its caller read them, or a draft already has the id (`HandOff`): nothing was stored. */
   | "source_changed"
   /**
+   * The request stated the cache's history its caller verified (`EnqueueRequest.continuity`, WEB-13b revision 9) and the cache has been
+   * invalidated since: nothing was stored. What the caller chose against that history is no longer to be saved.
+   */
+  | "expired"
+  /**
    * The save the request follows (`EnqueueRequest.expectPredecessor`) is not stored as its caller reviewed it, or is no longer the save it
    * would follow: nothing was stored (WEB-11a review 12). The caller keeps the person's input and has them review the current content;
    * it is never resubmitted on their behalf.

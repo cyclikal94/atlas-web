@@ -126,6 +126,13 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     else finished them (the names live in streams this device may not hold, so the line says "done by someone else"). On the phone the
     order is a row of bars at the top, the four acts sit at the bottom without key caps, and a timed task shows a ring
     (`data-focus-ring`, the share in percent) of its time today against its goal ("23 min of 20 min today").
+  - **WEB-13b's calendar anchor on the redesign (merge of 8 November 2026).** The anchor is the frames' "Follows an event or a date":
+    on the task page it is a section of the day's grouped box (`detail/AnchorSection.tsx`, a `GroupedSection`, its dot primary when
+    anchored and amber on a conflict or a refusal) and, for a one-off task, the strip's third cell is "Follows" (what it is anchored to,
+    or "Nothing"; `data-fact="anchor"`; it brings the section into view) where a repeating task shows "Repeats". The prerequisites'
+    cell reads "Needs first" (the frame's "Needs doing first"). On the create form the anchor is a section of the form's grouped box
+    with the same name, shown while the task does not repeat. A calendar review's "Review this move…" (`?move=`) still opens the day's
+    correction with the proposed date and time.
   - **The phone's compact header (phase 13, 8 November 2026).** On the phone Today's big header scrolls with the page; once it has
     scrolled away a slim bar (`data-today-compact`: the date, or the block under it, and the count) sticks at the top. From the tablet
     up the big header itself stays. The fold's rail line is dotted while the days ahead are folded and solid once revealed.
@@ -1264,6 +1271,35 @@ no longer pass for a commit (E-T15, E-T17, E-T20, E-T21, E-T22, E-T41); self-qua
 | Streak tiles "Shared" and "You", unit words, five strip states including "Skipped", no run dates, "On this device" offline | `/tasks/<id>/streak` (jsdom `streak-page.test.tsx`, native E-S2) |
 | Revision 20: the streak strip kept after a local read failed or kept changing: "Atlas couldn't read the tasks saved on this device." (or "kept changing") with "Showing what was last read on this device." and its own "Try again" in "Day by day"; with no database on this device "This task isn't on this device." (existing copy, reused) | `/tasks/<id>/streak` with a failing occurrence read (jsdom `streak-page.test.tsx` R42 block, native E-S4) |
 | Revision 7: "This timer may already have ended. Nothing was saved." when Stop, Discard or a 7-day choice meets a retirement stored before the save | `/tasks/<id>` of a seconds task, or `/tasks/timers`, after another page recorded the session finished (jsdom `timer-block.test.tsx`; not rendered natively) |
+
+## Calendar anchors and review moves (WEB-13b)
+
+* **`create_task` with an anchor.** `CreateTaskInput.anchor` (the contract's `CalendarAnchor`) is sent only when present (never `null`);
+  an anchored create passes `occurrenceId: null, progressId: null`, because the server makes no first occurrence from an anchored task's
+  schedule (its occurrences come from the reference). The new-task form shows "Anchor to a calendar event" only while Repeats is "Doesn't
+  repeat"; the anchor (with the panel's whole state) is kept in the form's input while Repeats hides it, and a repeating task is saved
+  without it and without a warning (PRODUCT-DECISIONS-20261011). Editing a queued anchored create keeps its anchor while the task still
+  does not repeat. The panel is the calendar slice's (`features/calendars/anchors.ts`); its submission never submits the form around it.
+* **The task's "Calendar anchor"** (`detail/AnchorSection.tsx`, after the day, for a task that does not repeat): `TasksApi.readAnchor`
+  (`GET /tasks/{id}/anchor`, strict `parseBinding`) once per visit and identity (`detail/anchor-binding.ts`: a remount reads nothing more,
+  a refusal is noted on arrival, a read never sent leaves nothing, a receipted `set_anchor` reads once more); offline "Binding details need
+  a connection."; the queued `set_anchor` (`setAnchorRequest`, version-checked on the task, `requiresEdit`) with its states. The read is
+  given the task screen's lifetime (`readAnchor(taskId, live)`: the person is at the task's address by its router and the document, `useTaskScreenAt`; WEB-13b R6): `untilSentWhile` asks it, then connectivity, before EVERY admission,
+  the first and each after a `not_sent` wait, and answers `closed` (or `offline`) without sending. `untilSent` and the other reads are
+  unchanged. A stored `set_anchor`'s identity is retired (R2); the panel settles only the revision it submitted (R3). The panel shows ONE
+  editing session (`calendars/anchor-editor.ts`, revision 2, R3a/R3b) owned by the task's visit (`detail/anchor-kept.ts`): the session
+  holds the input, the save being made and its outcome, so a save settles on its own session whether the panel is shown, kept by its
+  in-dialog sync control or shown again (before or after the save completes); Cancel ends only the session it showed, and an ended
+  session's late save changes nothing; the visit's end ends them all. A change's identity (R2) is kept per task for the visit, apart from
+  the sessions. A panel opens on the visit going on WHEN IT OPENS (revision 3, R3c): a section React kept mounted while the person went
+  away and came back in one turn follows the visit going on there once its router, its history and the document are at its address (as
+  the route moves, and again as a panel opens), so its binding is that visit's read and the next panel's input is that visit's; no panel
+  opens on an ended visit (`openPanel` answers null), a panel shown when its visit ends closes, and an unsent read a newer visit's read
+  replaced is not sent. The new-task form keeps the panel's state in its session (`FormInput.panel`).
+* **`?move=` (`model/move.ts`).** "Review this move…" links to `/tasks/<id>?occurrence=<id>&move=<YYYY-MM-DD[THH:MM:SS]>`. The value is read
+  strictly in the lazy detail screen (the entry route's search validation is unchanged, for the first-load budget), consumed ONCE per value,
+  and opens the day's correction only when it is the displayed day and I may correct it; the seed fills only a NEW session (a resumed one
+  keeps what was typed); the value is then removed with `replace`. The dialog says the review is not resolved by saving.
 
 ## Limits
 
