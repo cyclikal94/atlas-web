@@ -311,7 +311,8 @@ export function useRota(taskId: string) {
 }
 
 /** Usernames this page knows (the household membership in the sharing defaults), by account id. */
-function useUsernames(): ReadonlyMap<string, string> {
+/** The usernames this device knows (the household members of my sharing defaults), by account id. */
+export function useUsernames(): ReadonlyMap<string, string> {
   const record = useSharingDefaults().record;
   const out = new Map<string, string>();
   for (const household of record?.snapshot.households ?? [])
@@ -319,7 +320,7 @@ function useUsernames(): ReadonlyMap<string, string> {
       out.set(member.account_id, member.username);
   return out;
 }
-const anonymous = (id: string) => `Someone (${id.slice(0, 4)}…)`;
+export const anonymous = (id: string) => `Someone (${id.slice(0, 4)}…)`;
 
 /**
  * The rota on WF-TASK-01's participation panel (Anyone tasks only; WEB-02 states R2): the turn of the day shown, "Take turns on this task"

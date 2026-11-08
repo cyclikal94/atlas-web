@@ -18,6 +18,7 @@ import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { ME, MO, record } from "../../support/people/records";
 import { fieldRow, peopleWorld, person } from "../../support/people/world";
+import { actions, identityHeader } from "./more-menu";
 
 /**
  * WF-PEOPLE-05 at the component level (A3, A6, A7, A9, A11), with the production providers and routes: "Compare & merge" over the
@@ -943,7 +944,9 @@ describe("entry points and after-effects (A7, A9)", () => {
       0,
     );
     expect(
-      screen.getByRole("button", { name: peopleCopy.RESTORE }),
+      actions(identityHeader() as HTMLElement).getByRole("button", {
+        name: peopleCopy.RESTORE,
+      }),
     ).toHaveProperty("disabled", true);
     act(() => undefined);
   });

@@ -26,6 +26,7 @@ import {
   peopleWorld,
   person,
 } from "../../support/people/world";
+import { actions, findAction } from "./more-menu";
 
 /**
  * Review 8, finding 2 (`people-retained-form-pending-admission`, the ledger's caller): archive and restore have ONE owner per target, the
@@ -213,7 +214,7 @@ describe("review 8, finding 2: the ledger and the detail share the target's clai
       });
     });
     const restore = await waitFor(() => {
-      const button = within(header()).getByRole("button", { name: "Restore" });
+      const button = actions(header()).getByRole("button", { name: "Restore" });
       expect(button).toBeDisabled();
       return button;
     });
@@ -227,9 +228,7 @@ describe("review 8, finding 2: the ledger and the detail share the target's clai
     const w = archivedWorld("person");
     const g = holdEnqueue(w);
     const { router } = await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Restore" }),
-    );
+    fireEvent.click(await findAction("Restore", header));
     await waitFor(() => expect(g.state.entered).toBe(1));
     await act(async () => {
       await router.navigate({ to: "/settings/archived" as never });

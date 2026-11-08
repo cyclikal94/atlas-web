@@ -16,6 +16,12 @@ export const LISTS = {
   noneHere: "No lists here.",
   loading: "Loading your lists",
   choose: "Choose a list to see its tasks.",
+  /** The Final design (8 November 2026): the page's summary line and the row groups. */
+  summary: (n: number, pinned: number, more: boolean) =>
+    `${more ? `${n}+` : n} ${n === 1 && !more ? "list" : "lists"}${pinned > 0 ? ` · ${pinned} pinned to the sidebar` : ""}`,
+  pinned: "Pinned",
+  all: "All lists",
+  archivedGroup: "Archived",
   count: (n: number) => `${n} ${n === 1 ? "task" : "tasks"}`,
   countUnknown: "Number of tasks not known",
   attention: "A change to your lists needs your attention in Sync.",
@@ -25,6 +31,10 @@ export const LISTS = {
 
 export const DETAIL = {
   back: "‹ Lists",
+  /** The Final design: the small word over the list's name, and its summary line. */
+  eyebrow: "List",
+  shared: "shared",
+  onlyYou: "only you",
   rename: "Rename",
   pin: "Pin to sidebar",
   unpin: "Unpin from sidebar",

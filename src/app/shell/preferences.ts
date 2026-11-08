@@ -7,8 +7,6 @@ import { useSyncExternalStore } from "react";
  */
 export const SIDEBAR_STORAGE_KEY = "atlas.sidebar.v1";
 export const PINNED_LISTS_STORAGE_KEY = "atlas.pinned-lists.v1";
-/** Whether Today's "Upcoming" fold is open (the default) or folded away; kept on this device like the sidebar's state. */
-export const UPCOMING_FOLD_STORAGE_KEY = "atlas.upcoming-fold.v1";
 /** No stored choice: the desktop rail is open and the tablet rail is collapsed. */
 export type SidebarPreference = "auto" | "expanded" | "collapsed";
 
@@ -28,7 +26,7 @@ const subscribe = (listener: () => void) => {
       event.key === null ||
       event.key === SIDEBAR_STORAGE_KEY ||
       event.key === PINNED_LISTS_STORAGE_KEY ||
-      event.key === UPCOMING_FOLD_STORAGE_KEY
+      event.key === TASK_WRAPPER_STORAGE_KEY
     )
       listener();
   };
@@ -74,18 +72,6 @@ export function writeSidebarPreference(value: SidebarPreference) {
 }
 export function useSidebarPreference(): SidebarPreference {
   return useSyncExternalStore(subscribe, readSidebarPreference, () => "auto");
-}
-
-export type UpcomingFold = "open" | "folded";
-export function readUpcomingFold(): UpcomingFold {
-  return readRaw(UPCOMING_FOLD_STORAGE_KEY) === "folded" ? "folded" : "open";
-}
-export function writeUpcomingFold(value: UpcomingFold) {
-  writeRaw(UPCOMING_FOLD_STORAGE_KEY, value === "open" ? null : value);
-  notify();
-}
-export function useUpcomingFold(): UpcomingFold {
-  return useSyncExternalStore(subscribe, readUpcomingFold, () => "open");
 }
 
 let pinnedCache: { raw: string | null; value: PinnedList[] } | null = null;
@@ -141,4 +127,32 @@ export function renamePinnedList(id: string, label: string) {
     JSON.stringify(lists.map((l) => (l.id === id ? { ...l, label } : l))),
   );
   notify();
+}
+
+/**
+ * How a task opens from a list on a wide screen (Settings · Layout, the Final design): the task replaces the list (`page`), fills the
+ * right of a split pane (`split`, the default), floats over the list as a side peek (`peek`) or is centred over the dimmed list
+ * (`overlay`). The task itself is the same in all four; only the container changes. The phone always opens it as a page, and a
+ * split pane needs the desktop width: below it the setting falls back to a page.
+ */
+export const TASK_WRAPPER_STORAGE_KEY = "atlas.task-wrapper.v1";
+export type TaskWrapper = "page" | "split" | "peek" | "overlay";
+export const TASK_WRAPPERS: readonly TaskWrapper[] = [
+  "page",
+  "split",
+  "peek",
+  "overlay",
+];
+export function readTaskWrapper(): TaskWrapper {
+  const raw = readRaw(TASK_WRAPPER_STORAGE_KEY);
+  return (TASK_WRAPPERS as readonly string[]).includes(raw ?? "")
+    ? (raw as TaskWrapper)
+    : "split";
+}
+export function writeTaskWrapper(value: TaskWrapper) {
+  writeRaw(TASK_WRAPPER_STORAGE_KEY, value === "split" ? null : value);
+  notify();
+}
+export function useTaskWrapper(): TaskWrapper {
+  return useSyncExternalStore(subscribe, readTaskWrapper, () => "split");
 }

@@ -7,8 +7,12 @@ import {
   useRef,
   useState,
 } from "react";
+import { Breadcrumb } from "../../../components/ui/breadcrumb";
 import { Button } from "../../../components/ui/button";
+import { Pill } from "../../../components/ui/chip";
 import { ChoiceCards } from "../../../components/ui/choice-cards";
+import { FactCell, FactsStrip } from "../../../components/ui/facts-strip";
+import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
 import { Input, inputClass } from "../../../components/ui/input";
 import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -21,11 +25,13 @@ import {
   useSharingDefaults,
 } from "../../../data";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
+import { cn } from "../../../lib/utils";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { DETAIL_COPY } from "../detail/TaskDetail";
 import { useTaskDetail } from "../detail/useTaskDetail";
 import { useTasksEnv } from "../env";
+import { dayLabel } from "../format";
 import {
   completeKept,
   type KeptRecovery,
@@ -65,8 +71,9 @@ import {
   encodeTaskFormInput,
   taskFormContext,
 } from "../model/recovery";
-import { firstSlot, todayIn } from "../model/time";
+import { addDays, firstSlot, todayIn } from "../model/time";
 import { editable } from "../reasons";
+import { TODAY_TITLE } from "../titles";
 import { knownZones } from "../today/TodayPage";
 import { PresetPicker } from "./PresetPicker";
 
@@ -124,6 +131,20 @@ export const FORM_COPY = {
   lockedWho: "Changing who takes part needs a new task",
   save: "Save",
   cancel: "Cancel",
+  /** The Final design (8 November 2026): the task's page in edit mode. */
+  namePlaceholder: "What needs doing",
+  lead: "Give it a name. Everything else is set below, and can change later.",
+  draftKept: "Draft kept if you click away",
+  facts: {
+    when: "When",
+    who: "Who",
+    done: "Done when",
+    missed: "If missed",
+    seenBy: "Seen by",
+    noDate: "No date",
+    anyTime: "any time",
+  },
+  quickDate: { today: "Today", tomorrow: "Tomorrow", none: "No date" },
   saved: "Saved on this device. Not sent yet.",
   reviewNeeded:
     "Saved. Review who gets this task in the sync queue before it's sent.",
@@ -137,10 +158,25 @@ export const FORM_COPY = {
 
 type Mode = { kind: "new" } | { kind: "edit"; taskId: string };
 
+/** The form drawn in a container beside or over another page (Settings · Layout): where its Cancel and its save lead. */
+export interface Embedded {
+  onClose(): void;
+  onSaved(taskId: string): void;
+}
+
 /** WF-TASK-02 (create and revise), with the preset picker for a new task. */
-export function TaskFormPage({ mode }: { mode: Mode }) {
-  if (mode.kind === "edit") return <EditTask taskId={mode.taskId} />;
-  return <NewTask />;
+export function TaskFormPage({
+  mode,
+  embedded,
+}: {
+  mode: Mode;
+  embedded?: Embedded;
+}) {
+  if (mode.kind === "edit")
+    return (
+      <EditTask taskId={mode.taskId} {...(embedded ? { embedded } : {})} />
+    );
+  return <NewTask {...(embedded ? { embedded } : {})} />;
 }
 
 /** The new-task form's editor (R33): one per identity. Its picker's choice is kept apart, until a stage is chosen. */
@@ -157,7 +193,7 @@ const formRecovery = (context: string): KeptRecovery<FormInput> => ({
   decode: decodeTaskFormInput,
 });
 
-function NewTask() {
+function NewTask({ embedded }: { embedded?: Embedded }) {
   const env = useTasksEnv();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const navigate = useNavigate();
@@ -197,7 +233,11 @@ function NewTask() {
           keptAs={keptKey(env.identity, NEW_PICK)}
           onUse={(preset) => setStage({ preset })}
           onScratch={() => setStage({ preset: null })}
-          onClose={() => void navigate({ to: "/tasks", search: {} })}
+          onClose={() =>
+            embedded
+              ? embedded.onClose()
+              : void navigate({ to: "/tasks", search: {} })
+          }
         />
       </>
     );
@@ -205,7 +245,13 @@ function NewTask() {
     stage === "kept" || stage.preset === null
       ? base
       : fromDefinition(stage.preset.title, stage.preset.definition, base);
-  return <TaskForm initial={initial} mode={{ kind: "new" }} />;
+  return (
+    <TaskForm
+      initial={initial}
+      mode={{ kind: "new" }}
+      {...(embedded ? { embedded } : {})}
+    />
+  );
 }
 
 /**
@@ -213,7 +259,13 @@ function NewTask() {
  * (never "not available"), a COMPLETE read that holds no task says it is not on this device, and a later failed refresh keeps the form that
  * is open (with what was typed), saying it is stale.
  */
-function EditTask({ taskId }: { taskId: string }) {
+function EditTask({
+  taskId,
+  embedded,
+}: {
+  taskId: string;
+  embedded?: Embedded;
+}) {
   const view = useTaskDetail(taskId, undefined);
   // The edit's write target (a queued create or revise to edit in place) is read before the form shows, so Save is never offered, or
   // withheld, on a queue that is still loading; the form keeps its own block when it cannot be read.
@@ -257,6 +309,7 @@ function EditTask({ taskId }: { taskId: string }) {
       <TaskForm
         initial={initial}
         outstanding={outstanding}
+        {...(embedded ? { embedded } : {})}
         mode={{
           kind: "edit",
           taskId,
@@ -289,23 +342,6 @@ interface FormInput {
 }
 
 const select = inputClass;
-
-/** A hairline between the form's parts (the Final design, 8 November 2026): the card reads as sections without folding anything. */
-function Divider() {
-  return <div aria-hidden="true" className="h-px bg-border" />;
-}
-
-/** The small label over a group of fields ("When"), in the facts strip's voice. */
-function SectionLabel({ children }: { children: ReactNode }) {
-  return (
-    <>
-      <Divider />
-      <p className="-mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-        {children}
-      </p>
-    </>
-  );
-}
 
 function Field({
   id,
@@ -364,11 +400,13 @@ function TaskForm({
   initial,
   mode,
   outstanding,
+  embedded,
 }: {
   initial: TaskFormState;
   mode: FormMode;
   /** The queue an edit saves into (edit only). */
   outstanding?: Loadable<{ drafts: DraftWithCommand[] }>;
+  embedded?: Embedded;
 }) {
   const env = useTasksEnv();
   const data = useDataEnv();
@@ -392,12 +430,15 @@ function TaskForm({
     () => ({ initial, state: initial }),
     {
       consumed: (_, taskId) => {
-        if (taskId !== null)
-          void navigate({
-            to: "/tasks/$taskId",
-            params: { taskId },
-            search: {},
-          });
+        if (taskId !== null) {
+          if (embedded) embedded.onSaved(taskId);
+          else
+            void navigate({
+              to: "/tasks/$taskId",
+              params: { taskId },
+              search: {},
+            });
+        }
         return null;
       },
       unedited: mode.kind === "new",
@@ -594,10 +635,84 @@ function TaskForm({
   };
 
   const lockedRepeat = editing;
+  // The Final design (8 November 2026): the form is the task's page in edit mode. The name is the large title, the facts strip shows
+  // each choice as a cell that leads to its section, the save row sits under the strip (and at the bottom of the phone's viewport), and
+  // every field lives in a section of one grouped box, so nothing a reader or a test looks for is behind a popover.
+  const sections = useRef<Record<string, HTMLElement | null>>({});
+  const jump = (key: string) => {
+    const section = sections.current[key];
+    if (!section) return;
+    section.scrollIntoView?.({ block: "start" });
+    const field = section.querySelector<HTMLElement>(
+      "input:not([type=hidden]):not(:disabled), select:not(:disabled), button:not(:disabled)",
+    );
+    field?.focus();
+  };
+  const whenValue =
+    state.startDate.trim() === ""
+      ? FORM_COPY.facts.noDate
+      : `${dayLabel(state.startDate)} · ${state.time.trim() === "" ? FORM_COPY.facts.anyTime : state.time}`;
+  const repeatValue =
+    state.repeat === "none"
+      ? FORM_COPY.repeat.none
+      : state.interval.trim() === "1" || state.interval.trim() === ""
+        ? FORM_COPY.repeat[state.repeat]
+        : `${FORM_COPY.repeat[state.repeat]} · ${copy.CADENCE({ frequency: state.repeat, interval: Number(state.interval) || 1 })}`;
+  const saveButton = !env.writable ? (
+    <Button disabled reason={copy.NOT_WRITABLE}>
+      {FORM_COPY.save}
+    </Button>
+  ) : denied ? (
+    <Button disabled reason={FORM_COPY.denied}>
+      {FORM_COPY.save}
+    </Button>
+  ) : !canSave ? (
+    <Button disabled reason={queueFailed ? copy.LOCAL_FAILED : FORM_COPY.wait}>
+      {FORM_COPY.save}
+    </Button>
+  ) : busy ? (
+    <Button disabled reason={copy.SAVING}>
+      {FORM_COPY.save}
+    </Button>
+  ) : (
+    <Button variant="default" type="submit" className="px-5">
+      {FORM_COPY.save}
+    </Button>
+  );
+  const cancel = () =>
+    // Cancel leaves for the task (or the list), which discards what was typed; a save already made stays queued.
+    embedded
+      ? embedded.onClose()
+      : void (mode.kind === "edit"
+          ? navigate({
+              to: "/tasks/$taskId",
+              params: { taskId: mode.taskId },
+              search: {},
+            })
+          : navigate({ to: "/tasks", search: {} }));
+  const section = (
+    key: string,
+    heading: string,
+    summary: string,
+    children: ReactNode,
+    attrs: Record<`data-${string}`, string | undefined> = {},
+  ) => (
+    <GroupedSection
+      {...attrs}
+      sectionRef={(node) => {
+        sections.current[key] = node;
+      }}
+      aria-labelledby={fid(`${key}-heading`)}
+      summary={summary}
+      heading={<h2 id={fid(`${key}-heading`)}>{heading}</h2>}
+    >
+      {children}
+    </GroupedSection>
+  );
   return (
     <form
       ref={formRef}
-      className="atlas-enter flex max-w-[620px] flex-col gap-5"
+      className="atlas-enter flex min-w-0 flex-col gap-5"
       data-task-form={mode.kind}
       data-recovery-ready={recovery?.view.ready === false ? "false" : "true"}
       noValidate
@@ -606,7 +721,13 @@ function TaskForm({
         void save();
       }}
     >
-      <PageHeading>
+      {embedded ? null : (
+        <Breadcrumb
+          items={[{ label: TODAY_TITLE, to: "/today" }]}
+          current={editing ? FORM_COPY.editTitle : FORM_COPY.newTitle}
+        />
+      )}
+      <PageHeading as={embedded ? "h2" : "h1"} eyebrow>
         {editing ? FORM_COPY.editTitle : FORM_COPY.newTitle}
       </PageHeading>
       {recovery ? (
@@ -615,379 +736,504 @@ function TaskForm({
       {/* Held while an update reload is prepared (R40): nothing is typed or saved after the last save. */}
       <fieldset
         disabled={busy || locked}
-        className="flex flex-col gap-5 rounded-xl border bg-card p-5 shadow-sm"
+        className="m-0 flex min-w-0 flex-col gap-5 border-0 p-0"
       >
-        <Field id={fid("title")} label={FORM_COPY.name} error={errors.title}>
-          <input
-            ref={nameRef}
-            {...described("title")}
-            value={state.title}
-            data-field-edge=""
-            className={select}
-            onChange={(e) => set({ title: e.target.value })}
+        <div className="flex items-start gap-4" data-form-header="">
+          <span
+            aria-hidden="true"
+            className="mt-2 flex size-10 flex-none rounded-full border-2 border-dashed border-input"
           />
-        </Field>
-        <SectionLabel>{FORM_COPY.when}</SectionLabel>
-        <div className="grid gap-3 tablet:grid-cols-2">
-          <Field
-            id={fid("repeat")}
-            label={FORM_COPY.repeats}
-            hint={lockedRepeat ? FORM_COPY.locked : FORM_COPY.monthEnd}
-          >
-            <NativeSelect
-              id={fid("repeat")}
-              aria-describedby={`${fid("repeat")}-hint`}
-              value={state.repeat}
-              onChange={(e) => set({ repeat: e.target.value as RepeatChoice })}
-            >
-              {(Object.keys(FORM_COPY.repeat) as RepeatChoice[])
-                .filter(
-                  (r) =>
-                    !lockedRepeat ||
-                    repeatFamily(r) === repeatFamily(kept.value.initial.repeat),
-                )
-                .map((r) => (
-                  <option key={r} value={r}>
-                    {FORM_COPY.repeat[r]}
-                  </option>
-                ))}
-            </NativeSelect>
-          </Field>
-          {show.interval ? (
-            <Field
-              id={fid("interval")}
-              label={FORM_COPY.interval}
-              error={errors.interval}
-            >
-              <input
-                {...described("interval")}
-                inputMode="numeric"
-                value={state.interval}
-                data-field-edge=""
-                className={select}
-                onChange={(e) => set({ interval: e.target.value })}
-              />
-            </Field>
-          ) : null}
-          <Field
-            id={fid("startDate")}
-            label={FORM_COPY.starting}
-            hint={FORM_COPY.startingHint}
-            error={errors.startDate}
-          >
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <label htmlFor={fid("title")} className="sr-only">
+              {FORM_COPY.name}
+            </label>
             <input
-              {...described("startDate", true)}
-              type="date"
-              value={state.startDate}
+              ref={nameRef}
+              {...described("title")}
+              value={state.title}
+              placeholder={FORM_COPY.namePlaceholder}
               data-field-edge=""
-              className={select}
-              onChange={(e) => set({ startDate: e.target.value })}
+              className="w-full min-w-0 rounded-sm border-0 bg-transparent p-0 text-[28px] font-semibold leading-[1.15] tracking-[-0.03em] text-foreground outline-none placeholder:text-muted-foreground/70 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring tablet:text-[40px]"
+              onChange={(e) => set({ title: e.target.value })}
             />
-          </Field>
-          {show.time ? (
-            <Field
-              id={fid("time")}
-              label={FORM_COPY.time}
-              hint={FORM_COPY.timeHint}
-              error={errors.time}
-            >
-              <input
-                {...described("time", true)}
-                type="time"
-                value={state.time}
-                data-field-edge=""
-                className={select}
-                // The person's own edit of the time: from now on the minute shown is what is sent (R31).
-                onChange={(e) =>
-                  set({
-                    time: e.target.value,
-                    keptTime: null,
-                    timeUnconfirmed: false,
-                  })
-                }
-              />
-            </Field>
-          ) : null}
-          <Field
-            id={fid("timezone")}
-            label={FORM_COPY.zone}
-            error={errors.timezone}
-          >
-            <NativeSelect
-              {...described("timezone")}
-              value={state.timezone}
-              onChange={(e) => set({ timezone: e.target.value })}
-            >
-              {(zones.includes(state.timezone)
-                ? zones
-                : [state.timezone, ...zones]
-              ).map((z) => (
-                <option key={z} value={z}>
-                  {z}
-                </option>
-              ))}
-            </NativeSelect>
-          </Field>
-          <Field
-            id={fid("openDaysBefore")}
-            label={FORM_COPY.open}
-            error={errors.openDaysBefore}
-          >
-            <input
-              {...described("openDaysBefore")}
-              inputMode="numeric"
-              value={state.openDaysBefore}
-              data-field-edge=""
-              className={select}
-              onChange={(e) => set({ openDaysBefore: e.target.value })}
-            />
-          </Field>
-          <Field
-            id={fid("closeDaysAfter")}
-            label={FORM_COPY.close}
-            error={errors.closeDaysAfter}
-          >
-            <input
-              {...described("closeDaysAfter")}
-              inputMode="numeric"
-              value={state.closeDaysAfter}
-              data-field-edge=""
-              className={select}
-              onChange={(e) => set({ closeDaysAfter: e.target.value })}
-            />
-          </Field>
-        </div>
-        <Divider />
-        <div className="flex flex-col gap-4" data-form-section="goal">
-          <ChoiceCards
-            legend={FORM_COPY.done}
-            name={fid("goal")}
-            value={state.goalKind}
-            onChange={(goalKind) => set({ goalKind })}
-            columns={3}
-            options={(["checkbox", "numeric", "checklist"] as const).map(
-              (kind) => ({
-                value: kind,
-                label: FORM_COPY.goal[kind],
-                description: FORM_COPY.goalLine[kind],
-              }),
+            {errors.title ? (
+              <p
+                id={`${fid("title")}-error`}
+                className="text-xs text-destructive"
+              >
+                {errors.title}
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">{FORM_COPY.lead}</p>
             )}
-          />
-          {show.numeric ? (
-            <div className="grid gap-3 tablet:grid-cols-2">
-              <Field
-                id={fid("minimum")}
-                label={FORM_COPY.minimum}
-                error={errors.minimum}
-              >
-                <input
-                  {...described("minimum")}
-                  inputMode="decimal"
-                  value={state.minimum}
-                  data-field-edge=""
-                  className={select}
-                  onChange={(e) => set({ minimum: e.target.value })}
-                />
-              </Field>
-              <Field
-                id={fid("maximum")}
-                label={FORM_COPY.maximum}
-                error={errors.maximum}
-              >
-                <input
-                  {...described("maximum")}
-                  inputMode="decimal"
-                  value={state.maximum}
-                  data-field-edge=""
-                  className={select}
-                  onChange={(e) => set({ maximum: e.target.value })}
-                />
-              </Field>
-              <Field
-                id={fid("unit")}
-                label={FORM_COPY.unit}
-                error={errors.unit}
-              >
-                <input
-                  {...described("unit")}
-                  value={state.unit}
-                  data-field-edge=""
-                  className={select}
-                  onChange={(e) => set({ unit: e.target.value })}
-                />
-              </Field>
-            </div>
-          ) : null}
-          {show.checklist ? (
-            <div className="flex flex-col gap-2" data-checklist-items="">
-              {state.checklist.map((item, index) => (
-                <div key={item.id} className="flex items-end gap-2">
-                  <div className="flex-1">
-                    <Input
-                      label={FORM_COPY.item(index + 1)}
-                      value={item.label}
-                      onChange={(e) =>
-                        set({
-                          checklist: state.checklist.map((i) =>
-                            i.id === item.id
-                              ? { ...i, label: e.target.value }
-                              : i,
-                          ),
-                        })
-                      }
-                    />
-                  </div>
-                  <Button
-                    variant="ghost"
-                    aria-label={FORM_COPY.removeItem(index + 1)}
-                    onClick={() =>
-                      set({
-                        checklist: state.checklist.filter(
-                          (i) => i.id !== item.id,
-                        ),
-                      })
-                    }
-                  >
-                    ×
-                  </Button>
-                </div>
-              ))}
-              {state.checklist.length < 100 ? (
-                <span>
-                  <Button
-                    onClick={() =>
-                      set({
-                        checklist: [
-                          ...state.checklist,
-                          { id: env.newId(), label: "" },
-                        ],
-                      })
-                    }
-                  >
-                    {FORM_COPY.addItem}
-                  </Button>
-                </span>
-              ) : null}
-              {errors.checklist ? (
-                <p className="text-xs text-destructive">{errors.checklist}</p>
-              ) : null}
-            </div>
-          ) : null}
+          </div>
         </div>
-        <Divider />
-        <ChoiceCards
-          legend={FORM_COPY.carry}
-          name={fid("carry")}
-          value={state.carry}
-          onChange={(carry) => set({ carry })}
-          data-form-section="carry"
-          options={CARRIES.map((carry: Carry) => ({
-            value: carry,
-            label: copy.CARRY[carry].label,
-            description: copy.CARRY[carry].line,
-          }))}
-        />
-        <Divider />
-        <ChoiceCards
-          legend={FORM_COPY.who}
-          name={fid("who")}
-          value={state.participation}
-          onChange={(participation) => set({ participation })}
-          data-form-section="who"
-          options={PARTICIPATIONS.filter(
-            (p) => !editing || p === initial.participation,
-          ).map((p: Participation) => ({
-            value: p,
-            label: copy.PARTICIPATION[p],
-            description: copy.PARTICIPATION_LINE[p],
-          }))}
-          {...(editing ? { locked: FORM_COPY.lockedWho } : {})}
-          {...(errors.participation
-            ? {
-                error: errors.participation,
-                errorId: fid("participation-error"),
-              }
-            : {})}
-        />
-        <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
-          <input
-            type="checkbox"
-            checked={state.allowExclusions}
-            onChange={() => set({ allowExclusions: !state.allowExclusions })}
-            className="size-4"
-          />
-          {FORM_COPY.exclusions}
-        </label>
-        {mode.kind === "new" ? <Divider /> : null}
-        {mode.kind === "new" ? (
-          <ChoiceCards
-            legend={FORM_COPY.sharing}
-            name={fid("sharing")}
-            value={state.sharing}
-            onChange={(sharing) => set({ sharing })}
-            data-form-section="sharing"
-            columns={2}
-            options={[
-              { value: "defaults" as const, label: defaultsSummary },
-              { value: "only_me" as const, label: FORM_COPY.sharingOnlyMe },
-            ]}
-            hint={FORM_COPY.sharingLater}
-          />
-        ) : null}
-      </fieldset>
-      {errors.definition ? (
-        <p className="text-xs text-destructive">{errors.definition}</p>
-      ) : null}
-      {notice ? (
-        <p className="text-sm text-foreground" data-form-notice="">
-          {notice}
-        </p>
-      ) : null}
-      {/* On the phone the save row stays in reach at the bottom of the viewport (the tab bar is away on this screen). */}
-      <div
-        className="sticky bottom-0 z-20 -mx-4 flex flex-wrap gap-2 border-t border-border/70 bg-background/95 px-4 pt-3 pb-[max(12px,env(safe-area-inset-bottom))] backdrop-blur tablet:static tablet:mx-0 tablet:border-0 tablet:bg-transparent tablet:p-0 tablet:backdrop-blur-none"
-        data-form-actions=""
-      >
-        {!env.writable ? (
-          <Button disabled reason={copy.NOT_WRITABLE}>
-            {FORM_COPY.save}
-          </Button>
-        ) : denied ? (
-          <Button disabled reason={FORM_COPY.denied}>
-            {FORM_COPY.save}
-          </Button>
-        ) : !canSave ? (
-          <Button
-            disabled
-            reason={queueFailed ? copy.LOCAL_FAILED : FORM_COPY.wait}
+        <FactsStrip data-form-facts="">
+          <FactCell
+            as="button"
+            label={FORM_COPY.facts.when}
+            data-fact="when"
+            onClick={() => jump("when")}
           >
-            {FORM_COPY.save}
-          </Button>
-        ) : busy ? (
-          <Button disabled reason={copy.SAVING}>
-            {FORM_COPY.save}
-          </Button>
-        ) : (
-          <Button variant="default" type="submit">
-            {FORM_COPY.save}
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          onClick={() =>
-            // Cancel leaves for the task (or the list), which discards what was typed; a save already made stays queued.
-            void (mode.kind === "edit"
-              ? navigate({
-                  to: "/tasks/$taskId",
-                  params: { taskId: mode.taskId },
-                  search: {},
-                })
-              : navigate({ to: "/tasks", search: {} }))
-          }
+            <span className="font-num">{whenValue}</span>
+          </FactCell>
+          <FactCell
+            as="button"
+            label={FORM_COPY.repeats}
+            data-fact="repeats"
+            onClick={() => jump("when")}
+          >
+            <span>{repeatValue}</span>
+          </FactCell>
+          <FactCell
+            as="button"
+            label={FORM_COPY.facts.who}
+            data-fact="who"
+            onClick={() => jump("who")}
+          >
+            <span>{copy.PARTICIPATION[state.participation]}</span>
+          </FactCell>
+          <FactCell
+            as="button"
+            label={FORM_COPY.facts.done}
+            data-fact="goal"
+            onClick={() => jump("goal")}
+          >
+            <span>{FORM_COPY.goal[state.goalKind]}</span>
+          </FactCell>
+          <FactCell
+            as="button"
+            label={FORM_COPY.facts.missed}
+            data-fact="carry"
+            onClick={() => jump("carry")}
+          >
+            <span>{copy.CARRY[state.carry].label}</span>
+          </FactCell>
+          {mode.kind === "new" ? (
+            <FactCell
+              as="button"
+              label={FORM_COPY.facts.seenBy}
+              data-fact="sharing"
+              onClick={() => jump("sharing")}
+            >
+              <span>
+                {state.sharing === "only_me"
+                  ? FORM_COPY.sharingOnlyMe
+                  : defaultsSummary}
+              </span>
+            </FactCell>
+          ) : null}
+        </FactsStrip>
+        {errors.definition ? (
+          <p className="text-xs text-destructive">{errors.definition}</p>
+        ) : null}
+        {notice ? (
+          <p className="text-sm text-foreground" data-form-notice="">
+            {notice}
+          </p>
+        ) : null}
+        {/* The save row under the strip (the Final design); on the phone it stays in reach at the bottom of the viewport. */}
+        <div
+          className="sticky bottom-0 z-20 -mx-4 flex flex-wrap items-center gap-2 border-t border-border/70 bg-background/95 px-4 pt-3 pb-[max(12px,env(safe-area-inset-bottom))] backdrop-blur tablet:static tablet:mx-0 tablet:border-0 tablet:bg-transparent tablet:p-0 tablet:backdrop-blur-none"
+          data-form-actions=""
         >
-          {FORM_COPY.cancel}
-        </Button>
-      </div>
+          {saveButton}
+          <Button variant="ghost" onClick={cancel}>
+            {FORM_COPY.cancel}
+          </Button>
+          <span className="ml-auto hidden text-xs text-muted-foreground tablet:inline">
+            {FORM_COPY.draftKept}
+          </span>
+        </div>
+        <GroupedBox data-form-sections="">
+          {section(
+            "when",
+            FORM_COPY.when,
+            `${whenValue} · ${repeatValue}`,
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-wrap gap-1.5" data-form-quick="date">
+                {(["today", "tomorrow", "none"] as const).map((quick) => {
+                  const value =
+                    quick === "none"
+                      ? ""
+                      : quick === "today"
+                        ? todayIn(state.timezone, env.now())
+                        : addDays(todayIn(state.timezone, env.now()), 1);
+                  return (
+                    <Pill
+                      key={quick}
+                      pressed={state.startDate === value}
+                      onClick={() => set({ startDate: value })}
+                    >
+                      {FORM_COPY.quickDate[quick]}
+                    </Pill>
+                  );
+                })}
+              </div>
+              <div className="grid gap-3 tablet:grid-cols-2">
+                <Field
+                  id={fid("repeat")}
+                  label={FORM_COPY.repeats}
+                  hint={lockedRepeat ? FORM_COPY.locked : FORM_COPY.monthEnd}
+                >
+                  <NativeSelect
+                    id={fid("repeat")}
+                    aria-describedby={`${fid("repeat")}-hint`}
+                    value={state.repeat}
+                    onChange={(e) =>
+                      set({ repeat: e.target.value as RepeatChoice })
+                    }
+                  >
+                    {(Object.keys(FORM_COPY.repeat) as RepeatChoice[])
+                      .filter(
+                        (r) =>
+                          !lockedRepeat ||
+                          repeatFamily(r) ===
+                            repeatFamily(kept.value.initial.repeat),
+                      )
+                      .map((r) => (
+                        <option key={r} value={r}>
+                          {FORM_COPY.repeat[r]}
+                        </option>
+                      ))}
+                  </NativeSelect>
+                </Field>
+                {show.interval ? (
+                  <Field
+                    id={fid("interval")}
+                    label={FORM_COPY.interval}
+                    error={errors.interval}
+                  >
+                    <input
+                      {...described("interval")}
+                      inputMode="numeric"
+                      value={state.interval}
+                      data-field-edge=""
+                      className={select}
+                      onChange={(e) => set({ interval: e.target.value })}
+                    />
+                  </Field>
+                ) : null}
+                <Field
+                  id={fid("startDate")}
+                  label={FORM_COPY.starting}
+                  hint={FORM_COPY.startingHint}
+                  error={errors.startDate}
+                >
+                  <input
+                    {...described("startDate", true)}
+                    type="date"
+                    value={state.startDate}
+                    data-field-edge=""
+                    className={select}
+                    onChange={(e) => set({ startDate: e.target.value })}
+                  />
+                </Field>
+                {show.time ? (
+                  <Field
+                    id={fid("time")}
+                    label={FORM_COPY.time}
+                    hint={FORM_COPY.timeHint}
+                    error={errors.time}
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <input
+                        {...described("time", true)}
+                        type="time"
+                        value={state.time}
+                        data-field-edge=""
+                        className={cn(select, "w-auto flex-none")}
+                        // The person's own edit of the time: from now on the minute shown is what is sent (R31).
+                        onChange={(e) =>
+                          set({
+                            time: e.target.value,
+                            keptTime: null,
+                            timeUnconfirmed: false,
+                          })
+                        }
+                      />
+                      {(["", "09:00", "18:00"] as const).map((quick) => (
+                        <Pill
+                          key={quick || "any"}
+                          pressed={state.time === quick}
+                          onClick={() =>
+                            set({
+                              time: quick,
+                              keptTime: null,
+                              timeUnconfirmed: false,
+                            })
+                          }
+                        >
+                          {quick === "" ? FORM_COPY.facts.anyTime : quick}
+                        </Pill>
+                      ))}
+                    </div>
+                  </Field>
+                ) : null}
+                <Field
+                  id={fid("timezone")}
+                  label={FORM_COPY.zone}
+                  error={errors.timezone}
+                >
+                  <NativeSelect
+                    {...described("timezone")}
+                    value={state.timezone}
+                    onChange={(e) => set({ timezone: e.target.value })}
+                  >
+                    {(zones.includes(state.timezone)
+                      ? zones
+                      : [state.timezone, ...zones]
+                    ).map((z) => (
+                      <option key={z} value={z}>
+                        {z}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                </Field>
+                <Field
+                  id={fid("openDaysBefore")}
+                  label={FORM_COPY.open}
+                  error={errors.openDaysBefore}
+                >
+                  <input
+                    {...described("openDaysBefore")}
+                    inputMode="numeric"
+                    value={state.openDaysBefore}
+                    data-field-edge=""
+                    className={select}
+                    onChange={(e) => set({ openDaysBefore: e.target.value })}
+                  />
+                </Field>
+                <Field
+                  id={fid("closeDaysAfter")}
+                  label={FORM_COPY.close}
+                  error={errors.closeDaysAfter}
+                >
+                  <input
+                    {...described("closeDaysAfter")}
+                    inputMode="numeric"
+                    value={state.closeDaysAfter}
+                    data-field-edge=""
+                    className={select}
+                    onChange={(e) => set({ closeDaysAfter: e.target.value })}
+                  />
+                </Field>
+              </div>
+            </div>,
+          )}
+          {section(
+            "goal",
+            FORM_COPY.done,
+            FORM_COPY.goal[state.goalKind],
+            <div className="flex flex-col gap-4">
+              <ChoiceCards
+                legend={FORM_COPY.done}
+                legendHidden
+                name={fid("goal")}
+                value={state.goalKind}
+                onChange={(goalKind) => set({ goalKind })}
+                columns={3}
+                options={(["checkbox", "numeric", "checklist"] as const).map(
+                  (kind) => ({
+                    value: kind,
+                    label: FORM_COPY.goal[kind],
+                    description: FORM_COPY.goalLine[kind],
+                  }),
+                )}
+              />
+              {show.numeric ? (
+                <div className="grid gap-3 tablet:grid-cols-3">
+                  <Field
+                    id={fid("minimum")}
+                    label={FORM_COPY.minimum}
+                    error={errors.minimum}
+                  >
+                    <input
+                      {...described("minimum")}
+                      inputMode="decimal"
+                      value={state.minimum}
+                      data-field-edge=""
+                      className={select}
+                      onChange={(e) => set({ minimum: e.target.value })}
+                    />
+                  </Field>
+                  <Field
+                    id={fid("maximum")}
+                    label={FORM_COPY.maximum}
+                    error={errors.maximum}
+                  >
+                    <input
+                      {...described("maximum")}
+                      inputMode="decimal"
+                      value={state.maximum}
+                      data-field-edge=""
+                      className={select}
+                      onChange={(e) => set({ maximum: e.target.value })}
+                    />
+                  </Field>
+                  <Field
+                    id={fid("unit")}
+                    label={FORM_COPY.unit}
+                    error={errors.unit}
+                  >
+                    <input
+                      {...described("unit")}
+                      value={state.unit}
+                      data-field-edge=""
+                      className={select}
+                      onChange={(e) => set({ unit: e.target.value })}
+                    />
+                  </Field>
+                </div>
+              ) : null}
+              {show.checklist ? (
+                <div className="flex flex-col gap-2" data-checklist-items="">
+                  {state.checklist.map((item, index) => (
+                    <div key={item.id} className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <Input
+                          label={FORM_COPY.item(index + 1)}
+                          value={item.label}
+                          onChange={(e) =>
+                            set({
+                              checklist: state.checklist.map((i) =>
+                                i.id === item.id
+                                  ? { ...i, label: e.target.value }
+                                  : i,
+                              ),
+                            })
+                          }
+                        />
+                      </div>
+                      <Button
+                        variant="ghost"
+                        aria-label={FORM_COPY.removeItem(index + 1)}
+                        onClick={() =>
+                          set({
+                            checklist: state.checklist.filter(
+                              (i) => i.id !== item.id,
+                            ),
+                          })
+                        }
+                      >
+                        ×
+                      </Button>
+                    </div>
+                  ))}
+                  {state.checklist.length < 100 ? (
+                    <span>
+                      <Button
+                        onClick={() =>
+                          set({
+                            checklist: [
+                              ...state.checklist,
+                              { id: env.newId(), label: "" },
+                            ],
+                          })
+                        }
+                      >
+                        {FORM_COPY.addItem}
+                      </Button>
+                    </span>
+                  ) : null}
+                  {errors.checklist ? (
+                    <p className="text-xs text-destructive">
+                      {errors.checklist}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>,
+            { "data-form-section": "goal" },
+          )}
+          {section(
+            "carry",
+            FORM_COPY.carry,
+            copy.CARRY[state.carry].label,
+            <ChoiceCards
+              legend={FORM_COPY.carry}
+              legendHidden
+              name={fid("carry")}
+              value={state.carry}
+              onChange={(carry) => set({ carry })}
+              columns={3}
+              options={CARRIES.map((carry: Carry) => ({
+                value: carry,
+                label: copy.CARRY[carry].label,
+                description: copy.CARRY[carry].line,
+              }))}
+            />,
+            { "data-form-section": "carry" },
+          )}
+          {section(
+            "who",
+            FORM_COPY.who,
+            copy.PARTICIPATION[state.participation],
+            <div className="flex flex-col gap-3">
+              <ChoiceCards
+                legend={FORM_COPY.who}
+                legendHidden
+                name={fid("who")}
+                value={state.participation}
+                onChange={(participation) => set({ participation })}
+                columns={2}
+                options={PARTICIPATIONS.filter(
+                  (p) => !editing || p === initial.participation,
+                ).map((p: Participation) => ({
+                  value: p,
+                  label: copy.PARTICIPATION[p],
+                  description: copy.PARTICIPATION_LINE[p],
+                }))}
+                {...(editing ? { locked: FORM_COPY.lockedWho } : {})}
+                {...(errors.participation
+                  ? {
+                      error: errors.participation,
+                      errorId: fid("participation-error"),
+                    }
+                  : {})}
+              />
+              <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  checked={state.allowExclusions}
+                  onChange={() =>
+                    set({ allowExclusions: !state.allowExclusions })
+                  }
+                  className="size-4"
+                />
+                {FORM_COPY.exclusions}
+              </label>
+            </div>,
+            { "data-form-section": "who" },
+          )}
+          {mode.kind === "new"
+            ? section(
+                "sharing",
+                FORM_COPY.sharing,
+                state.sharing === "only_me"
+                  ? FORM_COPY.sharingOnlyMe
+                  : defaultsSummary,
+                <ChoiceCards
+                  legend={FORM_COPY.sharing}
+                  legendHidden
+                  name={fid("sharing")}
+                  value={state.sharing}
+                  onChange={(sharing) => set({ sharing })}
+                  columns={2}
+                  options={[
+                    { value: "defaults" as const, label: defaultsSummary },
+                    {
+                      value: "only_me" as const,
+                      label: FORM_COPY.sharingOnlyMe,
+                    },
+                  ]}
+                  hint={FORM_COPY.sharingLater}
+                />,
+                { "data-form-section": "sharing" },
+              )
+            : null}
+        </GroupedBox>
+      </fieldset>
     </form>
   );
 }

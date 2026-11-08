@@ -26,6 +26,16 @@ export function AccountSlot({
 }) {
   const open = (trigger: HTMLElement) =>
     openSwitcher(account, returnFocus?.current ?? trigger);
+  // The person's avatar (the switcher's: their initial in a circle) stands left of their name; collapsed, it is the control.
+  const avatar = (
+    <span
+      aria-hidden="true"
+      data-account-avatar=""
+      className="flex size-7 flex-none items-center justify-center rounded-full bg-secondary text-xs font-semibold text-foreground"
+    >
+      {Array.from(label)[0]?.toUpperCase()}
+    </span>
+  );
   if (collapsed)
     return (
       <button
@@ -34,9 +44,9 @@ export function AccountSlot({
         aria-label={slotLabel(label)}
         data-account-slot=""
         onClick={(event) => open(event.currentTarget)}
-        className="atlas-transition flex size-11 items-center justify-center rounded-md text-sm font-semibold text-muted-foreground hover:bg-accent hover:text-foreground"
+        className="atlas-transition flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
       >
-        <span aria-hidden="true">{Array.from(label)[0]?.toUpperCase()}</span>
+        {avatar}
       </button>
     );
   return (
@@ -46,8 +56,9 @@ export function AccountSlot({
       aria-label={slotLabel(label)}
       data-account-slot=""
       onClick={(event) => open(event.currentTarget)}
-      className="atlas-transition flex min-h-11 w-full min-w-0 items-center rounded-md px-2.5 py-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+      className="atlas-transition flex min-h-11 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-sidebar-foreground hover:bg-sidebar-accent hover:text-foreground"
     >
+      {avatar}
       <span className="min-w-0 truncate">{label}</span>
     </button>
   );

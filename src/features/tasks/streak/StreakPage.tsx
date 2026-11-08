@@ -1,7 +1,8 @@
-import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Breadcrumb } from "../../../components/ui/breadcrumb";
 import { Button } from "../../../components/ui/button";
 import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
+import { Eyebrow, PageHeader } from "../../../components/ui/page-header";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type CacheRow,
@@ -47,6 +48,7 @@ import {
   tally,
   unitOf,
 } from "../model/streak";
+import { TASKS_TITLE } from "../titles";
 import {
   reasonText,
   recoveryRows,
@@ -721,23 +723,24 @@ export function StreakPage({ taskId }: { taskId: string }) {
   const failed = value === null && localError !== null;
   return (
     <article
-      className="flex max-w-[760px] flex-col gap-6"
+      className="flex min-w-0 max-w-[880px] flex-col gap-6"
       data-streak-page={taskId}
     >
-      <div className="flex flex-col gap-2">
-        <Link
-          to="/tasks/$taskId"
-          params={{ taskId }}
-          search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
-        >
-          {STREAK_COPY.back(title ?? copy.UNTITLED)}
-        </Link>
-        <PageHeading>{STREAK_COPY.title}</PageHeading>
-        {title !== null ? (
-          <p className="text-sm text-muted-foreground">{title}</p>
-        ) : null}
-      </div>
+      <Breadcrumb
+        items={[
+          { label: TASKS_TITLE, to: "/tasks" },
+          {
+            label: title ?? copy.UNTITLED,
+            to: "/tasks/$taskId",
+            params: { taskId },
+          },
+        ]}
+        current={STREAK_COPY.title}
+      />
+      <PageHeader
+        eyebrow={<Eyebrow>{title ?? copy.UNTITLED}</Eyebrow>}
+        title={<PageHeading>{STREAK_COPY.title}</PageHeading>}
+      />
       {failed ? (
         <div className="flex flex-col gap-2" data-streak-local-error="">
           <p className="text-sm text-muted-foreground">

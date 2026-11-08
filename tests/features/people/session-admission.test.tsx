@@ -19,6 +19,7 @@ import {
   peopleWorld,
   person,
 } from "../../support/people/world";
+import { actions, findAction } from "./more-menu";
 
 /**
  * Review 7, finding 1 (`people-retained-form-pending-admission`): an editing SESSION saves once at a time (`lifetime.ts` `admit`). The
@@ -142,6 +143,17 @@ describe("review 7, finding 1: New person admits one save per session", () => {
             expect(
               screen.queryByRole("dialog", { name: "New person" }),
             ).toBeNull(),
+          );
+          // The completion opened the saved person's page (a page of its own, the Final design): back to the people for another.
+          fireEvent.click(
+            within(
+              screen.getByRole("navigation", { name: "Primary" }),
+            ).getByRole("link", { name: "People" }),
+          );
+          await waitFor(() =>
+            expect(
+              screen.queryAllByRole("button", { name: "New person" }).length,
+            ).toBeGreaterThan(0),
           );
           d = await newPerson();
           // A new session: nothing kept, nothing pending; a deliberate second person is admitted.
@@ -518,7 +530,7 @@ describe("review 7, finding 1: rename, unlink and archive admit one at a time", 
     expect(
       await within(header()).findByText("Not linked to an account"),
     ).toBeInTheDocument();
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "Ada L." },
     });
@@ -526,9 +538,7 @@ describe("review 7, finding 1: rename, unlink and archive admit one at a time", 
     await waitFor(() => expect(g.state.entered).toBe(1));
     cleanup();
     await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Rename" }),
-    );
+    fireEvent.click(await findAction("Rename", header));
     const save = within(header()).getByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
     fireEvent.click(save);
@@ -547,9 +557,7 @@ describe("review 7, finding 1: rename, unlink and archive admit one at a time", 
       return { ok: true, value: { revision: 9, person_id: P } };
     });
     await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Rename" }),
-    );
+    fireEvent.click(await findAction("Rename", header));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "Kieran L." },
     });
@@ -557,9 +565,7 @@ describe("review 7, finding 1: rename, unlink and archive admit one at a time", 
     await waitFor(() => expect(g.state.entered).toBe(1));
     cleanup();
     await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Rename" }),
-    );
+    fireEvent.click(await findAction("Rename", header));
     expect(
       within(header()).getByRole("button", { name: "Save" }),
     ).toBeDisabled();
@@ -581,9 +587,7 @@ describe("review 7, finding 1: rename, unlink and archive admit one at a time", 
     });
     await w.mount(`/people/${P}`);
     const ask = async () => {
-      fireEvent.click(
-        await within(header()).findByRole("button", { name: "Unlink account" }),
-      );
+      fireEvent.click(await findAction("Unlink account", header));
       return screen.findByRole("dialog", {
         name: "Unlink your account from this profile?",
       });
@@ -614,7 +618,7 @@ describe("review 7, finding 1: rename, unlink and archive admit one at a time", 
       await w.mount(`/people/${P}`);
       const button = async () =>
         target === "person"
-          ? within(header()).findByRole("button", { name: "Archive" })
+          ? findAction("Archive", header)
           : within(
               (await waitFor(() => {
                 const row = document.querySelector(`[data-field-row="${F}"]`);

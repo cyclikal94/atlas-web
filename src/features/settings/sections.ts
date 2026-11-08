@@ -2,6 +2,7 @@ import type { AnyRoute } from "@tanstack/react-router";
 import { buildCalendarsSection } from "../calendars/section";
 import { buildArchivedSection } from "../people/archived/section";
 import { buildAppearanceSection } from "./appearance-section";
+import { buildLayoutSection } from "./layout/section";
 import { SESSIONS_SECTION_ROUTE, settingsPath } from "./section-routes";
 import { buildSessionsDevicesSection } from "./sessions-devices/section";
 import { buildSigningInSection } from "./signing-in/section";
@@ -54,6 +55,16 @@ const SECTIONS: readonly SettingsSection[] = [
     order: 50,
     owner: "WEB-07",
     build: buildAppearanceSection,
+  },
+  {
+    id: "layout",
+    label: "Layout",
+    description:
+      "How tasks open: a page, a split pane, a side peek or an overlay.",
+    route: "layout",
+    order: 52,
+    owner: "WEB-07",
+    build: buildLayoutSection,
   },
   {
     id: "calendars",

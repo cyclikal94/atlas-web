@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { Ellipsis } from "lucide-react";
 import {
   type ReactNode,
   useEffect,
@@ -7,11 +8,12 @@ import {
   useRef,
   useState,
 } from "react";
+import { MENU_COPY } from "../../../components/ui/action-menu";
 import { useAnnouncer } from "../../../components/ui/announcer";
+import { PersonAvatar } from "../../../components/ui/avatar-stack";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { Input } from "../../../components/ui/input";
-import { PageActions } from "../../../components/ui/page-actions";
 import { PageHeading } from "../../../components/ui/page-heading";
 import type { DraftWithCommand } from "../../../data";
 import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
@@ -36,11 +38,7 @@ import {
   settle,
   useEditingSession,
 } from "../lifetime";
-import {
-  isCurrentMemory,
-  type PeopleMemory,
-  useMemoryRevision,
-} from "../memory";
+import { type PeopleMemory, useMemoryRevision } from "../memory";
 import { attemptVersion, replayFor } from "../model/attempt";
 import {
   baseGuard,
@@ -48,7 +46,6 @@ import {
   renameProfileBody,
   unlinkBody,
 } from "../model/commands";
-import { firstPageCount } from "../model/duplicates";
 import {
   type LinkageState,
   type RenameRoute,
@@ -68,9 +65,10 @@ import {
 } from "../model/snapshot";
 import { charCount } from "../model/values";
 import { replayOnline, sendOnline } from "../online";
-import { Avatar, Banner, PendingBadge, useOutboxSave } from "../parts";
+import { Banner, PendingBadge, useOutboxSave } from "../parts";
 import { linkageIn, readLinkage, usePersonLinkage } from "../reads";
 import * as requestsCopy from "../requests/copy";
+import { useDuplicateCount } from "./duplicates-count";
 
 /**
  * The identity header of WF-PEOPLE-02 with the Q21 gap-6 additions (`profile-rename-unlink.html`) and the archive entry point
@@ -88,6 +86,8 @@ export function IdentityHeader({
   asPage,
   headerActions,
   drafts,
+  sharing: sharingProp,
+  onSharingChange,
 }: {
   shown: ShownRow;
   /** The person's name is the page's heading (no list beside it). */
@@ -95,6 +95,9 @@ export function IdentityHeader({
   headerActions?: (personId: string) => ReactNode;
   /** This device's outstanding saves (the rename's base, `model/snapshot.ts`). */
   drafts: readonly DraftWithCommand[];
+  /** The sharing editor's open state, when the page owns it (the facts strip's "Seen by" cell opens it too). */
+  sharing?: boolean;
+  onSharingChange?(open: boolean): void;
 }) {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
@@ -130,7 +133,16 @@ export function IdentityHeader({
   });
   // The version the open unlink confirmation was opened on: it confirms that unlink only, never one of a later linkage (review 25).
   const [unlinking, setUnlinking] = useState<number | null>(null);
-  const [sharing, setSharing] = useState(false);
+  const [sharingState, setSharingState] = useState(false);
+  const sharing = sharingProp ?? sharingState;
+  const setSharing = (open: boolean) => {
+    setSharingState(open);
+    onSharingChange?.(open);
+  };
+  // The person's other acts fold behind "More" (the Final design, 8 November 2026): one disclosure, the acts in place when open, so a
+  // rename form, an unlink confirmation and a retry keep their places and their focus.
+  const [more, setMore] = useState(false);
+  const actionsId = useId();
   const Heading = asPage ? PageHeading : SubHeading;
   const renamingFrom = env.memory.drafts.get(`renaming:${person.id}`) as
     | number
@@ -141,9 +153,16 @@ export function IdentityHeader({
     person.version <= renamingFrom;
   return (
     <section className="flex flex-col gap-4" data-identity-header="">
-      <div className="flex items-start gap-4">
-        <Avatar name={person.label} size="large" />
-        <div className="flex min-w-0 flex-col gap-1">
+      {/* On the phone the header's controls (and a disabled one's reason) take a line of their own under the name: beside it they
+          would squeeze the name and the linkage to nothing and push the page wider than the screen. */}
+      <div className="flex flex-wrap items-start gap-4">
+        <PersonAvatar
+          id={person.id}
+          name={person.label}
+          size={56}
+          className="mt-0.5 max-tablet:size-[52px] max-tablet:text-xl"
+        />
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           <Heading>
             <span data-person-name="">{person.label}</span>
           </Heading>
@@ -153,19 +172,35 @@ export function IdentityHeader({
             onRetry={retry}
             online={env.online}
           />
-          <div className="flex flex-wrap items-center gap-2">
-            {person.archived ? (
-              <span className="text-xs text-muted-foreground">
-                {copy.ARCHIVED_TAG}
-              </span>
-            ) : null}
-            <PendingBadge mark={shown.pending} />
-            {updating ? (
-              <span className="text-xs text-muted-foreground">
-                {copy.UPDATING}
-              </span>
-            ) : null}
-          </div>
+          {person.archived || shown.pending !== null || updating ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {person.archived ? (
+                <span className="text-xs text-muted-foreground">
+                  {copy.ARCHIVED_TAG}
+                </span>
+              ) : null}
+              <PendingBadge mark={shown.pending} />
+              {updating ? (
+                <span className="text-xs text-muted-foreground">
+                  {copy.UPDATING}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center gap-2 max-tablet:basis-full tablet:flex-none tablet:justify-end">
+          {headerActions?.(person.id)}
+          <button
+            type="button"
+            aria-label={MENU_COPY.more}
+            aria-expanded={more}
+            aria-controls={actionsId}
+            data-person-more=""
+            onClick={() => setMore((value) => !value)}
+            className="atlas-transition flex size-11 flex-none items-center justify-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground"
+          >
+            <Ellipsis aria-hidden="true" className="size-[18px]" />
+          </button>
         </div>
       </div>
       {person.archived ? (
@@ -173,7 +208,12 @@ export function IdentityHeader({
           {copy.ARCHIVED_PERSON}
         </p>
       ) : null}
-      <PageActions data-person-actions="">
+      <div
+        id={actionsId}
+        hidden={!more}
+        data-person-actions=""
+        className="flex flex-wrap items-start gap-2"
+      >
         {shown.projected ? (
           <Button disabled reason={copy.WAIT_FOR_SYNC_PERSON}>
             {copy.MANAGE_SHARING}
@@ -186,7 +226,6 @@ export function IdentityHeader({
             {copy.MANAGE_SHARING}
           </Button>
         )}
-        {headerActions?.(person.id)}
         <DuplicatesEntry personId={person.id} projected={shown.projected} />
         <RenameEntry
           shown={shown}
@@ -212,7 +251,7 @@ export function IdentityHeader({
           }}
         />
         <ArchiveEntry shown={shown} />
-      </PageActions>
+      </div>
       {renaming ? (
         <RenameForm
           shown={shown}
@@ -247,7 +286,7 @@ export function IdentityHeader({
 
 function SubHeading({ children }: { children: ReactNode }) {
   return (
-    <h2 className="text-2xl font-semibold tracking-[-0.025em] text-foreground">
+    <h2 className="text-[28px] font-semibold leading-[1.08] tracking-[-0.03em] text-foreground desktop:text-[32px]">
       {children}
     </h2>
   );
@@ -297,20 +336,7 @@ function DuplicatesEntry({
   projected: boolean;
 }) {
   const env = usePeopleEnv();
-  useMemoryRevision(env.memory);
-  useEffect(() => {
-    if (!env.online || projected || env.memory.duplicateCounts.has(personId))
-      return;
-    const memory = env.memory;
-    memory.duplicateCounts.set(personId, null);
-    void env.api.readDuplicates(personId, { limit: 50 }).then((result) => {
-      if (!isCurrentMemory(memory)) return;
-      if (result.ok)
-        memory.duplicateCounts.set(personId, firstPageCount(result.value));
-      else memory.duplicateCounts.delete(personId);
-      memory.touch();
-    });
-  }, [env, personId, projected]);
+  const count = useDuplicateCount(personId, projected);
   if (!env.online || projected)
     return (
       <Button
@@ -320,7 +346,6 @@ function DuplicatesEntry({
         {copy.POSSIBLE_DUPLICATES}
       </Button>
     );
-  const count = env.memory.duplicateCounts.get(personId) ?? null;
   return (
     <Link
       to="/people/$personId/duplicates"

@@ -3,20 +3,26 @@ import {
   CalendarX2,
   ChevronLeft,
   ChevronRight,
+  Crosshair,
   Globe,
   Plus,
 } from "lucide-react";
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
-import { useLayoutMode } from "../../../app/shell/layout-mode";
 import {
-  useUpcomingFold,
-  writeUpcomingFold,
-} from "../../../app/shell/preferences";
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useLayoutMode } from "../../../app/shell/layout-mode";
 import { Button } from "../../../components/ui/button";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { inputClass } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
 import { NativeSelect } from "../../../components/ui/native-select";
+import { PageHeader, TitleText } from "../../../components/ui/page-header";
 import { Skeleton } from "../../../components/ui/skeleton";
 import { cn } from "../../../lib/utils";
 import { useTaskActions } from "../actions";
@@ -40,9 +46,12 @@ import {
 } from "../model/row-state";
 import { addDays, timeIn, todayIn } from "../model/time";
 import type { RowModel } from "../view";
+import { AddRow } from "./AddRow";
 import { CatchUpBanner } from "./CatchUpBanner";
+import { SearchPill } from "./CommandPalette";
 import { gapLabel, RailFold, RailGap, RailLabel, RailNow } from "./rail";
-import { TodayRow } from "./TodayRow";
+import { usePullToReveal } from "./reveal";
+import { type RowOpen, TodayRow } from "./TodayRow";
 import { Upcoming } from "./Upcoming";
 import { useTodayView } from "./useTodayView";
 
@@ -82,23 +91,34 @@ const GAP_SECONDS = 2 * 3600;
 function useCurrentSection(
   root: HTMLElement | null,
   bar: HTMLElement | null,
-): string | null {
-  const [current, setCurrent] = useState<string | null>(null);
+): { label: string; section: "today" | "upcoming" } | null {
+  const [current, setCurrent] = useState<{
+    label: string;
+    section: "today" | "upcoming";
+  } | null>(null);
   useEffect(() => {
     if (root === null || bar === null) return;
     let frame = 0;
     const measure = () => {
       frame = 0;
       const limit = bar.getBoundingClientRect().bottom + 4;
-      let found: string | null = null;
+      let found: { label: string; section: "today" | "upcoming" } | null = null;
       for (const heading of root.querySelectorAll<HTMLElement>(
         "[data-rail-heading]",
       )) {
         if (heading.getBoundingClientRect().top <= limit)
-          found = heading.dataset.railHeading ?? null;
+          found = {
+            label: heading.dataset.railHeading ?? "",
+            section:
+              heading.dataset.railSection === "upcoming" ? "upcoming" : "today",
+          };
         else break;
       }
-      setCurrent(found);
+      setCurrent((previous) =>
+        previous?.label === found?.label && previous?.section === found?.section
+          ? previous
+          : found,
+      );
     };
     const onScroll = () => {
       if (frame === 0) frame = requestAnimationFrame(measure);
@@ -127,15 +147,24 @@ export function TodayPage({
   zone,
   dayGiven,
   section = "today",
+  onSection,
   onChange,
+  open,
+  newTask,
 }: {
   day: string;
   zone: string;
   /** The day came from the address (otherwise it is today, and rolls over at local midnight). */
   dayGiven: boolean;
-  /** `/upcoming` opens the fold and starts there. */
+  /** `#upcoming` opens the fold and starts there. */
   section?: "today" | "upcoming";
+  /** The reader scrolled from the day into the days ahead, or back: the address's hash (and so the navigation) follows. */
+  onSection?(section: "today" | "upcoming"): void;
   onChange(next: { day?: string; zone?: string }): void;
+  /** Where a row's title leads when the task opens beside the day (the "How tasks open" setting). */
+  open?: (row: RowModel) => RowOpen;
+  /** Where "New task" leads when the form opens in the same container. */
+  newTask?: RowOpen;
 }) {
   const env = useTasksEnv();
   // The page's catch-up service, live on every task screen (review R8): the banner uses it only while tasks are pending.
@@ -143,11 +172,9 @@ export function TodayPage({
   const view = useTodayView(day, zone);
   const actions = useTaskActions();
   const [filter, setFilter] = useState<Filter>("all");
-  // The fold is open unless this device folded it away (the day runs on into the days ahead); `/upcoming` always opens it.
-  const foldPreference = useUpcomingFold();
-  const [ahead, setAhead] = useState(
-    section === "upcoming" || foldPreference === "open",
-  );
+  // The fold is closed to begin with (the day reads as one page, the Final design revised 8 November 2026): `#upcoming` opens it, as
+  // does a pull past the end of the day, or the fold's pill.
+  const [ahead, setAhead] = useState(section === "upcoming");
   const filterName = useId();
   const zoneId = useId();
   const dayId = useId();
@@ -171,16 +198,132 @@ export function TodayPage({
   }
   for (const [group, rows] of groups) groups.set(group, rows.sort(compareRows));
 
-  // `/upcoming` starts at the fold: once the day has rendered, the days ahead are brought to the top.
+  // The reader's scrolling and the page's own: a scroll the page makes itself (landing on `#upcoming`, revealing the days ahead) is not
+  // the reader's, so the navigation does not follow it (`programmaticUntil`); a wheel, a touch or a key is the reader's at once.
+  const sectionRef = useRef(section);
+  sectionRef.current = section;
+  // The page's own glides outlive a render: they read the latest `onSection` here, not through an effect's dependencies.
+  const onSectionRef = useRef(onSection);
+  onSectionRef.current = onSection;
+  const userScrolled = useRef(false);
+  // Counts the reader's moves, so a landing or a reveal can tell a move made after it from the one that asked for it.
+  const userMoves = useRef(0);
+  const programmaticUntil = useRef(0);
+  useEffect(() => {
+    const byHand = () => {
+      userScrolled.current = true;
+      userMoves.current += 1;
+      programmaticUntil.current = 0;
+    };
+    const onScroll = () => {
+      if (Date.now() < programmaticUntil.current) return;
+      userScrolled.current = true;
+      userMoves.current += 1;
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("wheel", byHand, { passive: true });
+    window.addEventListener("touchmove", byHand, { passive: true });
+    window.addEventListener("keydown", byHand);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("wheel", byHand);
+      window.removeEventListener("touchmove", byHand);
+      window.removeEventListener("keydown", byHand);
+    };
+  }, []);
+  // The days ahead brought under the sticky bar: their first block ("Tomorrow"), so the bar names it at once (the bar's height kept
+  // clear); the fold itself while they are still being read.
+  const scrollToFold = useCallback(
+    (behavior: ScrollBehavior) => {
+      const region = document.getElementById(upcomingId);
+      if (region === null) return;
+      const target =
+        region.querySelector<HTMLElement>('[data-rail-section="upcoming"]') ??
+        region;
+      const offset = (bar?.getBoundingClientRect().height ?? 0) - 2;
+      programmaticUntil.current = Date.now() + 1200;
+      try {
+        window.scrollTo({
+          top: target.getBoundingClientRect().top + window.scrollY - offset,
+          behavior,
+        });
+      } catch {
+        // No scrolling here (a layout engine without geometry).
+      }
+    },
+    [upcomingId, bar],
+  );
+  const scrollToFoldRef = useRef(scrollToFold);
+  scrollToFoldRef.current = scrollToFold;
+  // `#upcoming` opens the fold (the rail's "Upcoming" while on the day does the same); leaving it lets a later `#upcoming` land again.
   const scrolled = useRef(false);
   useEffect(() => {
-    if (section !== "upcoming" || scrolled.current || view.loading) return;
-    const target = document.getElementById(upcomingId);
-    if (target === null) return;
+    if (section === "upcoming") setAhead(true);
+    else scrolled.current = false;
+  }, [section]);
+  // `#upcoming` from elsewhere (a landing, the rail, the old address) starts at the fold: once the day has rendered, the days ahead are
+  // brought to the top and take the focus (the route's own focus leaves a hash to its page), and kept there while the day's rows settle
+  // (they can still be arriving), until the reader scrolls. A hash this page set itself (the follow, the reveal) has nothing to land.
+  useEffect(() => {
+    if (section !== "upcoming" || scrolled.current || view.loading || !ahead)
+      return;
     scrolled.current = true;
-    if (typeof target.scrollIntoView === "function")
-      target.scrollIntoView({ block: "start" });
-  }, [section, view.loading, upcomingId]);
+    scrollToFoldRef.current("auto");
+    document.getElementById(upcomingId)?.focus({ preventScroll: true });
+    const since = userMoves.current;
+    const timers = [120, 360, 800].map((ms) =>
+      window.setTimeout(() => {
+        if (userMoves.current === since) scrollToFoldRef.current("auto");
+      }, ms),
+    );
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [section, view.loading, ahead, upcomingId]);
+  // Revealing the days ahead (a pull past the end of the day, or the fold's pill): the fold opens, the page glides to it and the
+  // navigation moves to Upcoming; folding it away from there brings the navigation back to Today.
+  const revealing = useRef(false);
+  const reveal = useCallback(() => {
+    revealing.current = true;
+    setAhead(true);
+  }, []);
+  useEffect(() => {
+    if (!ahead || !revealing.current) return;
+    revealing.current = false;
+    scrolled.current = true;
+    scrollToFoldRef.current("smooth");
+    if (sectionRef.current !== "upcoming") onSectionRef.current?.("upcoming");
+    // The days ahead may still be being read: once their first block is there, glide to it (unless the reader has moved on since).
+    const since = userMoves.current;
+    const timers = [250, 600, 1100].map((ms) =>
+      window.setTimeout(() => {
+        if (
+          userMoves.current === since &&
+          document.querySelector("[data-upcoming-loading]") === null
+        )
+          scrollToFoldRef.current("smooth");
+      }, ms),
+    );
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [ahead]);
+  const progress = usePullToReveal(!ahead && !view.loading, reveal);
+  // The navigation follows the reader's scroll (Today and Upcoming are one page): the section under the sticky bar names the address's
+  // hash; above every heading it is the day's. Only the reader's scrolling: the first measure (a landing, a layout engine without
+  // geometry) and the page's own scrolls move nothing.
+  // Only a change of the block under the bar moves the hash (never a new `onSection` identity after a navigation: the router hands
+  // out a new navigate function with each one, and following it would undo the rail's own "Upcoming" at once).
+  useEffect(() => {
+    const onSectionNow = onSectionRef.current;
+    if (onSectionNow === undefined || !userScrolled.current) return;
+    if (Date.now() < programmaticUntil.current) return;
+    const next = current?.section ?? "today";
+    if (next === sectionRef.current) return;
+    // The reader is there already: the hash it sets must not land the page at the fold again.
+    if (next === "upcoming") scrolled.current = true;
+    onSectionNow(next);
+  }, [current]);
 
   // The rail's extra marks: the present between the rows whose times bracket it, and a gap label before a row two hours or more after
   // the timed row before it (across the times of day: the rail is one line). A mark that falls before a section's first row is drawn
@@ -231,38 +374,77 @@ export function TodayPage({
   return (
     <div
       ref={setRoot}
-      className="atlas-enter flex max-w-[880px] flex-col"
+      className="atlas-enter flex min-w-0 flex-col"
       data-today-page=""
     >
       {/* The page's heading is the route's (`features/today/route.tsx`), the eyebrow above this date. */}
-      <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <p
-            className="text-3xl font-semibold leading-[1.05] tracking-[-0.03em] text-foreground tablet:text-[40px]"
-            data-today-date=""
-          >
-            {longDayLabel(day)}
-          </p>
-          <p
-            className="text-[15px] text-muted-foreground"
-            data-today-summary=""
-          >
+      <PageHeader
+        title={
+          <TitleText data-today-date="">
+            {mode === "mobile" ? dayLabel(day) : longDayLabel(day)}
+          </TitleText>
+        }
+        summary={
+          <span data-today-summary="">
             {copy.SUMMARY(
               counts.done,
               counts.total,
               counts.toDo,
               counts.notKnown,
             )}
-          </p>
-        </div>
-        {/* One row on the phone: the arrows and the date, with the time zone behind a toggle; from the tablet up the zone sits inline. */}
-        <div
-          className="flex w-full flex-wrap items-center gap-1 tablet:w-auto"
-          data-today-controls=""
+          </span>
+        }
+        actions={
+          // The Final design: the search pill (search, or add a task to the day), Focus, and the way to the full form.
+          <>
+            <SearchPill
+              day={day}
+              zone={zone}
+              className="min-w-0 flex-1 tablet:w-[320px] tablet:flex-none"
+            />
+            <Button asChild variant="outline" size="icon">
+              <Link
+                to="/focus"
+                search={{ ...(dayGiven ? { day } : {}), tz: zone }}
+                aria-label={copy.FOCUS_MODE}
+                data-today-focus=""
+              >
+                <Crosshair aria-hidden="true" strokeWidth={2} />
+              </Link>
+            </Button>
+            <Button asChild variant="outline" size="icon">
+              <Link
+                to={newTask?.to ?? "/tasks/new"}
+                params={newTask?.params}
+                search={newTask?.search ?? {}}
+                aria-label={copy.NEW_TASK}
+                data-today-new-task=""
+              >
+                <Plus aria-hidden="true" strokeWidth={2.25} />
+              </Link>
+            </Button>
+          </>
+        }
+        data-today-controls=""
+      />
+      <div
+        ref={setBar}
+        data-today-bar=""
+        className="sticky top-[var(--shell-inset-top,0px)] z-20 -mx-4 mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/70 bg-background/90 px-4 py-2 backdrop-blur tablet:-mx-10 tablet:px-10"
+      >
+        <p
+          className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground"
+          data-current-section=""
         >
+          {current?.label ??
+            (mode === "mobile" ? dayLabel(day) : longDayLabel(day))}
+        </p>
+        {/* The day's controls, quiet on the bar: the arrows and the date, with the time zone behind a toggle on the phone. */}
+        <div className="flex items-center gap-0.5" data-today-day-controls="">
           <Button
             variant="ghost"
             size="icon"
+            className="size-9"
             aria-label={copy.PREVIOUS_DAY}
             onClick={() => onChange({ day: addDays(day, -1) })}
           >
@@ -281,12 +463,13 @@ export function TodayPage({
             }}
             className={cn(
               inputClass,
-              "min-w-0 flex-1 font-num tablet:w-auto tablet:flex-none",
+              "h-9 w-auto min-w-0 rounded-full border-border bg-card px-3 font-num text-xs",
             )}
           />
           <Button
             variant="ghost"
             size="icon"
+            className="size-9"
             aria-label={copy.NEXT_DAY}
             onClick={() => onChange({ day: addDays(day, 1) })}
           >
@@ -295,7 +478,7 @@ export function TodayPage({
           <Button
             variant="ghost"
             size="icon"
-            className="tablet:hidden"
+            className="size-9 tablet:hidden"
             aria-label={copy.ZONE_TOGGLE}
             aria-expanded={zoneOpen}
             aria-controls={zoneRowId}
@@ -305,58 +488,16 @@ export function TodayPage({
             <Globe aria-hidden="true" />
           </Button>
           {dayGiven && !isToday ? (
-            <Button variant="ghost" onClick={() => onChange({ day: today })}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-full text-xs"
+              onClick={() => onChange({ day: today })}
+            >
               {copy.BACK_TO_TODAY}
             </Button>
           ) : null}
-          {/* Quick add (the Final design, 8 November 2026): a new task from the day itself. */}
-          <Button asChild variant="default" size="icon">
-            <Link
-              to="/tasks/new"
-              aria-label={copy.NEW_TASK}
-              data-today-new-task=""
-            >
-              <Plus aria-hidden="true" strokeWidth={2.25} />
-            </Link>
-          </Button>
-          <div
-            id={zoneRowId}
-            className={cn(
-              "w-full tablet:block tablet:w-auto",
-              zoneOpen ? "block" : "hidden",
-            )}
-          >
-            <label className="sr-only" htmlFor={zoneId}>
-              {copy.ZONE_LABEL}
-            </label>
-            <NativeSelect
-              id={zoneId}
-              value={zone}
-              onChange={(event) => onChange({ zone: event.target.value })}
-              className="w-full tablet:w-[180px]"
-              wrapperClassName="w-full tablet:w-auto"
-              aria-description={copy.ZONE_HINT(zone)}
-            >
-              {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
-                <option key={z} value={z}>
-                  {z}
-                </option>
-              ))}
-            </NativeSelect>
-          </div>
         </div>
-      </header>
-      <div
-        ref={setBar}
-        data-today-bar=""
-        className="sticky top-[var(--shell-inset-top,0px)] z-20 -mx-4 mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border/70 bg-background/90 px-4 py-2 backdrop-blur tablet:-mx-9 tablet:px-9 desktop:-mx-12 desktop:px-12"
-      >
-        <p
-          className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground"
-          data-current-section=""
-        >
-          {current ?? (mode === "mobile" ? dayLabel(day) : longDayLabel(day))}
-        </p>
         <fieldset className="flex max-w-full gap-1.5 overflow-x-auto [scrollbar-width:none] tablet:flex-wrap">
           <legend className="sr-only" id={filterName}>
             {copy.FILTERS_NAME}
@@ -375,6 +516,31 @@ export function TodayPage({
             </label>
           ))}
         </fieldset>
+        <div
+          id={zoneRowId}
+          className={cn(
+            "w-full tablet:block tablet:w-auto",
+            zoneOpen ? "block" : "hidden",
+          )}
+        >
+          <label className="sr-only" htmlFor={zoneId}>
+            {copy.ZONE_LABEL}
+          </label>
+          <NativeSelect
+            id={zoneId}
+            value={zone}
+            onChange={(event) => onChange({ zone: event.target.value })}
+            className="h-9 w-full rounded-full border-border bg-card text-xs tablet:w-[180px]"
+            wrapperClassName="w-full tablet:w-auto"
+            aria-description={copy.ZONE_HINT(zone)}
+          >
+            {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
+              <option key={z} value={z}>
+                {z}
+              </option>
+            ))}
+          </NativeSelect>
+        </div>
       </div>
       <div className="flex flex-col gap-4 py-4">
         {/* WEB-10c: the tasks Today's current answer lists in `pending_tasks` are brought up to date automatically (D-10c-5). */}
@@ -499,6 +665,7 @@ export function TodayPage({
                           actions={actions}
                           writable={env.writable}
                           me={env.accountId}
+                          {...(open ? { open } : {})}
                         />
                         {marks.get(row.id)?.nowAfter ? nowMark("li") : null}
                       </Fragment>
@@ -518,20 +685,41 @@ export function TodayPage({
           ) : null}
         </div>
       )}
+      {/* The row that adds to the day (the Final design): after the day's last row, on the same rail. */}
+      {view.loading || view.localError !== null ? null : (
+        <AddRow
+          day={day}
+          dayLabel={isToday ? "today" : dayLabel(day)}
+          zone={zone}
+          writable={env.writable}
+        />
+      )}
       <RailFold
         label={copy.FOLD_UPCOMING}
         expanded={ahead}
         controls={upcomingId}
-        onToggle={() =>
-          setAhead((open) => {
-            writeUpcomingFold(open ? "folded" : "open");
-            return !open;
-          })
-        }
+        progress={progress}
+        onToggle={() => {
+          if (!ahead) {
+            reveal();
+            return;
+          }
+          setAhead(false);
+          if (sectionRef.current === "upcoming") onSection?.("today");
+        }}
       />
       {ahead ? (
-        <div data-rail-heading={copy.FOLD_UPCOMING}>
-          <Upcoming day={day} zone={zone} now={view.now} id={upcomingId} />
+        <div
+          data-rail-heading={copy.FOLD_UPCOMING}
+          data-rail-section="upcoming"
+        >
+          <Upcoming
+            day={day}
+            zone={zone}
+            now={view.now}
+            id={upcomingId}
+            {...(open ? { open } : {})}
+          />
         </div>
       ) : (
         <div id={upcomingId} hidden />

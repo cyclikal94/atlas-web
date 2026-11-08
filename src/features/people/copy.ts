@@ -89,10 +89,15 @@ export const LINK_UNKNOWN_REASON = {
 /** The facts strip of a person's page (the Final design, 8 November 2026). */
 export const FACTS = {
   linked: "Linked",
-  visibleTo: "Visible to",
+  visibleTo: "Seen by",
   fields: "Fields",
   added: "Added",
+  duplicate: "Possible duplicate",
 } as const;
+export const FACT_COMPARE = "compare";
+/** The list's row groups (the Final design, 8 November 2026), by who added each person. */
+export const GROUP_YOURS = "Added by you";
+export const GROUP_SHARED = "Shared with you";
 export const FACT_LINK_SELF = "To you";
 export const FACT_LINK_OTHER = "To their account";
 export const FACT_LINK_NONE = "Not linked";

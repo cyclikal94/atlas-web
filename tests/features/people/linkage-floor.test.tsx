@@ -16,6 +16,7 @@ import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { HOME, ME, MO, record } from "../../support/people/records";
 import { peopleWorld, person } from "../../support/people/world";
+import { actions } from "./more-menu";
 
 /**
  * Review 25, R25.1 (A5, A9, A15, PPL-6, WF-PEOPLE-03): a linkage answer is current only while no later version of the person is known.
@@ -210,7 +211,18 @@ describe("a later person version withdraws the linkage answer from every consume
   test("control: another person's later version changes nothing of Mo's", async () => {
     const w = moWorld();
     const d = await newField(w);
-    await summarise(w, Q, 2, null);
+    // Quinn's later summary: nothing on Mo's page reads it (a person is a page of their own, the Final design), so the summaries are
+    // invalidated and Quinn's version set without waiting for a floor that no reader here raises.
+    w.api.summary.persons.set(Q, {
+      ...(w.api.summary.persons.get(Q) ?? {}),
+      version: 2,
+      linkage: "none",
+      linked_account_id: null,
+    } as never);
+    act(() => w.people.memory.invalidateSummaries());
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(note(d)).toBe(NOTE);
     expect(linkage()).toBe("other");
     expect(reads(w)).toBe(1);
@@ -392,7 +404,7 @@ describe("the header's actions judge the current linkage at the press (DA25-09)"
     await w.mount(`/people/${P}`);
     await waitFor(() => expect(linkage()).toBe("self"));
     fireEvent.click(
-      within(header()).getByRole("button", { name: "Unlink account" }),
+      actions(header()).getByRole("button", { name: "Unlink account" }),
     );
     const dialog = await screen.findByRole("dialog", {
       name: "Unlink your account from this profile?",
@@ -418,7 +430,7 @@ describe("the header's actions judge the current linkage at the press (DA25-09)"
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     // Opened again on v2: one guarded unlink at v2.
     fireEvent.click(
-      within(header()).getByRole("button", { name: "Unlink account" }),
+      actions(header()).getByRole("button", { name: "Unlink account" }),
     );
     const again = await screen.findByRole("dialog", {
       name: "Unlink your account from this profile?",
@@ -438,7 +450,7 @@ describe("the header's actions judge the current linkage at the press (DA25-09)"
     await w.mount(`/people/${P}`);
     await waitFor(() => expect(linkage()).toBe("self"));
     fireEvent.click(
-      within(header()).getByRole("button", { name: "Unlink account" }),
+      actions(header()).getByRole("button", { name: "Unlink account" }),
     );
     const dialog = await screen.findByRole("dialog", {
       name: "Unlink your account from this profile?",
@@ -459,7 +471,7 @@ describe("the header's actions judge the current linkage at the press (DA25-09)"
     w.api.next.person.push(detail(1, null), renewal.reply);
     await w.mount(`/people/${P}`);
     await waitFor(() => expect(linkage()).toBe("unlinked"));
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     const form = header().querySelector("[data-rename-form]") as HTMLElement;
     fireEvent.change(within(form).getByRole("textbox", { name: "Name" }), {
       target: { value: "Mo Lane" },
@@ -493,7 +505,7 @@ describe("the header's actions judge the current linkage at the press (DA25-09)"
     w.api.next.person.push(detail(1, ME), detail(2, MO));
     await w.mount(`/people/${P}`);
     await waitFor(() => expect(linkage()).toBe("self"));
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     const form = header().querySelector("[data-rename-form]") as HTMLElement;
     fireEvent.change(within(form).getByRole("textbox", { name: "Name" }), {
       target: { value: "Mo Lane" },

@@ -87,6 +87,11 @@ import {
  * admitted, stored or sent before the person's choice, and the queue's answer first, where the editor is withdrawn without an invented
  * absence and reopens with the kept input (R30.1, A4, A5; MU-2750 bound to the first).
  */
+/** The person's other acts sit behind "More" in the identity header (the Final design, 8 November 2026): opened once per screen. */
+async function openMore(scope: Locator) {
+  const more = scope.getByRole("button", { name: "More", exact: true });
+  if ((await more.getAttribute("aria-expanded")) !== "true") await more.click();
+}
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
 const F = "66666666-6666-4666-8666-666666666666";
@@ -586,6 +591,7 @@ test.describe("E-P7: linkage, rename and unlink (A9, A10, A17)", () => {
     await expect(header).toContainText(
       "This is you — you control this profile",
     );
+    await openMore(header);
     await header.getByRole("button", { name: "Rename" }).click();
     await header.getByRole("textbox", { name: "Name" }).fill("Kieran L.");
     await header.getByRole("button", { name: "Save" }).click();
@@ -599,6 +605,7 @@ test.describe("E-P7: linkage, rename and unlink (A9, A10, A17)", () => {
       },
     });
     served.peopleScript.push("abort");
+    await openMore(header);
     await header.getByRole("button", { name: "Unlink account" }).click();
     const confirm = page.getByRole("dialog", {
       name: "Unlink your account from this profile?",
@@ -619,6 +626,7 @@ test.describe("E-P7: linkage, rename and unlink (A9, A10, A17)", () => {
     await expect(other).toContainText(
       "Linked to their own account — Mo controls this name, not you",
     );
+    await openMore(other);
     await expect(other.getByRole("button", { name: "Rename" })).toBeDisabled();
     await expect(other).toContainText(
       "Only Mo (the linked account) can unlink this profile",
@@ -640,6 +648,7 @@ test.describe("E-P7: one column (tablet), where no list beside the detail reads 
     const header = page.locator("[data-identity-header]");
     await expect(header).toContainText("Not linked to an account");
     await connectivity(context, page, false);
+    await openMore(header);
     await header.getByRole("button", { name: "Rename" }).click();
     await header.getByRole("textbox", { name: "Name" }).fill("Ada L.");
     await header.getByRole("button", { name: "Save" }).click();
@@ -649,6 +658,7 @@ test.describe("E-P7: one column (tablet), where no list beside the detail reads 
     await expect(page.locator("[data-identity-header]")).toContainText(
       "isn't known on this device",
     );
+    await openMore(page.locator("[data-identity-header]"));
     await expect(
       page
         .locator("[data-identity-header]")
@@ -695,6 +705,7 @@ test.describe("E-P8: archive and restore (A12)", () => {
     await expect(
       detail(page).getByRole("button", { name: "Archived fields (1)" }),
     ).toBeVisible();
+    await openMore(page.locator("[data-identity-header]"));
     await page
       .locator("[data-identity-header]")
       .getByRole("button", { name: "Archive" })
@@ -1237,7 +1248,10 @@ test.describe("E-P13: keyboard only (A21)", () => {
     await page.locator(`[data-person-row="${P}"]`).focus();
     await page.keyboard.press("Enter");
     await expect(detail(page)).toBeVisible();
-    await expect(heading).toBeFocused();
+    // The person is a page of their own (the Final design): its heading, the name, takes the focus after the navigation.
+    await expect(
+      detail(page).getByRole("heading", { level: 1, name: "Ada" }),
+    ).toBeFocused();
     await detail(page).getByRole("link", { name: "Add a field" }).focus();
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog", { name: "Add a field" });
@@ -1477,6 +1491,7 @@ test.describe("E-P17: state stays with its person (A9, A13; finding 4)", () => {
       { linked: { [P]: ME, [Q]: null } },
     );
     const header = page.locator("[data-identity-header]");
+    await openMore(header);
     await header.getByRole("button", { name: "Rename" }).click();
     await header.getByRole("textbox", { name: "Name" }).fill("Ada corrected");
     await navigateInApp(page, `/people/${Q}`);
@@ -3835,8 +3850,7 @@ test.describe("E-P35: a header action and a list row keep their place through an
             detail(page).locator('[data-linkage="unknown"]'),
           ).toBeVisible();
           // On the phone the header's controls fold behind "Actions" (the Final design, 8 November 2026): opened first.
-          const fold = detail(page).getByRole("button", { name: "Actions" });
-          if (await fold.isVisible()) await fold.click();
+          await openMore(detail(page).locator("[data-identity-header]"));
           const target = detail(page).locator(
             '[data-people-action="archive-person"]',
           );
@@ -5504,7 +5518,7 @@ test.describe("E-P41: retained history never hides a cached field, in real Index
 
 test.describe("E-P42: New person keeps what was typed across a remount of the same identity (A8, A21; review 19, R19.1)", () => {
   for (const boundary of ["sync control", "tablet width", "403"] as const)
-    test(`${boundary === "sync control" ? "control, kept by the sync control" : boundary === "tablet width" ? "1440×900 to 834×1112: the list moves and the form is remounted" : "a 403 remounts the protected tree"}: reopened with the name and note, then saved as one batch`, async ({
+    test(`${boundary === "sync control" ? "control, kept by the sync control" : boundary === "tablet width" ? "1440×900 to 834×1112: the form stays through the resize" : "a 403 remounts the protected tree"}: reopened with the name and note, then saved as one batch`, async ({
       context,
     }, info) => {
       // The 403 is held until the input is typed: the remount it causes must come AFTER the input exists, or there is nothing to lose.
@@ -5543,8 +5557,9 @@ test.describe("E-P42: New person keeps what was typed across a remount of the sa
         await expect(page.locator("[data-e-p42-before]")).toHaveCount(0);
         await navigateInApp(page, "/people");
       } else if (boundary === "tablet width") {
+        // The people take the page at every width (the Final design, 8 November 2026): the resize moves nothing and the form stays.
         await page.setViewportSize({ width: 834, height: 1112 });
-        await expect(page.locator("[data-e-p42-before]")).toHaveCount(0);
+        await expect(page.locator("[data-e-p42-before]")).toHaveCount(1);
       } else {
         await expect
           .poll(() =>
@@ -5563,7 +5578,9 @@ test.describe("E-P42: New person keeps what was typed across a remount of the sa
       await expect(
         dialog.getByRole("textbox", { name: "First note" }),
       ).toHaveValue("Unsent note");
-      await expect(dialog).toContainText("Your unsaved changes were kept.");
+      // The note says a remount restored the input; through a resize the form never left, so there is nothing to say.
+      if (boundary !== "tablet width")
+        await expect(dialog).toContainText("Your unsaved changes were kept.");
       await expect(dialog.getByRole("button", { name: "Save" })).toBeEnabled();
       await dialog.getByRole("button", { name: "Save" }).click();
       await expect(dialog).toBeHidden();
@@ -5632,6 +5649,7 @@ test.describe("E-P43: a linkage read asked before an unlink never replaces the o
         { status: 409, body: atlas("conflict") },
         { status: 200, body: { revision: 3, person_id: P } },
       );
+      await openMore(header);
       await header.getByRole("button", { name: "Rename", exact: true }).click();
       await header
         .getByRole("textbox", { name: "Name", exact: true })
@@ -5639,6 +5657,7 @@ test.describe("E-P43: a linkage read asked before an unlink never replaces the o
       await header.getByRole("button", { name: "Save", exact: true }).click();
       await expect.poll(() => reads).toBe(1);
       await expect(header.locator("[data-rename-form]")).toHaveCount(0);
+      await openMore(header);
       await header
         .getByRole("button", { name: "Unlink account", exact: true })
         .click();
@@ -5693,11 +5712,13 @@ test.describe("E-P43: a linkage read asked before an unlink never replaces the o
         ["unlink", 2],
       ]);
       await expect(linkage).toHaveAttribute("data-linkage", "unlinked");
+      await openMore(header);
       await expect(
         header.getByRole("button", { name: "Unlink account", exact: true }),
       ).toHaveCount(0);
       // Offline, the unlinked person's rename is the ordinary content edit, queued over the version the cache holds.
       await connectivity(context, page, false);
+      await openMore(header);
       await header.getByRole("button", { name: "Rename", exact: true }).click();
       await header
         .getByRole("textbox", { name: "Name", exact: true })
@@ -6361,15 +6382,13 @@ test.describe("E-P48: a person summary's later version withdraws the linkage ans
         },
       );
       const dialog = page.getByRole("dialog");
-      const row = page.locator(`[data-person-row="${P}"]`);
       const line = page.locator("[data-identity-header] [data-linkage]");
       const value = dialog.getByRole("textbox", { name: "Value", exact: true });
       const reads = () => served.log.filter((l) => l === `GET /people/${P}`);
       await expect(dialog.locator("[data-subject-note]")).toHaveText(NOTE);
       await expect(line).toHaveAttribute("data-linkage", "other");
-      await expect(row.locator("[data-person-linkage]")).toContainText(
-        "Linked",
-      );
+      // The person is a page of their own (no list row beside it): the header's line says the linkage.
+      await expect(line).toContainText("Linked");
       await value.fill("Unfinished input");
       expect(reads()).toHaveLength(1);
       if (unlinked)
@@ -6377,19 +6396,18 @@ test.describe("E-P48: a person summary's later version withdraws the linkage ans
           person: personP(P, "Mo", { version: 2 }),
           linked: null,
         });
+      // The person is a page of their own (the Final design): the refresh re-reads the person's own summary, not the list's page.
       const response = page.waitForResponse(
-        (r) => r.url().includes("/people/summaries?") && r.status() === 200,
+        (r) => r.url().includes(`/people/${P}/summary`) && r.status() === 200,
       );
       // The production visible-page refresh listener (no bfcache or reload claim; no timer changed).
       await page.evaluate(() =>
         document.dispatchEvent(new Event("visibilitychange")),
       );
       const body = await (await response).json();
-      expect(body.items[0].version).toBe(unlinked ? 2 : 1);
-      expect(body.items[0].linked_account_id).toBe(unlinked ? null : MO);
-      await expect(row.locator("[data-person-linkage]")).toContainText(
-        unlinked ? "Not linked" : "Linked",
-      );
+      expect(body.summary.version).toBe(unlinked ? 2 : 1);
+      expect(body.summary.linked_account_id).toBe(unlinked ? null : MO);
+      await expect(line).toContainText(unlinked ? "Not linked" : "Linked");
       await expect(value).toHaveValue("Unfinished input");
       if (unlinked) {
         // The header reads v2 itself (once), and says what it answered.
@@ -6470,6 +6488,7 @@ test.describe("E-P49: an uncertain Unlink or Rename is tried again as it was sen
         "data-linkage",
         "self",
       );
+      await openMore(header);
       await header
         .getByRole("button", { name: "Unlink account", exact: true })
         .click();
@@ -6541,6 +6560,7 @@ test.describe("E-P49: an uncertain Unlink or Rename is tried again as it was sen
         "data-linkage",
         "self",
       );
+      await openMore(header);
       await header.getByRole("button", { name: "Rename", exact: true }).click();
       await header
         .getByRole("textbox", { name: "Name", exact: true })
@@ -6641,6 +6661,7 @@ test.describe("E-P51: an uncertain Rename across a reload is forgotten, read afr
       "data-linkage",
       "self",
     );
+    await openMore(header);
     await header.getByRole("button", { name: "Rename", exact: true }).click();
     await header
       .getByRole("textbox", { name: "Name", exact: true })
@@ -6681,6 +6702,7 @@ test.describe("E-P51: an uncertain Rename across a reload is forgotten, read afr
     await expect(header).not.toContainText(
       "We couldn't confirm this was saved",
     );
+    await openMore(header);
     await header.getByRole("button", { name: "Rename", exact: true }).click();
     await expect(
       header.getByRole("textbox", { name: "Name", exact: true }),

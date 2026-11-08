@@ -6,6 +6,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
+import { MENU_COPY } from "../../../src/components/ui/action-menu";
 import { type EnqueueRequest, readSaveEvidence } from "../../../src/data";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { DraftRow } from "../../../src/data/model/types";
@@ -71,10 +72,17 @@ const names = (t: Mounted, kind: string) =>
   commands(t, kind).map((c) => c.name);
 const dialog = () => screen.queryByRole("dialog") as HTMLElement | null;
 function press(name: string, root: HTMLElement | Document = document) {
-  const found = within(root as HTMLElement).queryAllByRole("button", {
-    name,
-  })[0];
-  expect(found, `the button "${name}"`).toBeDefined();
+  const scope = within(root as HTMLElement);
+  let found = scope.queryAllByRole("button", { name })[0];
+  if (found === undefined) {
+    // The list's other acts (Rename, Sharing, Archive) are behind "More" (the Final design, 8 November 2026).
+    const more = scope.queryAllByRole("button", { name: MENU_COPY.more })[0];
+    if (more !== undefined) {
+      fireEvent.click(more);
+      found = scope.queryAllByRole("menuitem", { name })[0];
+    }
+  }
+  expect(found, `the control "${name}"`).toBeDefined();
   fireEvent.click(found as HTMLElement);
 }
 const nameField = () =>

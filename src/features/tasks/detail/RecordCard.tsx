@@ -1,7 +1,10 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { Check } from "lucide-react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
+import { pillClass } from "../../../components/ui/chip";
 import { Input } from "../../../components/ui/input";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
+import { cn } from "../../../lib/utils";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -68,6 +71,7 @@ export function RecordCard({
   writable,
   focus,
   gate,
+  extra,
 }: {
   row: RowModel;
   actions: Pick<TaskActions, "record">;
@@ -81,6 +85,8 @@ export function RecordCard({
    * did, and owns the ticket from then on). Absent: every record is queued as before.
    */
   gate?: (evidence: Evidence, ticket: KeptTicket | null) => boolean;
+  /** The day's other acts, drawn in the same row (the Final design): the correction, the timer. */
+  extra?: ReactNode;
 }) {
   const env = useTasksEnv();
   const heading = useId();
@@ -132,18 +138,20 @@ export function RecordCard({
       {label}
     </Button>
   );
+  // The day's action row (the Final design): the record control and the day's other acts in one line under the facts; on the phone it
+  // stays in reach at the bottom of the viewport. The heading is for assistive technology only.
   return (
     <section
       ref={section}
       tabIndex={-1}
       aria-labelledby={heading}
       data-record-card={goal.kind}
-      className="flex flex-col gap-3 rounded-xl border bg-card p-5 shadow-sm"
+      className={cn(
+        "flex flex-col gap-3",
+        "max-tablet:sticky max-tablet:bottom-0 max-tablet:z-20 max-tablet:-mx-4 max-tablet:border-t max-tablet:border-border/70 max-tablet:bg-background/95 max-tablet:px-4 max-tablet:py-3 max-tablet:backdrop-blur",
+      )}
     >
-      <h2
-        id={heading}
-        className="text-base font-semibold tracking-tight text-foreground"
-      >
+      <h2 id={heading} className="sr-only">
         {RECORD_COPY.heading}
       </h2>
       {input.recovery ? (
@@ -153,12 +161,16 @@ export function RecordCard({
         />
       ) : null}
       {goal.kind === "checkbox" ? (
-        <span>
+        <div
+          className="flex flex-wrap items-start gap-2"
+          data-record-actions=""
+        >
           {reason !== null || busy ? (
             blocked(done ? copy.MARK_NOT_DONE : copy.MARK_DONE)
           ) : (
             <Button
               variant={done ? "outline" : "default"}
+              className="px-5"
               onClick={() => {
                 const evidence: Evidence = {
                   kind: "checkbox",
@@ -175,10 +187,18 @@ export function RecordCard({
                 );
               }}
             >
+              {done ? null : (
+                <Check
+                  aria-hidden="true"
+                  className="size-4"
+                  strokeWidth={2.6}
+                />
+              )}
               {done ? copy.MARK_NOT_DONE : copy.MARK_DONE}
             </Button>
           )}
-        </span>
+          {extra}
+        </div>
       ) : goal.kind === "numeric" ? (
         <div className="flex flex-col gap-3">
           <p className="text-sm text-foreground" data-record-progress="">
@@ -188,12 +208,15 @@ export function RecordCard({
               goal.unit,
             )}
           </p>
-          <fieldset className="flex flex-wrap gap-3">
+          <fieldset className="flex flex-wrap gap-1.5">
             <legend className="sr-only">{RECORD_COPY.heading}</legend>
             {(["amount", "observe"] as const).map((m) => (
               <label
                 key={m}
-                className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
+                className={cn(
+                  pillClass(mode === m),
+                  "cursor-pointer has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring",
+                )}
               >
                 <input
                   ref={mode === m ? modeRef : undefined}
@@ -201,14 +224,17 @@ export function RecordCard({
                   name={`${heading}-mode`}
                   checked={mode === m}
                   onChange={() => input.edit((v) => ({ ...v, mode: m }))}
-                  className="size-4"
+                  className="sr-only"
                 />
                 {m === "amount" ? RECORD_COPY.logAmount : RECORD_COPY.checkedOn}
               </label>
             ))}
           </fieldset>
           {mode === "amount" ? (
-            <div className="flex flex-wrap items-end gap-2">
+            <div
+              className="flex flex-wrap items-end gap-2"
+              data-record-actions=""
+            >
               <div className="w-32">
                 <Input
                   ref={amountRef}
@@ -259,27 +285,34 @@ export function RecordCard({
                   {copy.RECORD}
                 </Button>
               )}
+              {extra}
             </div>
-          ) : reason !== null || busy ? (
-            <span>{blocked(copy.RECORD)}</span>
           ) : (
-            <span>
-              <Button
-                variant="default"
-                onClick={() =>
-                  void run(() =>
-                    actions.record(
-                      row,
-                      { kind: "observe" },
-                      null,
-                      RECORD_COPY.checked,
-                    ),
-                  )
-                }
-              >
-                {copy.RECORD}
-              </Button>
-            </span>
+            <div
+              className="flex flex-wrap items-start gap-2"
+              data-record-actions=""
+            >
+              {reason !== null || busy ? (
+                blocked(copy.RECORD)
+              ) : (
+                <Button
+                  variant="default"
+                  onClick={() =>
+                    void run(() =>
+                      actions.record(
+                        row,
+                        { kind: "observe" },
+                        null,
+                        RECORD_COPY.checked,
+                      ),
+                    )
+                  }
+                >
+                  {copy.RECORD}
+                </Button>
+              )}
+              {extra}
+            </div>
           )}
           {error ? (
             <p id={`${heading}-error`} className="text-xs text-destructive">
@@ -337,6 +370,14 @@ export function RecordCard({
           ) : null}
         </ul>
       )}
+      {goal.kind === "checklist" && extra ? (
+        <div
+          className="flex flex-wrap items-start gap-2"
+          data-record-actions=""
+        >
+          {extra}
+        </div>
+      ) : null}
       <p className="text-xs text-muted-foreground">{RECORD_COPY.offline}</p>
     </section>
   );

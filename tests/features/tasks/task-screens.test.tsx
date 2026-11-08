@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
+import { MENU_COPY } from "../../../src/components/ui/action-menu";
 import * as copy from "../../../src/features/tasks/copy";
 import { CONTROLS_COPY } from "../../../src/features/tasks/detail/Controls";
 import {
@@ -164,8 +165,10 @@ describe("archive and restore (A13)", () => {
       env: { online: false },
     });
     await t.until(ready);
+    // Archive is behind "More" (the Final design, 8 November 2026); the menu closes on the choice.
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
     fireEvent.click(
-      screen.getByRole("button", { name: CONTROLS_COPY.archive }),
+      screen.getByRole("menuitem", { name: CONTROLS_COPY.archive }),
     );
     await t.settle();
     expect(command(t, "archive")).toMatchObject({
@@ -174,9 +177,12 @@ describe("archive and restore (A13)", () => {
       expected_version: 1,
     });
     await t.until(
-      () =>
-        screen.queryByRole("button", { name: CONTROLS_COPY.restore }) !== null,
+      () => document.querySelector("[data-archive=archived]") !== null,
     );
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    expect(
+      screen.getByRole("menuitem", { name: CONTROLS_COPY.restore }),
+    ).toBeInTheDocument();
   });
 });
 

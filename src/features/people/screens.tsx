@@ -1,7 +1,6 @@
-import { Link, Outlet, useMatches, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { useLayoutMode } from "../../app/shell/layout-mode";
+import { Eyebrow, PageHeader } from "../../components/ui/page-header";
 import { PageHeading } from "../../components/ui/page-heading";
 import * as copy from "./copy";
 import { PersonDetail } from "./detail/PersonDetail";
@@ -27,25 +26,22 @@ export function PeopleScreens() {
   );
 }
 
+/** The page's header (the Final design): the eyebrow, the title, one summary line, and the way to the requests at the right. */
 function ListHeader() {
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex flex-col gap-1">
-          <PageHeading>{copy.PAGE_TITLE}</PageHeading>
-          <p className="text-sm text-muted-foreground">{copy.PAGE_SUBHEAD}</p>
-        </div>
-        {/* WEB-11b: "Requests" with the waiting count (every layout), and the "N requests waiting for you" banner (below 1280 px). */}
-        <RequestsEntry />
-      </div>
-    </div>
+    <PageHeader
+      eyebrow={<Eyebrow>{copy.PAGE_TITLE}</Eyebrow>}
+      title={<PageHeading>{copy.PAGE_TITLE}</PageHeading>}
+      summary={copy.PAGE_SUBHEAD}
+      // WEB-11b: "Requests" with the waiting count (every layout), and the "N requests waiting for you" banner (below 1280 px).
+      actions={<RequestsEntry />}
+    />
   );
 }
 
 function PeopleLayout() {
   // The viewer-safe summaries shown anywhere below are read again when anything they depend on may have changed (finding 8).
   useSummaryFreshness();
-  const mode = useLayoutMode();
   const matches = useMatches();
   const leaf = matches.at(-1);
   const personId =
@@ -59,44 +55,9 @@ function PeopleLayout() {
     )
   )
     return <Outlet />;
-  if (mode === "desktop")
-    return (
-      <div className="flex flex-col gap-5">
-        <ListHeader />
-        <div
-          className="grid gap-6"
-          style={{ gridTemplateColumns: "380px minmax(0, 1fr)" }}
-        >
-          <PeopleList selectedId={personId} />
-          <div className="min-w-0">
-            {personId === null ? (
-              <p
-                className="text-sm text-muted-foreground"
-                data-people-state="select"
-              >
-                {copy.SELECT_PERSON}
-              </p>
-            ) : (
-              <Outlet />
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  if (personId !== null)
-    return (
-      <div className="flex flex-col gap-3">
-        {/* On the phone the shell's header carries the way back (`shell/mobile-back.ts`). */}
-        <Link
-          to="/people"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
-        >
-          <ArrowLeft aria-hidden="true" size={16} />
-          {copy.BACK_TO_PEOPLE}
-        </Link>
-        <Outlet />
-      </div>
-    );
+  // The Final design: the people take the page, and a person is a page of their own at every width (the detail draws its breadcrumb;
+  // on the phone the shell's header carries the way back).
+  if (personId !== null) return <Outlet />;
   return (
     <div className="flex flex-col gap-5">
       <ListHeader />
@@ -112,16 +73,10 @@ export function PersonScreen({
   personId: string;
   children: ReactNode;
 }) {
-  const mode = useLayoutMode();
   return (
     // Keyed: everything on a person's screen (an open rename and its typed name, the fields' step, the held changes' runs) belongs to
     // ONE person; another person's route mounts a new screen (finding 4 of the review of 13 October).
-    <PersonDetail
-      key={personId}
-      personId={personId}
-      asPage={mode !== "desktop"}
-      slots={peopleSlots}
-    >
+    <PersonDetail key={personId} personId={personId} asPage slots={peopleSlots}>
       {children}
     </PersonDetail>
   );

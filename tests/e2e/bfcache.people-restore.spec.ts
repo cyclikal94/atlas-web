@@ -1,4 +1,10 @@
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import {
+  type BrowserContext,
+  expect,
+  type Locator,
+  type Page,
+  test,
+} from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
 import { API, json, ME, personP, setup } from "./people-helpers";
 
@@ -18,6 +24,11 @@ import { API, json, ME, personP, setup } from "./people-helpers";
  *
  * Its nonpersisted companion, E-P51 (a reload, in all three engines), is in fixture.people.spec.ts.
  */
+/** The person's other acts sit behind "More" in the identity header (the Final design, 8 November 2026): opened once per screen. */
+async function openMore(scope: Locator) {
+  const more = scope.getByRole("button", { name: "More", exact: true });
+  if ((await more.getAttribute("aria-expanded")) !== "true") await more.click();
+}
 const P = "55555555-5555-4555-8555-555555555555";
 const UNCERTAIN = "We couldn't confirm this was saved";
 type Sent = { key: string | null; body: string | null };
@@ -104,6 +115,7 @@ test.describe("E-P50: an uncertain Rename across a real persisted Back (A17, A20
       "data-linkage",
       "self",
     );
+    await openMore(header);
     await header.getByRole("button", { name: "Rename", exact: true }).click();
     await header
       .getByRole("textbox", { name: "Name", exact: true })

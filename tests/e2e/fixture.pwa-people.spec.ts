@@ -46,6 +46,11 @@ import {
  * no-retry policy are unchanged. The earlier offline attempt stays failed (pool request request-6c4c77941bde469dadfb): offline person pages
  * are still not a capability of this world. Fixture evidence: these reads are the client's view of a backend, not a released one.
  */
+/** The person's other acts sit behind "More" in the identity header (the Final design, 8 November 2026): opened once per screen. */
+async function openMore(scope: Locator) {
+  const more = scope.getByRole("button", { name: "More", exact: true });
+  if ((await more.getAttribute("aria-expanded")) !== "true") await more.click();
+}
 const NAME = "Q4 unfinished person";
 const SAVE_FAILED =
   "Couldn't save your unfinished form before reloading. Nothing was lost — your form is still here.";
@@ -215,6 +220,7 @@ const FORMS: PersonForm[] = [
     field: (page) => header(page).getByRole("textbox", { name: "Name" }),
     discarded: PERSON_ROW.label,
     async type(page) {
+      await openMore(header(page));
       await header(page).getByRole("button", { name: "Rename" }).click();
       const box = header(page).getByRole("textbox", { name: "Name" });
       await box.fill(RENAMED);

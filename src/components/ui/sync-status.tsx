@@ -139,21 +139,25 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
   }
 
   if (variant === "rail") {
+    // The sidebar's status is a quiet row (the Final design): the dot and the words, a border only while the state asks for one.
     return (
       <button
         type="button"
         aria-label={name}
         data-sync-tone={view.tone}
         onClick={activate}
-        className={`atlas-transition flex w-full items-center gap-2.5 rounded-md border bg-card px-3 py-2.5 text-left shadow-xs hover:bg-accent ${BORDER[view.tone]}`}
+        // It paints its own surface (the sidebar's colour), so its text is measured against what it sits on.
+        className={`atlas-transition flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-md border bg-sidebar px-3 py-1.5 text-left hover:bg-sidebar-accent ${
+          view.tone === "ok" ? "border-transparent" : BORDER[view.tone]
+        }`}
       >
         {dot}
         <span className="flex min-w-0 flex-col gap-px">
-          <span className="text-sm font-medium text-foreground">
+          <span className="truncate text-[13px] text-sidebar-foreground">
             {view.label}
           </span>
           {view.detail ? (
-            <span className="font-num text-xs text-muted-foreground">
+            <span className="truncate font-num text-xs text-muted-foreground">
               {view.detail}
             </span>
           ) : null}

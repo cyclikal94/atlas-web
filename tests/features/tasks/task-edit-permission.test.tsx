@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
+import { MENU_COPY } from "../../../src/components/ui/action-menu";
 import type { CacheRow } from "../../../src/data";
 import { DETAIL_COPY } from "../../../src/features/tasks/detail/TaskDetail";
 import { PRESET_COPY } from "../../../src/features/tasks/form/PresetPicker";
@@ -84,8 +85,10 @@ describe("the task's Edit affordance (R29)", () => {
         env: { online: false },
       });
       await t.until(detail);
-      expect(screen.queryByRole("link", { name: DETAIL_COPY.edit })).toBeNull();
-      const edit = screen.getByRole("button", { name: DETAIL_COPY.edit });
+      // The task's other acts are behind "More" (the Final design, 8 November 2026): a withheld one is a disabled item with its reason.
+      fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+      const edit = screen.getByRole("menuitem", { name: DETAIL_COPY.edit });
+      expect(edit).not.toHaveAttribute("href");
       expect(edit).toBeDisabled();
       expect(edit).toHaveAccessibleDescription(DETAIL_COPY.editDenied);
     });
@@ -98,9 +101,10 @@ describe("the task's Edit affordance (R29)", () => {
       env: { online: false },
     });
     await t.until(detail);
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
     expect(
-      screen.getByRole("link", { name: DETAIL_COPY.edit }),
-    ).toBeInTheDocument();
+      screen.getByRole("menuitem", { name: DETAIL_COPY.edit }),
+    ).toHaveAttribute("href", `/tasks/${task.taskId}/edit`);
   });
 });
 

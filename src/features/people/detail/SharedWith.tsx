@@ -40,7 +40,7 @@ export function SharedWithSection({ personId }: { personId: string }) {
     <GroupedSection
       aria-labelledby={heading}
       data-shared-with={rail?.disclosure ?? view.status}
-      heading={<h3 id={heading}>{copy.SHARED_WITH}</h3>}
+      heading={<h2 id={heading}>{copy.SHARED_WITH}</h2>}
     >
       {view.status === "failed" && view.reason === "not_found" ? (
         <p className="text-sm text-muted-foreground">{copy.RAIL_NOT_FOUND}</p>

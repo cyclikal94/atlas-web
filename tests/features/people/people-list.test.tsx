@@ -180,34 +180,31 @@ describe("the people list", () => {
     expect(document.querySelector("[data-person-linkage]")).toBeNull();
   });
 
-  test("desktop is master-detail with the selected row marked; below 1280 px the list and the detail are one column each", async () => {
+  test("a person is a page of their own at every width: no list beside it, the name as the heading, the breadcrumb back", async () => {
     const w = peopleWorld();
     const [a] = ids(1);
     w.setCache([person({ id: a, label: "Ada" })]);
-    await w.mount(`/people/${a}`);
-    await waitFor(() =>
+    for (const width of [1440, 834]) {
+      cleanup();
+      media.set({ width });
+      await w.mount(`/people/${a}`);
+      // The detail is its own lazy route component.
+      await waitFor(() =>
+        expect(
+          document.querySelector(`[data-person-detail="${a}"]`),
+        ).not.toBeNull(),
+      );
+      expect(document.querySelector("[data-people-list]")).toBeNull();
       expect(
-        document.querySelector(`[data-person-row="${a}"]`),
-      ).toHaveAttribute("aria-current", "page"),
-    );
-    // The detail is its own lazy route component: it can appear after the list's row.
-    await waitFor(() =>
-      expect(
-        document.querySelector(`[data-person-detail="${a}"]`),
-      ).not.toBeNull(),
-    );
-    cleanup();
-    media.set({ width: 834 });
-    await w.mount(`/people/${a}`);
-    await waitFor(() =>
-      expect(
-        document.querySelector(`[data-person-detail="${a}"]`),
-      ).not.toBeNull(),
-    );
-    expect(document.querySelector("[data-people-list]")).toBeNull();
-    // The person's name is the page heading when the list is not beside it.
-    expect(
-      screen.getByRole("heading", { level: 1, name: "Ada" }),
-    ).toBeInTheDocument();
+        screen.getByRole("heading", { level: 1, name: "Ada" }),
+      ).toBeInTheDocument();
+      // The way back (the Final design): the breadcrumb to the people, hidden on the phone where the shell's header carries it.
+      const crumbs = document.querySelector("[data-breadcrumb]") as HTMLElement;
+      expect(crumbs).not.toBeNull();
+      expect(within(crumbs).getByRole("link")).toHaveAttribute(
+        "href",
+        "/people",
+      );
+    }
   });
 });

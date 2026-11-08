@@ -462,8 +462,18 @@ export async function mountTasks(options: {
    * guard as before.
    */
   quota?: (guard: QuotaGuard) => QuotaGuard;
+  /**
+   * How a task opens from the day (Settings · Layout, the Final design). The suite's screens were specified with the task as a page of
+   * its own, so that is the default here; a test of the containers chooses one.
+   */
+  wrapper?: "page" | "split" | "peek" | "overlay";
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
+  try {
+    localStorage.setItem("atlas.task-wrapper.v1", options.wrapper ?? "page");
+  } catch {
+    // No storage in this environment: the default container applies.
+  }
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
   await import("../../../src/features/tasks/screens");
   const world = new DataTestWorld();

@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { UPCOMING_FOLD_STORAGE_KEY } from "../../../src/app/shell/preferences";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { MaterialiseSequenceRow } from "../../../src/data/model/types";
 import { createConflictHandlerRegistry } from "../../../src/data/outbox/registries";
 import type { TasksResult } from "../../../src/features/tasks/api";
@@ -37,16 +36,12 @@ import {
  * FIXTURE evidence: a stubbed answer is the stub's.
  */
 installMatchMedia({ width: 1440 });
-// These cases count the DAILY catch-up alone: the days ahead (`today/Ahead.tsx`, asked for while the Upcoming fold is open) are folded
-// away here and covered by `ahead.test.tsx`.
-beforeEach(() => {
-  localStorage.setItem(UPCOMING_FOLD_STORAGE_KEY, "folded");
-});
+// These cases count the DAILY catch-up alone: the days ahead (`today/Ahead.tsx`, asked for while the Upcoming fold is open; it is
+// closed by default since 8 November 2026) are covered by `ahead.test.tsx`.
 afterEach(() => {
   cleanup();
   forgetTaskMemory();
   forgetCatchUp();
-  localStorage.removeItem(UPCOMING_FOLD_STORAGE_KEY);
 });
 const PATH = `/today?day=${TODAY}&tz=UTC`;
 const banner = () =>

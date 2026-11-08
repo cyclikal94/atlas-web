@@ -24,6 +24,7 @@ import {
   peopleWorld,
   person,
 } from "../../support/people/world";
+import { actions, findAction } from "./more-menu";
 
 /**
  * Review 6, finding 1 (`people-form-completion-lifetime`): a save's completion ends only the EDITING SESSION it was made in
@@ -507,8 +508,10 @@ describe("review 19, finding 1: New person keeps its latest input and session ac
     await w.mount("/people");
   };
 
-  for (const boundary of ["remount", "tablet width", "sync control"] as const)
-    test(`${boundary === "sync control" ? "control, kept by the sync control" : boundary === "remount" ? "the same identity's tree remounted (a 403 elsewhere)" : "the list moved at the tablet width"}: reopened with the name, the note and the same session`, async () => {
+  // The Final design (8 November 2026): the people take the page at every width, so the list no longer moves between tree positions at the
+  // tablet width; the boundaries left are the remount and the sync control.
+  for (const boundary of ["remount", "sync control"] as const)
+    test(`${boundary === "sync control" ? "control, kept by the sync control" : "the same identity's tree remounted (a 403 elsewhere)"}: reopened with the name, the note and the same session`, async () => {
       const w = empty();
       await w.mount("/people");
       let d = await open();
@@ -530,7 +533,7 @@ describe("review 19, finding 1: New person keeps its latest input and session ac
       expect([...w.people.memory.sessions.keys()]).toEqual([session]);
     });
 
-  for (const boundary of ["remount", "tablet width"] as const)
+  for (const boundary of ["remount"] as const)
     test(`typed after an earlier sync-control snapshot, then ${boundary === "remount" ? "remounted" : "moved at the tablet width"}: the later input, never the snapshot`, async () => {
       const w = empty();
       await w.mount("/people");
@@ -681,7 +684,9 @@ describe("review 6, finding 1: rename and unlink", () => {
       expect(
         await within(header()).findByText("Not linked to an account"),
       ).toBeInTheDocument();
-      fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+      fireEvent.click(
+        actions(header()).getByRole("button", { name: "Rename" }),
+      );
       fireEvent.change(
         within(header()).getByRole("textbox", { name: "Name" }),
         { target: { value: "Ada L." } },
@@ -700,9 +705,7 @@ describe("review 6, finding 1: rename and unlink", () => {
           params: { personId: P },
         });
       });
-      fireEvent.click(
-        await within(header()).findByRole("button", { name: "Rename" }),
-      );
+      fireEvent.click(await findAction("Rename", header));
       const name = within(header()).getByRole("textbox", { name: "Name" });
       expect(name).toHaveValue("Ada L.");
       if (typedLater) fireEvent.change(name, { target: { value: "Ada Lo" } });
@@ -744,11 +747,7 @@ describe("review 6, finding 1: rename and unlink", () => {
       });
       await w.mount(`/people/${P}`);
       const ask = async () => {
-        fireEvent.click(
-          await within(header()).findByRole("button", {
-            name: "Unlink account",
-          }),
-        );
+        fireEvent.click(await findAction("Unlink account", header));
         return screen.findByRole("dialog", {
           name: "Unlink your account from this profile?",
         });

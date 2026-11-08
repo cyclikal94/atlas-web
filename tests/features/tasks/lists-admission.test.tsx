@@ -144,7 +144,12 @@ async function pendingTask(t: Mounted, n: number, title = "Pending task") {
  * review with no kinds), then the production confirmation with a newer defaults revision, which supersedes it under a fresh id. Returns
  * the replacement's header.
  */
-async function replaceByConfirmation(t: Mounted, original: DraftRow) {
+async function replaceByConfirmation(
+  t: Mounted,
+  original: DraftRow,
+  /** From inside the admission hook (`admissions`' `after`): the test's own `act` scope is already open, so no act or settle of its own. */
+  options: { nested?: boolean } = {},
+) {
   const outbox = t.data.outbox();
   if (outbox === null) throw new Error("no outbox");
   const refused: DraftRow = {
@@ -157,7 +162,7 @@ async function replaceByConfirmation(t: Mounted, original: DraftRow) {
     defaultsRecord(snapshot({ revision: revision(3) })),
     ["progress"],
   );
-  await act(async () => {
+  const confirm = async () => {
     expect(
       await outbox.confirmDefaultsReview(original.local_id, {
         reviewed: reviewedOf(refused),
@@ -166,8 +171,12 @@ async function replaceByConfirmation(t: Mounted, original: DraftRow) {
         replacementId: crypto.randomUUID(),
       }),
     ).toMatchObject({ kind: "confirmed", how: "superseded" });
-  });
-  await t.settle();
+  };
+  if (options.nested) await confirm();
+  else {
+    await act(confirm);
+    await t.settle();
+  }
   const current = t
     .drafts()
     .find(
@@ -396,7 +405,9 @@ describe("revision 4: admission against the task as it is when the add is made",
       const order = admissions(t, {
         after: async () => {
           if (writer === "replaced")
-            current = await replaceByConfirmation(t, original);
+            current = await replaceByConfirmation(t, original, {
+              nested: true,
+            });
           if (writer === "discarded")
             expect(await outbox.discard(original.local_id)).toMatchObject({
               kind: "discarded",

@@ -34,7 +34,7 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Tooltips** on the icon rail show on hover **and** keyboard focus, are dismissible (Escape), hoverable and persistent (WCAG 1.4.13). Controls keep their own accessible names: labels do not depend on hover.
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
-- **The phone's chrome (the Final design, 8 November 2026).** A detail screen (a task, a list, a person, an editor, a streak: `src/app/shell/mobile-back.ts`, derived from the address) replaces the brand in the header with a way back and hides the tab bar; its own "‹ Tasks" link is for the wider layouts. The top-bar sync control, and the one in a dialog, is a quiet 44 px dot while up to date, with the same accessible name ("… Open sync queue."); it grows its words only while it has something to say. A page header's controls fold behind one "Actions" button on the phone (`components/ui/page-actions.tsx`: `aria-expanded`, `aria-controls`, the controls rendered in place when open, nothing portalled), and a long form's Save row stays at the bottom of the viewport (`position: sticky`, with the safe-area inset). Today's time zone sits behind a toggle ("Change the time zone", `aria-expanded`) on the phone and inline from the tablet up. The page heading's focus ring hugs its words (`w-fit`), not the column.
+- **The phone's chrome (the Final design, 8 November 2026).** A detail screen (a task, a list, a person, an editor, a streak: `src/app/shell/mobile-back.ts`, derived from the address) replaces the brand in the header with a way back and hides the tab bar; its own "‹ Tasks" link is for the wider layouts. The top-bar sync control, and the one in a dialog, is a quiet 44 px dot while up to date, with the same accessible name ("… Open sync queue."); it grows its words only while it has something to say. A page header's other acts sit behind one "More" control (`components/ui/action-menu.tsx`: `aria-haspopup="menu"`, `aria-expanded`, a `menu` of `menuitem`s with arrow keys, Escape and focus return; a withheld act is a disabled item described by its reason; the person's page uses a disclosure of the same name, `aria-expanded`/`aria-controls`, so its in-place editors keep focus), a page's way back is a breadcrumb (`nav` "Breadcrumb", hidden on the phone), and a long form's Save row stays at the bottom of the viewport (`position: sticky`, with the safe-area inset). Today's time zone sits behind a toggle ("Change the time zone", `aria-expanded`) on the phone and inline from the tablet up. The page heading's focus ring hugs its words (`w-fit`), not the column.
 - **Choice cards** (`components/ui/choice-cards.tsx`): a fieldset with a legend, native radios each named by its label alone (`aria-labelledby`) and described by the line under it (`aria-describedby`), so "Keep one open" is the radio's name and its explanation is its description; the chosen card is marked by a dot in its ring, the primary border and the accent tint, never colour alone; a locked group disables its radios and says why beside a lock glyph.
 
 - **The update banner (WEB-14a)** is a labelled region ("Update") at the top of the shell (and, signed out, of the neutral screen). A plain notice never takes
@@ -91,7 +91,17 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 
 ## Today and tasks (WEB-10a)
 
-- Every page has one `h1` (Today, Tasks, the task's title, New task / Edit task); sections are labelled by their `h2`.
+- Every page has one `h1` (Today, Tasks, the task's title, New task / Edit task); sections are labelled by their `h2`. Today and Upcoming
+  are one page: the Upcoming item is a link to the anchor `/today#upcoming` (`aria-current` follows the address's hash, which follows the
+  scroll), and the sticky bar names the block under it. The days ahead are folded to begin with: the fold's pill (`aria-expanded`,
+  `aria-controls`) reveals them for the keyboard and for everyone, the pull past the end of the day (a wheel or a touch) is a pointer's
+  shortcut to the same thing, and arriving at `#upcoming` (the rail, the old address) lands focus on the days ahead themselves (the
+  region is focusable, not in the tab order), so a screen reader starts where the address points. A task opened
+  beside or over the day (Settings · Layout) keeps the day's h1: its title is an h2 in a `region` (the split pane) or a `dialog` (the side
+  peek: Escape closes, ↑/↓ step between the day's rows; the overlay is the shared `Dialog`). A row's amount or checklist recorder opens from
+  the tick (`aria-expanded`, `aria-controls`) and its first field takes focus; "Done logging" returns focus to the tick. The facts strip's
+  cells are plain, links or buttons (a button cell is `aria-expanded` while its editor is open); the row that adds to the day is a labelled
+  text field on the rail.
 - The Today filters are a native radio group (`fieldset`/`legend`: arrow keys move and select); the day and zone are labelled native controls.
 - A disabled action always states why beside it (`Button`'s `reason`): "Not open until …", "This day is closed", "Only participants can record this",
   "Wait for this task to finish syncing before editing it".

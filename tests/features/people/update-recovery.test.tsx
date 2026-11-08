@@ -35,6 +35,7 @@ import { HOME, record } from "../../support/people/records";
 import { fieldRow, peopleWorld, person } from "../../support/people/world";
 import { Locks } from "../../support/recovery-pages";
 import { ok } from "../../support/sharing/fake-api";
+import { actions } from "./more-menu";
 
 /**
  * WEB-14a integration revision (review of 2 November 2026, F-INT-PEOPLE-Q4; family `people-update-recovery-participant`). The People
@@ -521,7 +522,7 @@ describe("Rename (people-rename:<person>)", () => {
     const store = openStore(w);
     await w.mount(`/people/${P}`);
     await within(header()).findByText("Not linked to an account");
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "Ada L." },
     });
@@ -1237,7 +1238,7 @@ describe("A successful save of a session no editor shows retires its recovery (r
     const store = openStore(w);
     const { router } = await w.mount(`/people/${P}`);
     await within(header()).findByText("Not linked to an account");
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "Ada L." },
     });

@@ -1,13 +1,17 @@
 import { Link } from "@tanstack/react-router";
 import { ChevronRight, ListChecks, Plus } from "lucide-react";
 import { useId, useState } from "react";
-import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { List } from "../../../components/ui/list";
+import { PageHeader, TitleText } from "../../../components/ui/page-header";
+import { ListRow } from "../../../components/ui/row";
 import { useAllOutstandingByKind, useResourceList } from "../../../data";
 import * as copy from "../copy";
 import { QUEUED_KINDS } from "../model/commands";
+import { todayIn } from "../model/time";
+import { TASKS_TITLE } from "../titles";
+import { SearchPill } from "../today/CommandPalette";
 import { patched } from "../view";
 
 export const LIST_COPY = {
@@ -21,14 +25,17 @@ export const LIST_COPY = {
   more: "More tasks",
   first: "First page",
   archivedTag: "Archived",
+  summary: (n: number, archived: boolean) =>
+    `${n} ${archived ? (n === 1 ? "archived task" : "archived tasks") : n === 1 ? "task" : "tasks"}`,
 } as const;
 
 /**
- * The Tasks list pane (WF-TASK-01): the cached tasks a page of 100 at a time (Q9), with my outstanding creates first (projected, "Not sent
- * yet") and an "Archived" filter (the cross-kind "Archived items" ledger is a Settings follow-up).
+ * The Tasks list pane (WF-TASK-01, on the Final design's rows): the cached tasks a page of 100 at a time (Q9), with my outstanding
+ * creates first (projected, "Not sent yet") and an "Archived" filter (the cross-kind "Archived items" ledger is a Settings follow-up).
  */
-export function TaskList({ selected }: { selected?: string }) {
+export function TaskList() {
   const heading = useId();
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [archived, setArchived] = useState(false);
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const after = cursors[cursors.length - 1] ?? null;
@@ -63,37 +70,42 @@ export function TaskList({ selected }: { selected?: string }) {
   return (
     <section
       aria-labelledby={heading}
-      className="flex flex-col gap-3"
+      className="flex min-w-0 flex-col gap-3"
       data-task-list=""
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2
-          id={heading}
-          className="text-base font-semibold tracking-tight text-foreground"
-        >
-          {LIST_COPY.heading}
-        </h2>
-        <span className="flex flex-wrap items-center gap-2">
-          {/* WEB-10c (D-10c-12, E-4): the account's timers, from the Tasks screens rather than the shell's first load. */}
-          <Button asChild variant="outline">
-            <Link to="/tasks/timers" data-your-timers="">
-              {LIST_COPY.timers}
-            </Link>
-          </Button>
-          {/* WEB-10b (D-10b-1): Lists live under the Tasks destination, reached from here (no rail or tab item of their own). */}
-          <Button asChild variant="outline">
-            <Link to="/tasks/lists" data-lists-link="">
-              {LIST_COPY.lists}
-            </Link>
-          </Button>
-          <Button asChild variant="default">
-            <Link to="/tasks/new">
-              <Plus aria-hidden="true" strokeWidth={2.25} />
-              {LIST_COPY.newTask}
-            </Link>
-          </Button>
-        </span>
-      </div>
+      <h2 id={heading} className="sr-only">
+        {LIST_COPY.heading}
+      </h2>
+      {/* The Final design: the summary line (the h1 is the route's, above), the search pill and the page's acts. */}
+      <PageHeader
+        title={<TitleText>{TASKS_TITLE}</TitleText>}
+        summary={
+          <span data-task-list-summary="">
+            {known ? LIST_COPY.summary(shown.length, archived) : copy.LOADING}
+          </span>
+        }
+        actions={
+          <>
+            <SearchPill
+              day={todayIn(zone, Date.now())}
+              zone={zone}
+              className="min-w-0 flex-1 tablet:w-[260px] tablet:flex-none"
+            />
+            {/* WEB-10c (D-10c-12, E-4): the account's timers, from the Tasks screens rather than the shell's first load. */}
+            <Button asChild variant="outline">
+              <Link to="/tasks/timers" data-your-timers="">
+                {LIST_COPY.timers}
+              </Link>
+            </Button>
+            <Button asChild variant="default">
+              <Link to="/tasks/new">
+                <Plus aria-hidden="true" strokeWidth={2.25} />
+                {LIST_COPY.newTask}
+              </Link>
+            </Button>
+          </>
+        }
+      />
       <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
         <input
           type="checkbox"
@@ -118,36 +130,33 @@ export function TaskList({ selected }: { selected?: string }) {
           </EmptyState>
         ) : null
       ) : (
-        <List className="atlas-stagger overflow-hidden rounded-xl border bg-card p-1.5 shadow-sm">
+        <List className="flex flex-col">
           {shown.map((row) => {
             const pending = drafts.some((d) =>
               d.index_targets.includes(row.id),
             );
             return (
               <li key={row.id} className="list-none">
-                <Link
+                <ListRow
                   to="/tasks/$taskId"
                   params={{ taskId: row.id }}
                   data-task-link={row.id}
-                  aria-current={selected === row.id ? "page" : undefined}
-                  className={`atlas-transition group flex min-h-11 items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-foreground hover:bg-accent ${
-                    selected === row.id
-                      ? "bg-accent font-medium text-accent-foreground"
-                      : ""
-                  }`}
-                >
-                  <span className="truncate">{row.label}</span>
-                  <span className="flex flex-none items-center gap-2">
-                    {pending ? (
-                      <Badge variant="muted">{copy.PENDING.queued}</Badge>
-                    ) : null}
+                  fact={
+                    row.archived
+                      ? LIST_COPY.archivedTag
+                      : pending
+                        ? copy.PENDING.queued
+                        : undefined
+                  }
+                  trailing={
                     <ChevronRight
                       aria-hidden="true"
-                      size={15}
-                      className="size-4 text-muted-foreground"
+                      className="size-3.5 flex-none text-muted-foreground"
                     />
-                  </span>
-                </Link>
+                  }
+                >
+                  {row.label}
+                </ListRow>
               </li>
             );
           })}

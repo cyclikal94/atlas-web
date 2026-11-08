@@ -543,9 +543,12 @@ test.describe("routes", () => {
   }) => {
     await page.goto("/");
     await expect(page).toHaveURL(/\/today$/);
+    // Upcoming is the second half of Today's page: its old address redirects to the anchor, under Today's heading.
+    await page.goto("/upcoming");
+    await expect(page).toHaveURL(/\/today#upcoming$/);
     for (const [label, path] of [
       ["Today", "/today"],
-      ["Upcoming", "/upcoming"],
+      ["Today", "/today#upcoming"],
       ["Calendar", "/calendar"],
       ["Tasks", "/tasks"],
       ["People", "/people"],

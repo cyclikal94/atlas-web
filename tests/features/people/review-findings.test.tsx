@@ -26,6 +26,7 @@ import { draftRow } from "../../support/data/rows";
 import { HOME, ME, record } from "../../support/people/records";
 import { fieldRow, peopleWorld, person } from "../../support/people/world";
 import { ok } from "../../support/sharing/fake-api";
+import { findAction } from "./more-menu";
 
 /**
  * The corrections of the review of 13 October 2026 (WEB-11a, findings 1–7), composed through the real screens over the component world.
@@ -367,9 +368,7 @@ describe("finding 1: an edit keeps the versions and audience it began on", () =>
       person({ id: P, label: "Ada", version: 3, policy_version: 2 }),
     ]);
     await w.mount(`/people/${P}`);
-    const rename = await screen.findByRole("button", {
-      name: "Rename",
-    });
+    const rename = await findAction("Rename");
     await waitFor(() => expect(rename).toBeEnabled());
     fireEvent.click(rename);
     fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), {
@@ -560,7 +559,7 @@ describe("review 2, finding 3: an old editor never overwrites a newer edit of th
       w.setDrafts([renameL("Ada queued", "r-original")]);
       w.versions.set(P, 4);
       await w.mount(`/people/${P}`);
-      const rename = await screen.findByRole("button", { name: "Rename" });
+      const rename = await findAction("Rename");
       await waitFor(() => expect(rename).toBeEnabled());
       fireEvent.click(rename);
       fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), {
@@ -642,7 +641,7 @@ describe("finding 1 (continued): a linked rename and a held continuation", () =>
       person({ id: P, label: "Ada", version: 3, policy_version: 2 }),
     ]);
     await w.mount(`/people/${P}`);
-    const rename = await screen.findByRole("button", { name: "Rename" });
+    const rename = await findAction("Rename");
     await waitFor(() => expect(rename).toBeEnabled());
     fireEvent.click(rename);
     fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), {
@@ -1069,9 +1068,7 @@ describe("finding 4: state stays with its person when the route changes", () => 
       person({ id: Q, label: "Bob" }),
     ]);
     const { router } = await w.mount(`/people/${P}`);
-    const rename = await screen.findByRole("button", {
-      name: "Rename",
-    });
+    const rename = await findAction("Rename");
     await waitFor(() => expect(rename).toBeEnabled());
     fireEvent.click(rename);
     fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), {
@@ -1098,9 +1095,7 @@ describe("finding 4: state stays with its person when the route changes", () => 
         params: { personId: P },
       });
     });
-    const again = await screen.findByRole("button", {
-      name: "Rename",
-    });
+    const again = await findAction("Rename");
     await waitFor(() => expect(again).toBeEnabled());
     fireEvent.click(again);
     expect(await screen.findByRole("textbox", { name: "Name" })).toHaveValue(

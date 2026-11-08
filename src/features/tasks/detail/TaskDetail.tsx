@@ -1,19 +1,25 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronRight, X } from "lucide-react";
 import { useId, useState } from "react";
+import { useLayoutMode } from "../../../app/shell/layout-mode";
+import { ActionMenu, type MenuItem } from "../../../components/ui/action-menu";
 import { useAnnouncer } from "../../../components/ui/announcer";
+import { AvatarStack } from "../../../components/ui/avatar-stack";
 import { Badge } from "../../../components/ui/badge";
+import { Breadcrumb } from "../../../components/ui/breadcrumb";
 import { Button } from "../../../components/ui/button";
+import { FactCell, FactsStrip } from "../../../components/ui/facts-strip";
 import { GroupedSection } from "../../../components/ui/grouped";
 import { Label } from "../../../components/ui/label";
 import { NativeSelect } from "../../../components/ui/native-select";
-import { PageActions } from "../../../components/ui/page-actions";
+import { PageGrid } from "../../../components/ui/page-grid";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type DraftWithCommand,
   useDataEnv,
   useDraftWithCommand,
 } from "../../../data";
+import { cn } from "../../../lib/utils";
 import { PolicyEditorRecoveryHost, ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
 import { CatchUpNotice } from "../catchup/CatchUpNotice";
@@ -25,12 +31,14 @@ import {
   type SubmittedCorrection,
   submittedCorrection,
 } from "../model/correction";
-import { resolveWallTime } from "../model/time";
+import { addDays, resolveWallTime, timeIn, todayIn } from "../model/time";
+import { isTimerGoal } from "../model/timers";
 import { editable } from "../reasons";
 import { STREAK_COPY } from "../streak/StreakPage";
+import { TODAY_TITLE } from "../titles";
 import { pillTone } from "../today/TodayRow";
 import type { RowModel } from "../view";
-import { ArchiveControl, ClosureControls, Participation } from "./Controls";
+import { ClosureControls, CONTROLS_COPY, Participation } from "./Controls";
 import {
   CORRECTION_COPY,
   CorrectionDialog,
@@ -38,7 +46,7 @@ import {
 } from "./CorrectionDialog";
 import { DayWork } from "./DayWork";
 import { EntryHistory } from "./EntryHistory";
-import { ROTA_COPY, RotaPanel } from "./Rota";
+import { anonymous, ROTA_COPY, RotaPanel, useUsernames } from "./Rota";
 import { useTaskDetail } from "./useTaskDetail";
 
 export const DETAIL_COPY = {
@@ -61,7 +69,10 @@ export const DETAIL_COPY = {
   moreDays: "More saved days",
   previousDays: "Previous saved days",
   daysFailed: "Couldn't read this task's saved days.",
-  sharingLine: "Who can see this is set in Sharing.",
+  /** The "Seen by" cell of the facts strip (the Final design): it opens the sharing editor. */
+  seenBy: "Who can see this",
+  seenByWait: "Once synced",
+  close: "Close",
 } as const;
 
 /** The detail could not be read whole (R9, revision 4): what it says, with Try again. Unknown is never "isn't on this device". */
@@ -98,20 +109,32 @@ function ReadError({
   );
 }
 
-/** WF-TASK-01: the task detail for one occurrence, with WEB-10c's "What needs doing first", timer, streak link and rota blocks. */
+/**
+ * WF-TASK-01 on the Final design (8 November 2026): the breadcrumb, the title with its state glyph and one summary line, "More" for the
+ * task's other acts, then the facts strip, the day's action row, the grouped box of the day's decisions and reference, with the activity
+ * beside them on a wide screen (and in the box below it elsewhere). WEB-10c's "What needs doing first", timer, streak and rota blocks
+ * keep their places in the box.
+ */
 export function TaskDetail({
   taskId,
   occurrence,
   focusRecord,
+  embedded = false,
+  onClose,
 }: {
   taskId: string;
   occurrence?: string;
   focusRecord?: boolean;
+  /** Drawn beside or over another page (the "How tasks open" setting): the breadcrumb gives way to a close control. */
+  embedded?: boolean;
+  onClose?(): void;
 }) {
   const env = useTasksEnv();
   const navigate = useNavigate();
   const view = useTaskDetail(taskId, occurrence);
   const actions = useTaskActions();
+  const mode = useLayoutMode();
+  const names = useUsernames();
   // The day the correction dialog was opened for (revision 2): it never follows another day under the person.
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [sharing, setSharing] = useState<string | null>(null);
@@ -180,102 +203,164 @@ export function TaskDetail({
       ? [row.progressId]
       : []),
   ];
+  const archiveAttention = view.outstanding.attention.some(
+    (d) => d.kind === "archive" && d.index_targets.includes(task.id),
+  );
+  const date = row?.data.slot.date ?? null;
+  const today = todayIn(zone, view.now);
+  // The activity stands beside the day only where there is room for it: the desktop, and not inside a container beside another page.
+  const wide = mode === "desktop" && !embedded;
+  // The task's other acts (the Final design): behind "More", each with its reason when it is withheld.
+  const menu: MenuItem[] = [
+    !editable(task, view.execution)
+      ? {
+          label: DETAIL_COPY.edit,
+          reason: DETAIL_COPY.editDenied,
+          onSelect: () => undefined,
+        }
+      : policyVersion === undefined || !view.synced
+        ? {
+            label: DETAIL_COPY.edit,
+            reason: DETAIL_COPY.editWait,
+            onSelect: () => undefined,
+          }
+        : {
+            kind: "link",
+            label: DETAIL_COPY.edit,
+            to: "/tasks/$taskId/edit",
+            params: { taskId: task.id },
+          },
+    view.synced
+      ? { label: DETAIL_COPY.sharing, onSelect: () => setSharing(task.id) }
+      : {
+          label: DETAIL_COPY.sharing,
+          reason: DETAIL_COPY.sharingWait,
+          onSelect: () => undefined,
+        },
+    ...(row?.streamPresent && view.synced
+      ? [
+          {
+            label: DETAIL_COPY.sharingProgress,
+            onSelect: () => setSharing(row.progressId),
+          } satisfies MenuItem,
+        ]
+      : []),
+    {
+      kind: "link",
+      label: STREAK_COPY.linkName,
+      to: "/tasks/$taskId/streak",
+      params: { taskId: task.id },
+    },
+    !env.writable || !task.can_edit
+      ? {
+          label: task.archived ? CONTROLS_COPY.restore : CONTROLS_COPY.archive,
+          reason: !env.writable ? copy.NOT_WRITABLE : CONTROLS_COPY.noEdit,
+          onSelect: () => undefined,
+        }
+      : {
+          label: task.archived ? CONTROLS_COPY.restore : CONTROLS_COPY.archive,
+          onSelect: () => void actions.archive(task.id, !task.archived),
+          tone: task.archived ? "default" : "destructive",
+        },
+  ];
+  const turn = row?.data.rota?.account_id ?? null;
+  const summaryParts: string[] = [];
+  if (row !== null) {
+    const instant = row.data.slot.instant;
+    const when =
+      date === null
+        ? DETAIL_COPY.undated
+        : `${instant !== null ? timeIn(instant, zone) : copy.SUMMARY_LINE.anyTime} ${
+            date === today
+              ? copy.SUMMARY_LINE.today
+              : date === addDays(today, 1)
+                ? copy.SUMMARY_LINE.tomorrow
+                : dayLabel(date)
+          }`;
+    summaryParts.push(when, copy.CADENCE(row.data.definition.schedule.repeat));
+    const participation = row.data.definition.participation;
+    if (participation === "personal")
+      summaryParts.push(copy.SUMMARY_LINE.justYou);
+    else if (turn !== null)
+      summaryParts.push(
+        turn === env.accountId
+          ? copy.SUMMARY_LINE.yourTurn
+          : copy.SUMMARY_LINE.theirTurn(names.get(turn) ?? anonymous(turn)),
+      );
+    else
+      summaryParts.push(
+        `${copy.PARTICIPATION[participation]} · ${whoLabel(row, env.accountId)}`,
+      );
+  }
   return (
     <article
-      className="atlas-enter flex max-w-[760px] flex-col gap-6"
+      className="atlas-enter flex min-w-0 flex-col gap-5"
       data-task-detail={task.id}
+      data-archive={task.archived ? "archived" : "active"}
     >
-      <div className="flex flex-col gap-2">
-        {/* On the phone the shell's header carries the way back (`shell/mobile-back.ts`). */}
-        <Link
-          to="/tasks"
-          search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm font-medium text-muted-foreground hover:text-primary max-tablet:hidden"
-        >
-          {DETAIL_COPY.back}
-        </Link>
-        <div className="flex flex-wrap items-center gap-3">
-          {row ? (
-            <Badge data-detail-pill={row.pill} variant={pillTone(row.pill)}>
-              {copy.PILL[row.pill]}
-              {row.personal.kind === "result" && row.personal.provisional
-                ? ` (${copy.PROVISIONAL})`
-                : ""}
-            </Badge>
-          ) : null}
-          {row ? (
-            <span
-              className="text-sm text-muted-foreground"
-              data-detail-day={row.data.slot.date ?? ""}
-            >
-              {row.data.slot.date === null
-                ? DETAIL_COPY.undated
-                : longDayLabel(row.data.slot.date)}
-            </span>
-          ) : null}
-          {row?.pending ? (
-            <span
-              data-pending-mark={row.pending}
-              className="text-xs text-muted-foreground"
-            >
-              {copy.PENDING[row.pending]}
-            </span>
+      {embedded ? null : (
+        <Breadcrumb
+          items={[
+            {
+              label: TODAY_TITLE,
+              to: "/today",
+              ...(date === null ? {} : { search: { day: date } }),
+            },
+          ]}
+          current={date === null ? DETAIL_COPY.undated : longDayLabel(date)}
+        />
+      )}
+      <header className="flex items-start gap-4" data-task-header="">
+        <StateGlyph row={row} />
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <PageHeading as={embedded ? "h2" : "h1"}>{task.label}</PageHeading>
+          <p
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground"
+            data-task-summary=""
+          >
+            {row ? (
+              <span data-detail-day={row.data.slot.date ?? ""}>
+                {summaryParts.join(" · ")}
+              </span>
+            ) : null}
+            {row ? (
+              <Badge data-detail-pill={row.pill} variant={pillTone(row.pill)}>
+                {copy.PILL[row.pill]}
+                {row.personal.kind === "result" && row.personal.provisional
+                  ? ` (${copy.PROVISIONAL})`
+                  : ""}
+              </Badge>
+            ) : null}
+            {task.archived ? (
+              <Badge variant="muted">{CONTROLS_COPY.archivedTag}</Badge>
+            ) : null}
+            {row?.pending ? (
+              <span data-pending-mark={row.pending} className="text-xs">
+                {copy.PENDING[row.pending]}
+              </span>
+            ) : null}
+          </p>
+          {archiveAttention ? (
+            <p className="text-xs text-destructive">
+              {CONTROLS_COPY.archiveConflict}
+            </p>
           ) : null}
         </div>
-        <PageHeading>{task.label}</PageHeading>
-        <p className="text-sm text-muted-foreground">
-          {DETAIL_COPY.sharingLine}
-        </p>
-        {row ? (
-          <p className="text-sm text-muted-foreground">
-            {copy.CARRY[row.data.definition.carry].line}
-          </p>
-        ) : null}
-        <PageActions data-task-actions="">
-          {!editable(task, view.execution) ? (
-            <Button disabled reason={DETAIL_COPY.editDenied}>
-              {DETAIL_COPY.edit}
-            </Button>
-          ) : policyVersion === undefined || !view.synced ? (
-            <Button disabled reason={DETAIL_COPY.editWait}>
-              {DETAIL_COPY.edit}
-            </Button>
-          ) : (
-            <Button asChild variant="outline">
-              <Link to="/tasks/$taskId/edit" params={{ taskId: task.id }}>
-                {DETAIL_COPY.edit}
-              </Link>
-            </Button>
-          )}
-          {row === null ? null : row.canEdit ? (
-            <Button onClick={() => setCorrecting(row.id)}>
-              {CORRECTION_COPY.open}
-            </Button>
-          ) : (
-            // A known denial of the occurrence withholds the correction (R30); an open dialog stays open and explains it.
-            <Button disabled reason={CORRECTION_COPY.denied}>
-              {CORRECTION_COPY.open}
-            </Button>
-          )}
-          {view.synced ? (
-            <Button onClick={() => setSharing(task.id)}>
-              {DETAIL_COPY.sharing}
-            </Button>
-          ) : (
-            <Button disabled reason={DETAIL_COPY.sharingWait}>
-              {DETAIL_COPY.sharing}
-            </Button>
-          )}
-          <ArchiveControl
-            task={task}
-            actions={actions}
-            writable={env.writable}
-            attention={view.outstanding.attention.some(
-              (d) => d.kind === "archive" && d.index_targets.includes(task.id),
-            )}
-          />
-        </PageActions>
-      </div>
+        <div className="flex flex-none items-center gap-1.5">
+          <ActionMenu items={menu} data-task-more="" />
+          {embedded && onClose ? (
+            <button
+              type="button"
+              aria-label={DETAIL_COPY.close}
+              data-task-close=""
+              onClick={onClose}
+              className="atlas-transition flex size-11 items-center justify-center rounded-[10px] text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            >
+              <X aria-hidden="true" className="size-[18px]" />
+            </button>
+          ) : null}
+        </div>
+      </header>
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
       ) : null}
@@ -304,6 +389,7 @@ export function TaskDetail({
               })
             }
             className="max-w-[260px]"
+            wrapperClassName="w-auto"
           >
             {row === null ? <option value="" /> : null}
             {view.occurrences.map((o) => (
@@ -398,36 +484,9 @@ export function TaskDetail({
               writable={env.writable}
             />
           ) : null}
-          <DayWork
-            key={`day:${row.id}`}
-            row={row}
-            facts={<Facts row={row} taskId={task.id} me={env.accountId} />}
-            actions={actions}
-            now={view.now}
-            zone={zone}
-            writable={env.writable}
-            focus={focusRecord === true || choseAgain}
-            extra={
-              // The rest of the day's reference, in the same box (the Final design, 8 November 2026): the turns, the entries, who is on
-              // it and the day's closure, each a section on a hairline.
-              <>
-                {row.data.definition.participation === "anyone" ? (
-                  <GroupedSection
-                    aria-labelledby={rotaId}
-                    data-rota-section=""
-                    heading={<h2 id={rotaId}>{ROTA_COPY.heading}</h2>}
-                  >
-                    <RotaPanel
-                      key={`rota:${task.id}`}
-                      row={row}
-                      canEditOrder={view.execution?.can_edit === true}
-                      days={view.occurrences.flatMap((o) =>
-                        o.data === null ? [] : [{ id: o.id, data: o.data }],
-                      )}
-                      definition={row.data.definition}
-                    />
-                  </GroupedSection>
-                ) : null}
+          <PageGrid
+            aside={
+              wide ? (
                 <EntryHistory
                   key={`history:${row.id}`}
                   row={row}
@@ -435,32 +494,99 @@ export function TaskDetail({
                   zone={zone}
                   writable={env.writable}
                   current={view.current}
+                  frame="aside"
                 />
-                <Participation
-                  row={row}
-                  joint={view.joint}
-                  progressRows={view.progressRows}
-                  sharing={
-                    row.streamPresent && view.synced ? (
-                      <span>
-                        <Button
-                          variant="ghost"
-                          onClick={() => setSharing(row.progressId)}
-                        >
-                          {DETAIL_COPY.sharingProgress}
-                        </Button>
-                      </span>
-                    ) : null
-                  }
-                />
-                <ClosureControls
-                  row={row}
-                  actions={actions}
-                  writable={env.writable}
-                />
-              </>
+              ) : undefined
             }
-          />
+          >
+            <DayWork
+              key={`day:${row.id}`}
+              row={row}
+              facts={
+                <Facts
+                  row={row}
+                  taskId={task.id}
+                  me={env.accountId}
+                  names={names}
+                  synced={view.synced}
+                  columns={embedded ? 2 : 3}
+                  onSharing={() => setSharing(task.id)}
+                />
+              }
+              actions={actions}
+              now={view.now}
+              zone={zone}
+              writable={env.writable}
+              focus={focusRecord === true || choseAgain}
+              rowActions={
+                row.canEdit ? (
+                  <Button onClick={() => setCorrecting(row.id)}>
+                    {CORRECTION_COPY.open}
+                  </Button>
+                ) : (
+                  // A known denial of the occurrence withholds the correction (R30); an open dialog stays open and explains it.
+                  <Button disabled reason={CORRECTION_COPY.denied}>
+                    {CORRECTION_COPY.open}
+                  </Button>
+                )
+              }
+              extra={
+                // The rest of the day's reference, in the same box (the Final design): the turns, the entries (where there is no column
+                // for them), who is on it and the day's closure, each a section on a hairline.
+                <>
+                  {row.data.definition.participation === "anyone" ? (
+                    <GroupedSection
+                      aria-labelledby={rotaId}
+                      data-rota-section=""
+                      heading={<h2 id={rotaId}>{ROTA_COPY.heading}</h2>}
+                    >
+                      <RotaPanel
+                        key={`rota:${task.id}`}
+                        row={row}
+                        canEditOrder={view.execution?.can_edit === true}
+                        days={view.occurrences.flatMap((o) =>
+                          o.data === null ? [] : [{ id: o.id, data: o.data }],
+                        )}
+                        definition={row.data.definition}
+                      />
+                    </GroupedSection>
+                  ) : null}
+                  {wide ? null : (
+                    <EntryHistory
+                      key={`history:${row.id}`}
+                      row={row}
+                      actions={actions}
+                      zone={zone}
+                      writable={env.writable}
+                      current={view.current}
+                    />
+                  )}
+                  <Participation
+                    row={row}
+                    joint={view.joint}
+                    progressRows={view.progressRows}
+                    sharing={
+                      row.streamPresent && view.synced ? (
+                        <span>
+                          <Button
+                            variant="ghost"
+                            onClick={() => setSharing(row.progressId)}
+                          >
+                            {DETAIL_COPY.sharingProgress}
+                          </Button>
+                        </span>
+                      ) : null
+                    }
+                  />
+                  <ClosureControls
+                    row={row}
+                    actions={actions}
+                    writable={env.writable}
+                  />
+                </>
+              }
+            />
+          </PageGrid>
           {row.streamPresent && view.synced && sharing === null ? (
             // Revision 37 (WEB-14a R40): a sharing draft left by the page before an update reopens its editor.
             <PolicyEditorRecoveryHost
@@ -505,86 +631,138 @@ export function TaskDetail({
   );
 }
 
+/** The 40px state glyph beside the title (the Final design): filled with a tick once the day is done, an outline before. */
+function StateGlyph({ row }: { row: RowModel | null }) {
+  const done = row?.outcome === "complete";
+  return (
+    <span
+      aria-hidden="true"
+      data-task-glyph={done ? "done" : "open"}
+      className={cn(
+        "mt-1 flex size-10 flex-none items-center justify-center rounded-full border-2",
+        done
+          ? "border-success bg-success text-success-foreground"
+          : row === null
+            ? "border-dashed border-input"
+            : "border-input",
+      )}
+    >
+      {done ? <Check className="size-5" strokeWidth={3} /> : null}
+    </span>
+  );
+}
+
 /**
- * The facts strip (the Final design): the day, who takes part, how the task repeats, what happens when it is missed, and the way to its
- * streak, as short labelled cells over the day's work. A fact that is a decision or a reference lives in the grouped box below instead.
+ * The facts strip (the Final design): the day, who takes part (or whose turn it is), how the task repeats, what it measures, what
+ * happens when it is missed, the way to its streak, and who can see it (the sharing editor opens from the cell, as every editor with
+ * consequences does). A fact that is a decision or a reference lives in the grouped box below instead.
  */
 function Facts({
   row,
   taskId,
   me,
+  names,
+  synced,
+  onSharing,
+  columns = 3,
 }: {
   row: RowModel;
   taskId: string;
   me: string;
+  names: ReadonlyMap<string, string>;
+  synced: boolean;
+  onSharing(): void;
+  columns?: 2 | 3;
 }) {
   const definition = row.data.definition;
-  const cells: { key: string; label: string; value: string }[] = [
-    {
-      key: "day",
-      label: copy.FACTS.day,
-      value:
-        row.data.slot.date === null
-          ? DETAIL_COPY.undated
-          : dayLabel(row.data.slot.date),
-    },
-    {
-      key: "who",
-      label: copy.FACTS.who,
-      value:
-        definition.participation === "personal"
-          ? copy.PARTICIPATION.personal
-          : `${copy.PARTICIPATION[definition.participation]} · ${whoLabel(row, me)}`,
-    },
-    {
-      key: "repeat",
-      label: copy.FACTS.repeat,
-      value: copy.CADENCE(definition.schedule.repeat),
-    },
-    {
-      key: "carry",
-      label: copy.FACTS.carry,
-      value: copy.CARRY[definition.carry].label,
-    },
-    {
-      key: "goal",
-      label: copy.FACTS.goal,
-      value: copy.GOAL_FACT(definition.goal),
-    },
-  ];
-  const cell =
-    "flex min-h-[72px] flex-col justify-center gap-1 bg-card px-4 py-3";
-  const label =
-    "text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground";
+  const turn = row.data.rota?.account_id ?? null;
+  const people = row.data.participants.map((id) => ({
+    id,
+    name: id === me ? copy.WHO.you : (names.get(id) ?? anonymous(id)),
+  }));
+  const timer = isTimerGoal(row.data);
   return (
-    <dl
-      className="m-0 grid grid-cols-2 gap-px overflow-hidden rounded-[14px] border border-border bg-border tablet:grid-cols-3"
-      data-task-facts=""
-    >
-      {cells.map((fact) => (
-        <div key={fact.key} className={cell} data-fact={fact.key}>
-          <dt className={label}>{fact.label}</dt>
-          <dd className="m-0 text-sm font-medium text-foreground">
-            {fact.value}
-          </dd>
-        </div>
-      ))}
-      <div className={cell} data-fact="streak">
-        <dt className={label}>{copy.FACTS.streak}</dt>
-        <dd className="m-0">
-          <Link
-            to="/tasks/$taskId/streak"
-            params={{ taskId }}
-            data-streak-link=""
-            aria-label={STREAK_COPY.linkName}
-            className="atlas-transition inline-flex min-h-11 items-center gap-0.5 text-sm font-medium text-foreground hover:text-primary hover:underline"
-          >
-            {STREAK_COPY.link}
-            <ChevronRight aria-hidden="true" className="size-4" />
-          </Link>
-        </dd>
-      </div>
-    </dl>
+    <FactsStrip data-task-facts="" columns={columns}>
+      <FactCell label={copy.FACTS.day} data-fact="day">
+        <span className="font-num">
+          {row.data.slot.date === null
+            ? DETAIL_COPY.undated
+            : dayLabel(row.data.slot.date)}
+        </span>
+      </FactCell>
+      <FactCell
+        label={turn !== null ? copy.FACTS.turn : copy.FACTS.who}
+        data-fact="who"
+      >
+        {definition.participation === "personal" ? (
+          <span>{copy.PARTICIPATION.personal}</span>
+        ) : (
+          <>
+            {people.length > 0 ? (
+              <AvatarStack
+                people={people}
+                {...(turn !== null ? { highlight: turn } : {})}
+              />
+            ) : null}
+            <span>
+              {turn !== null
+                ? turn === me
+                  ? copy.WHO.you
+                  : (names.get(turn) ?? anonymous(turn))
+                : `${copy.PARTICIPATION[definition.participation]} · ${whoLabel(row, me)}`}
+            </span>
+          </>
+        )}
+      </FactCell>
+      <FactCell label={copy.FACTS.repeat} data-fact="repeat">
+        <span>{copy.CADENCE(definition.schedule.repeat)}</span>
+      </FactCell>
+      <FactCell
+        label={timer ? copy.FACTS.timer : copy.FACTS.goal}
+        data-fact="goal"
+      >
+        <span>{copy.GOAL_FACT(definition.goal)}</span>
+      </FactCell>
+      <FactCell label={copy.FACTS.carry} data-fact="carry">
+        <span>{copy.CARRY[definition.carry].label}</span>
+      </FactCell>
+      <FactCell
+        as="link"
+        label={copy.FACTS.streak}
+        data-fact="streak"
+        data-streak-link=""
+        to="/tasks/$taskId/streak"
+        params={{ taskId }}
+        aria-label={STREAK_COPY.linkName}
+      >
+        <span>{STREAK_COPY.link}</span>
+        <ChevronRight
+          aria-hidden="true"
+          className="size-4 flex-none text-muted-foreground"
+        />
+      </FactCell>
+      {synced ? (
+        <FactCell
+          as="button"
+          label={copy.FACTS.seenBy}
+          data-fact="seen-by"
+          onClick={onSharing}
+          aria-label={DETAIL_COPY.seenBy}
+        >
+          <span>{DETAIL_COPY.seenBy}</span>
+          <ChevronRight
+            aria-hidden="true"
+            className="size-4 flex-none text-muted-foreground"
+          />
+        </FactCell>
+      ) : (
+        <FactCell label={copy.FACTS.seenBy} data-fact="seen-by">
+          <span className="text-muted-foreground">
+            {DETAIL_COPY.seenByWait}
+          </span>
+        </FactCell>
+      )}
+    </FactsStrip>
   );
 }
 

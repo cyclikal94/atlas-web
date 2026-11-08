@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { Timer } from "lucide-react";
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useId,
@@ -8,10 +9,14 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { Breadcrumb } from "../../../components/ui/breadcrumb";
 import { Button } from "../../../components/ui/button";
+import { Pill } from "../../../components/ui/chip";
 import { EmptyState } from "../../../components/ui/empty-state";
-import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
+import { GroupedBox } from "../../../components/ui/grouped";
+import { Eyebrow, PageHeader } from "../../../components/ui/page-header";
 import { PageHeading } from "../../../components/ui/page-heading";
+import { RowGroupHeading } from "../../../components/ui/row";
 import {
   type AccountService,
   commitTimerCopy,
@@ -23,6 +28,7 @@ import {
   useCachedResources,
   useDataEnv,
 } from "../../../data";
+import { cn } from "../../../lib/utils";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { MARK, TIMER_COPY } from "../detail/Timer";
@@ -57,6 +63,7 @@ import {
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const TIMERS_COPY = {
+  eyebrow: "Time",
   title: "Your timers",
   back: "‹ Tasks",
   running: "Running",
@@ -73,6 +80,13 @@ export const TIMERS_COPY = {
     end === null ? `Started ${start}` : `${start} – ${end}`,
   lastChecked: (time: string) => `Running timers as last checked ${time}`,
   noTitle: "A task not on this device",
+  /** The Final design (8 November 2026): the summary line, the row groups and a running row's "since". */
+  summary: (running: number) =>
+    running === 0 ? "Nothing running" : `${running} running`,
+  runningNow: "Running now",
+  earlier: "Earlier",
+  since: (time: string) => `since ${time}`,
+  tasks: "Tasks",
 } as const;
 
 const PAGE = 50;
@@ -338,60 +352,76 @@ function SessionRow({
       ? null
       : momentLabel(row.stopped_at * 1000, nowMs, zone);
   const restricted = row.access === "restricted" || offlineTitle === null;
+  const live = row.stopped_at === null;
+  // One row of the Final design: a dot (lit while running), the title, the times in grey, the elapsed time in mono, then Stop and
+  // Discard as pills; the 7-day question and a pending mark take a second line of the same row.
   return (
     <li
       data-account-timer={row.id}
       data-access={restricted ? "restricted" : "available"}
-      className="flex flex-col gap-1.5 py-3"
+      className="flex flex-wrap items-center gap-x-3.5 gap-y-2 px-4 py-2.5 text-sm tablet:px-5"
     >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "size-2 flex-none rounded-full",
+          live ? "bg-success ring-[3px] ring-success/20" : "bg-border",
+          live && !restricted ? "animate-pulse" : "",
+        )}
+      />
       {restricted ? (
         <>
-          <p className="text-sm font-medium text-muted-foreground">
+          <span className="min-w-0 flex-1 font-medium text-muted-foreground">
             {TIMERS_COPY.restricted}
-          </p>
-          <p className="text-xs text-muted-foreground">
+          </span>
+          <span className="text-xs text-muted-foreground">
             {TIMERS_COPY.times(start, end)}
-            {row.stopped_at === null
-              ? ` · ${elapsed(row.started_at, nowMs)}`
-              : ""}
-          </p>
-          {row.stopped_at === null ? (
-            <p className="text-xs text-muted-foreground">
+          </span>
+          {live ? (
+            <span className="w-20 text-right font-num text-sm text-muted-foreground tabular-nums">
+              {elapsed(row.started_at, nowMs)}
+            </span>
+          ) : null}
+          {live ? (
+            <span className="basis-full pl-[22px] text-xs text-muted-foreground">
               {TIMERS_COPY.restrictedWhy}
-            </p>
+            </span>
           ) : null}
         </>
       ) : row.access === "available" ? (
         <>
           <Link
             to={taskPath(row.task_id, row.occurrence_id)}
-            className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm font-medium text-foreground underline underline-offset-2"
+            className="atlas-transition inline-flex min-h-11 min-w-0 flex-1 items-center truncate font-medium text-foreground hover:text-primary"
           >
             {offlineTitle ?? row.task_title}
           </Link>
-          <p className="text-xs text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             {row.slot_date ? `${dayLabel(row.slot_date)} · ` : ""}
-            {TIMERS_COPY.times(start, end)}
-          </p>
+            {live ? TIMERS_COPY.since(start) : TIMERS_COPY.times(start, end)}
+          </span>
           {row.stopped_at === null ? (
-            <p className="font-num text-lg text-foreground tabular-nums">
+            <span className="w-20 text-right font-num text-sm text-success tabular-nums">
               {elapsed(row.started_at, nowMs)}
-            </p>
+            </span>
           ) : (
-            <p className="font-num text-sm text-foreground tabular-nums">
+            <span className="w-20 text-right font-num text-sm text-foreground tabular-nums">
               {elapsed(row.started_at, row.stopped_at * 1000)}
-            </p>
+            </span>
           )}
-          {row.stopped_at === null && pending !== undefined ? (
-            <p
+          {live && pending !== undefined ? (
+            <span
               className="text-xs text-muted-foreground"
               data-timer-pending={pending}
             >
               {copy.PENDING[pending]}
-            </p>
-          ) : row.stopped_at === null && row.can_modify && act !== null ? (
+            </span>
+          ) : live && row.can_modify && act !== null ? (
             choosing ? (
-              <div className="flex flex-col gap-2" data-timer-seven-days="">
+              <div
+                className="flex basis-full flex-col gap-2 pl-[22px]"
+                data-timer-seven-days=""
+              >
                 <p className="text-xs text-muted-foreground">
                   {TIMER_COPY.sevenDays}
                 </p>
@@ -416,28 +446,28 @@ function SessionRow({
                 </span>
               </div>
             ) : (
-              <span className="flex flex-wrap gap-2">
+              <span className="flex flex-wrap gap-1.5">
                 {disabled ? (
                   <Button disabled reason={disabled}>
                     {TIMER_COPY.stop}
                   </Button>
                 ) : (
-                  <Button variant="default" onClick={() => act(row, "stop")}>
+                  <Pill onClick={() => act(row, "stop")}>
                     {TIMER_COPY.stop}
-                  </Button>
+                  </Pill>
                 )}
                 {disabled ? null : (
-                  <Button onClick={() => act(row, "discard")}>
+                  <Pill onClick={() => act(row, "discard")}>
                     {TIMER_COPY.discard}
-                  </Button>
+                  </Pill>
                 )}
               </span>
             )
           ) : null}
-          {row.stopped_at === null && closedAt !== null ? (
-            <p className="text-xs text-muted-foreground">
+          {live && closedAt !== null ? (
+            <span className="basis-full pl-[22px] text-xs text-muted-foreground">
               {TIMER_COPY.closedDay(momentLabel(closedAt * 1000, nowMs, zone))}
-            </p>
+            </span>
           ) : null}
         </>
       ) : null}
@@ -651,30 +681,44 @@ export function TimersPage() {
     history.value.kind === "ready" &&
     runningRows.length === 0 &&
     historyRows.length === 0;
+  const rowsBox = (children: ReactNode) => (
+    <GroupedBox>
+      <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
+        {children}
+      </ul>
+    </GroupedBox>
+  );
   return (
-    <article className="flex max-w-[760px] flex-col gap-6" data-timers-page="">
-      <div className="flex flex-col gap-2">
-        <Link
-          to="/tasks"
-          search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
-        >
-          {TIMERS_COPY.back}
-        </Link>
-        <PageHeading>{TIMERS_COPY.title}</PageHeading>
-      </div>
+    <article className="flex min-w-0 flex-col gap-5" data-timers-page="">
+      <Breadcrumb
+        items={[{ label: TIMERS_COPY.tasks, to: "/tasks" }]}
+        current={TIMERS_COPY.title}
+      />
+      <PageHeader
+        eyebrow={<Eyebrow>{TIMERS_COPY.eyebrow}</Eyebrow>}
+        title={<PageHeading>{TIMERS_COPY.title}</PageHeading>}
+        summary={
+          <span data-timers-summary="">
+            {running.value.kind === "ready" || offline
+              ? TIMERS_COPY.summary(shownRunning.length)
+              : TIMERS_COPY.loading}
+          </span>
+        }
+      />
       {nothing ? (
         <EmptyState icon={Timer} data-timers-empty="">
           {TIMERS_COPY.empty}
         </EmptyState>
       ) : (
-        <GroupedBox data-timers-sections="">
-          <GroupedSection
+        <div className="flex flex-col gap-5" data-timers-sections="">
+          <section
             aria-labelledby={heading}
             data-timers-running={running.value.kind}
-            dot={runningRows.length > 0 ? "success" : "muted"}
-            heading={<h2 id={heading}>{TIMERS_COPY.running}</h2>}
+            className="flex flex-col gap-2"
           >
+            <RowGroupHeading id={heading}>
+              {TIMERS_COPY.runningNow}
+            </RowGroupHeading>
             {running.value.kind === "loading" ? (
               <div aria-busy="true" className="flex flex-col gap-2">
                 <span className="sr-only">{TIMERS_COPY.loading}</span>
@@ -710,8 +754,8 @@ export function TimersPage() {
                     {TIMERS_COPY.noRunning}
                   </p>
                 ) : (
-                  <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
-                    {copiedRows.map((row) => (
+                  rowsBox(
+                    copiedRows.map((row) => (
                       <SessionRow
                         key={row.id}
                         row={row}
@@ -725,8 +769,8 @@ export function TimersPage() {
                         }
                         {...rowProps(row)}
                       />
-                    ))}
-                  </ul>
+                    )),
+                  )
                 )}
               </>
             ) : runningRows.length === 0 ? (
@@ -736,8 +780,8 @@ export function TimersPage() {
                 </p>
               )
             ) : (
-              <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
-                {runningRows.map((row) => (
+              rowsBox(
+                runningRows.map((row) => (
                   <SessionRow
                     key={row.id}
                     row={row}
@@ -746,8 +790,8 @@ export function TimersPage() {
                     act={env.writable ? (r, w) => void act(r, w) : null}
                     {...rowProps(row)}
                   />
-                ))}
-              </ul>
+                )),
+              )
             )}
             {running.more ? (
               <span>
@@ -756,12 +800,15 @@ export function TimersPage() {
                 </Button>
               </span>
             ) : null}
-          </GroupedSection>
-          <GroupedSection
+          </section>
+          <section
             aria-labelledby={historyHeading}
             data-timers-history={history.value.kind}
-            heading={<h2 id={historyHeading}>{TIMERS_COPY.history}</h2>}
+            className="flex flex-col gap-2"
           >
+            <RowGroupHeading id={historyHeading}>
+              {TIMERS_COPY.earlier}
+            </RowGroupHeading>
             {history.value.kind === "offline" ? (
               <p className="text-sm text-muted-foreground">
                 {TIMERS_COPY.historyOffline}
@@ -778,8 +825,8 @@ export function TimersPage() {
                 </span>
               </div>
             ) : historyRows.length === 0 ? null : (
-              <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
-                {historyRows.map((row) => (
+              rowsBox(
+                historyRows.map((row) => (
                   <SessionRow
                     key={row.id}
                     row={row}
@@ -787,8 +834,8 @@ export function TimersPage() {
                     zone={zone}
                     act={null}
                   />
-                ))}
-              </ul>
+                )),
+              )
             )}
             {history.more ? (
               <span>
@@ -797,8 +844,8 @@ export function TimersPage() {
                 </Button>
               </span>
             ) : null}
-          </GroupedSection>
-        </GroupedBox>
+          </section>
+        </div>
       )}
     </article>
   );

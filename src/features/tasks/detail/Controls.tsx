@@ -57,6 +57,7 @@ export const CONTROLS_COPY = {
   noEdit: "You can't change this day",
   archive: "Archive",
   restore: "Restore",
+  archivedTag: "Archived",
   archiveNote: "Archiving hides this task from Today. Its history stays.",
   archived: "Archived. Not sent yet.",
   restored: "Restored. Not sent yet.",

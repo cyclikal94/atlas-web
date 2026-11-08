@@ -21,6 +21,7 @@ import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { ME, MO } from "../../support/people/records";
 import { peopleWorld, person } from "../../support/people/world";
+import { actions } from "./more-menu";
 
 /**
  * Review 26, R26.1/R26.2 (§4.7, E-P7, A10, A17; DA26-01..07 at the component level, with the production providers and route): an
@@ -212,7 +213,7 @@ const ORDERS: readonly (readonly Evidence[])[] = [
 /** The header offers the kept unlink again; its confirmation says it is uncertain and sends it as it was; then nothing is left. */
 async function reopenAndResolve(t: World) {
   const entry = () =>
-    within(header()).queryByRole("button", { name: copy.UNLINK });
+    actions(header()).queryByRole("button", { name: copy.UNLINK });
   expect(entry()).not.toBeNull();
   expect(entry()).toBeEnabled();
   fireEvent.click(entry() as HTMLElement);
@@ -233,7 +234,7 @@ async function unlinkUncertain(t: World, commit: Partial<ServerPerson> | null) {
   t.lose(commit);
   await t.w.mount(`/people/${P}`);
   await waitFor(() => expect(linkageShown()).toBe("self"));
-  fireEvent.click(within(header()).getByRole("button", { name: copy.UNLINK }));
+  fireEvent.click(actions(header()).getByRole("button", { name: copy.UNLINK }));
   await waitFor(() =>
     expect(
       screen.queryByRole("dialog", { name: copy.UNLINK_TITLE }),
@@ -440,7 +441,7 @@ describe("R26.1: an uncertain unlink is tried again as it was sent, whatever is 
     await t.w.mount(`/people/${P}`);
     await waitFor(() => expect(linkageShown()).toBe("unlinked"));
     expect(
-      within(header()).queryByRole("button", { name: copy.UNLINK }),
+      actions(header()).queryByRole("button", { name: copy.UNLINK }),
     ).toBeNull();
   });
 
@@ -449,7 +450,7 @@ describe("R26.1: an uncertain unlink is tried again as it was sent, whatever is 
     await t.w.mount(`/people/${P}`);
     await waitFor(() => expect(linkageShown()).toBe("other"));
     expect(
-      within(header()).getByRole("button", { name: copy.UNLINK }),
+      actions(header()).getByRole("button", { name: copy.UNLINK }),
     ).toBeDisabled();
   });
 });
@@ -466,7 +467,7 @@ async function renameUncertain(t: World, commit: Partial<ServerPerson> | null) {
   t.lose(commit);
   await t.w.mount(`/people/${P}`);
   await waitFor(() => expect(linkageShown()).toBe("self"));
-  fireEvent.click(within(header()).getByRole("button", { name: copy.RENAME }));
+  fireEvent.click(actions(header()).getByRole("button", { name: copy.RENAME }));
   fireEvent.change(nameBox(), { target: { value: RENAMED } });
   t.holdDetail();
   fireEvent.click(saveButton());
@@ -681,7 +682,7 @@ describe("R26.2: an unchanged uncertain rename is tried again as it was sent, be
     await t.releaseDetail(true);
     await t.sync();
     expect(linkageShown()).toBe("other");
-    const entry = within(header()).getByRole("button", { name: copy.RENAME });
+    const entry = actions(header()).getByRole("button", { name: copy.RENAME });
     expect(entry).toBeEnabled();
     fireEvent.click(entry);
     expect(nameBox()).toHaveValue(RENAMED);
@@ -695,7 +696,7 @@ describe("R26.2: an unchanged uncertain rename is tried again as it was sent, be
     );
     // Resolved: another account's name, nothing kept — Rename is disabled again.
     expect(
-      within(header()).getByRole("button", { name: copy.RENAME }),
+      actions(header()).getByRole("button", { name: copy.RENAME }),
     ).toBeDisabled();
   });
 
@@ -704,7 +705,7 @@ describe("R26.2: an unchanged uncertain rename is tried again as it was sent, be
     await t.w.mount(`/people/${P}`);
     await waitFor(() => expect(linkageShown()).toBe("other"));
     expect(
-      within(header()).getByRole("button", { name: copy.RENAME }),
+      actions(header()).getByRole("button", { name: copy.RENAME }),
     ).toBeDisabled();
   });
 });

@@ -15,6 +15,7 @@ import {
 import { Button } from "../../../components/ui/button";
 import { GroupedSection } from "../../../components/ui/grouped";
 import { List } from "../../../components/ui/list";
+import { AsideHeading } from "../../../components/ui/page-grid";
 import {
   type ListedResource,
   useCachedResource,
@@ -45,14 +46,38 @@ import {
  *    once (D-19-3): access changes arrive by sync before the re-read answers. It stays as the same tree (R-1): its items, controls,
  *    keyboard focus and the announcement survive every refresh (a synced change, a receipt, the 60-second tick, a return to the tab).
  */
-export function ActivitySection({ personId }: { personId: string }) {
+export function ActivitySection({
+  personId,
+  frame = "section",
+}: {
+  personId: string;
+  /**
+   * How the timeline is framed (the Final design, 8 November 2026): a section of the person's grouped box, or the activity column beside
+   * the person on a wide page, with its small heading. The events and their controls are the same in both.
+   */
+  frame?: "section" | "aside";
+}) {
   const heading = useId();
   const view = useActivity(personId);
+  if (frame === "aside")
+    return (
+      <section
+        aria-labelledby={heading}
+        data-activity={view.status}
+        data-activity-frame="aside"
+        className="flex flex-col gap-3"
+      >
+        <AsideHeading id={heading} as="h2">
+          {copy.HEADING}
+        </AsideHeading>
+        <Body view={view} personId={personId} />
+      </section>
+    );
   return (
     <GroupedSection
       aria-labelledby={heading}
       data-activity={view.status}
-      heading={<h3 id={heading}>{copy.HEADING}</h3>}
+      heading={<h2 id={heading}>{copy.HEADING}</h2>}
     >
       <Body view={view} personId={personId} />
     </GroupedSection>

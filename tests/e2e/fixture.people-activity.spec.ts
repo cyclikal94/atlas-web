@@ -450,7 +450,7 @@ test.describe("E-AC8: keyboard, names and a narrow screen (A19-11)", () => {
     const region = page.getByRole("region", { name: "Recent changes" });
     await expect(region.getByRole("list")).toBeVisible();
     await expect(region.getByRole("listitem")).toHaveCount(5);
-    await page.locator("[data-activity] h3").click();
+    await page.locator("[data-activity] h2").click();
     let reached = false;
     for (let i = 0; i < 40 && !reached; i += 1) {
       await pressTab(page);
@@ -502,7 +502,7 @@ test.describe("E-AC9: keyboard across a refresh (A19-11; review 1, R-1)", () => 
       }
       return false;
     };
-    await page.locator("[data-activity] h3").click();
+    await page.locator("[data-activity] h2").click();
     expect(await tabTo("[data-activity-extend]")).toBe(true);
     await page.keyboard.press("Enter");
     await expect(page.locator("[data-activity-event]")).toHaveCount(50);

@@ -1,5 +1,4 @@
-import { Link } from "@tanstack/react-router";
-import { Search } from "lucide-react";
+import { ChevronRight, Search } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -8,9 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { PersonAvatar } from "../../../components/ui/avatar-stack";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
+import { ListRow, RowGroupHeading } from "../../../components/ui/row";
 import {
   type CacheRow,
   type DraftWithCommand,
@@ -41,7 +42,7 @@ import {
   type SummaryScope,
   summaryCurrentFor,
 } from "../model/summary";
-import { Avatar, Banner, PendingBadge } from "../parts";
+import { Banner, PendingBadge } from "../parts";
 import {
   type ChainResult,
   ConfirmedAbsence,
@@ -133,35 +134,36 @@ export function PeopleList({ selectedId }: { selectedId: string | null }) {
   // place while the rows above it grow.
   const root = useRef<HTMLDivElement>(null);
   useSteadyWhilePressed(root);
+  // The Final design (8 November 2026): the search pill and "New person" on one line, the views under them, the rows at reading width.
   return (
     <div ref={root} className="flex min-w-0 flex-col gap-4" data-people-list="">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant="default"
-          data-people-action="new-person"
-          onClick={() => setCreating(true)}
-        >
-          {copy.NEW_PERSON}
-        </Button>
-      </div>
       <div className="flex flex-col gap-3">
-        <div className="relative">
-          <Search
-            aria-hidden="true"
-            className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-          />
-          <Input
-            id={searchId}
-            type="search"
-            aria-label={copy.SEARCH}
-            placeholder={copy.SEARCH}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setStarts([null]);
-            }}
-            className="rounded-full bg-card pl-10"
-          />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[220px] flex-1">
+            <Search
+              aria-hidden="true"
+              className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              id={searchId}
+              type="search"
+              aria-label={copy.SEARCH}
+              placeholder={copy.SEARCH}
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setStarts([null]);
+              }}
+              className="rounded-full border-border bg-card pl-10 text-[13px]"
+            />
+          </div>
+          <Button
+            variant="default"
+            data-people-action="new-person"
+            onClick={() => setCreating(true)}
+          >
+            {copy.NEW_PERSON}
+          </Button>
         </div>
         <fieldset className="flex flex-wrap items-center gap-1.5">
           <legend className="sr-only">{copy.FILTER_LABEL}</legend>
@@ -542,19 +544,14 @@ function CachedRows({
           )
         ) : null
       ) : (
-        <List className="flex flex-col gap-1">
-          {shown.map((row) => (
-            <PersonRow
-              key={row.row.id}
-              row={row}
-              summary={summaryOf(row)}
-              count={
-                row.projected ? null : <FieldCount personId={row.row.id} />
-              }
-              selected={row.row.id === selectedId}
-            />
-          ))}
-        </List>
+        <GroupedRows
+          groups={groupRows(shown, summaryOf, view === "all" && wanted === "")}
+          summaryOf={summaryOf}
+          count={(row) =>
+            row.projected ? null : <FieldCount personId={row.row.id} />
+          }
+          selectedId={selectedId}
+        />
       )}
       {partial && shown.length > 0 ? (
         <p
@@ -695,7 +692,7 @@ function ScopeSteps({
                 : copy.NOT_LINKED_EMPTY}
         </p>
       ) : (
-        <List className="flex flex-col gap-1">
+        <List className="flex flex-col">
           {rows.map(({ summary, row }) => (
             <PersonRow
               key={summary.id}
@@ -703,7 +700,7 @@ function ScopeSteps({
               summary={summary}
               count={
                 <span
-                  className="flex-none text-xs text-muted-foreground"
+                  className="flex-none font-num text-xs text-muted-foreground"
                   data-field-count=""
                 >
                   {copy.FIELD_COUNT(summary.field_count)}
@@ -750,8 +747,87 @@ function Skeleton() {
       {[0, 1, 2, 3, 4].map((n) => (
         <div
           key={n}
-          className="min-h-12 rounded-lg border border-border bg-card"
+          className="min-h-[52px] rounded-[10px] border border-border bg-card"
         />
+      ))}
+    </div>
+  );
+}
+
+/** The rows of a step in the Final design's groups: the people I added, then the people shared with me, then the rest. */
+interface RowGroup {
+  key: "yours" | "shared" | "rest";
+  heading: string | null;
+  rows: ShownRow[];
+}
+
+function groupRows(
+  shown: ShownRow[],
+  summaryOf: (row: ShownRow) => PersonSummary | null,
+  grouped: boolean,
+): RowGroup[] {
+  if (!grouped) return [{ key: "rest", heading: null, rows: shown }];
+  const yours: ShownRow[] = [];
+  const shared: ShownRow[] = [];
+  const rest: ShownRow[] = [];
+  for (const row of shown) {
+    const summary = summaryOf(row);
+    const attribution = summary === null ? null : attributionOf(summary);
+    if (attribution?.kind === "you" || attribution?.kind === "added_by_you")
+      yours.push(row);
+    else if (attribution?.kind === "shared_by") shared.push(row);
+    else rest.push(row);
+  }
+  const groups: RowGroup[] = [
+    { key: "yours", heading: copy.GROUP_YOURS, rows: yours },
+    { key: "shared", heading: copy.GROUP_SHARED, rows: shared },
+    { key: "rest", heading: null, rows: rest },
+  ].filter((group) => group.rows.length > 0) as RowGroup[];
+  // Headings only once there is more than one group to tell apart.
+  return groups.length > 1
+    ? groups
+    : groups.map((group) => ({ ...group, heading: null }));
+}
+
+function GroupedRows({
+  groups,
+  summaryOf,
+  count,
+  selectedId,
+}: {
+  groups: RowGroup[];
+  summaryOf: (row: ShownRow) => PersonSummary | null;
+  count: (row: ShownRow) => ReactNode;
+  selectedId: string | null;
+}) {
+  const id = useId();
+  return (
+    <div className="flex flex-col" data-people-groups={String(groups.length)}>
+      {groups.map((group) => (
+        <section
+          key={group.key}
+          {...(group.heading === null
+            ? {}
+            : { "aria-labelledby": `${id}-${group.key}` })}
+          data-people-group={group.key}
+        >
+          {group.heading === null ? null : (
+            <RowGroupHeading id={`${id}-${group.key}`}>
+              {group.heading}
+            </RowGroupHeading>
+          )}
+          <List className="flex flex-col">
+            {group.rows.map((row) => (
+              <PersonRow
+                key={row.row.id}
+                row={row}
+                summary={summaryOf(row)}
+                count={count(row)}
+                selected={row.row.id === selectedId}
+              />
+            ))}
+          </List>
+        </section>
       ))}
     </div>
   );
@@ -816,6 +892,10 @@ function attributionText(summary: PersonSummary): string | null {
   }
 }
 
+/**
+ * One row (the Final design): the avatar, the name, one grey line of facts (who added them, their account, who can see them, as the
+ * viewer-safe summary says), a badge only when something needs the reader (an unsent change), the field count and a chevron.
+ */
 function PersonRow({
   row,
   summary,
@@ -831,22 +911,35 @@ function PersonRow({
   const attribution = summary === null ? null : attributionText(summary);
   return (
     <li className="list-none">
-      <Link
+      <ListRow
         to="/people/$personId"
         params={{ personId: person.id }}
-        aria-current={selected ? "page" : undefined}
+        current={selected}
         data-person-row={person.id}
         data-status={selected ? "active" : undefined}
-        className={`atlas-transition flex min-h-12 items-center gap-3 rounded-[10px] px-3 py-2 hover:bg-accent/60 data-[status=active]:bg-accent ${selected ? "text-accent-foreground" : ""}`}
+        className="py-1.5"
+        leading={<PersonAvatar id={person.id} name={person.label} />}
+        trailing={
+          <>
+            <PendingBadge mark={row.pending} />
+            {count}
+            <ChevronRight
+              aria-hidden="true"
+              className="size-3.5 flex-none text-muted-foreground tablet:hidden"
+            />
+          </>
+        }
       >
-        <Avatar name={person.label} />
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-[15px] leading-6 text-foreground">
-            {person.label}
-          </span>
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span className="block truncate leading-6" data-person-name="">
+          {person.label}
+        </span>
+        {attribution !== null || summary !== null || person.archived ? (
+          <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs leading-5 text-muted-foreground">
             {attribution !== null ? (
               <span data-person-attribution="">{attribution}</span>
+            ) : null}
+            {attribution !== null && summary !== null ? (
+              <span aria-hidden="true">·</span>
             ) : null}
             {summary !== null ? (
               <span data-person-linkage="">
@@ -854,20 +947,18 @@ function PersonRow({
                 {linkageText(summary)}
               </span>
             ) : null}
+            {summary !== null ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span data-person-audience={summary.audience.disclosure}>
+                  {copy.VISIBLE_TO(audienceText(summary.audience))}
+                </span>
+              </>
+            ) : null}
             {person.archived ? <span>{copy.ARCHIVED_TAG}</span> : null}
-            <PendingBadge mark={row.pending} />
           </span>
-          {summary !== null ? (
-            <span
-              className="text-xs text-muted-foreground"
-              data-person-audience={summary.audience.disclosure}
-            >
-              {copy.VISIBLE_TO(audienceText(summary.audience))}
-            </span>
-          ) : null}
-        </span>
-        {count}
-      </Link>
+        ) : null}
+      </ListRow>
     </li>
   );
 }
@@ -890,7 +981,7 @@ function FieldCount({ personId }: { personId: string }) {
   ).length;
   return (
     <span
-      className="flex-none text-xs text-muted-foreground"
+      className="flex-none font-num text-xs text-muted-foreground"
       data-field-count=""
     >
       {page.next === null

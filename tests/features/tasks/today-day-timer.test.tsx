@@ -11,6 +11,11 @@ import { TodayScreen } from "../../../src/features/tasks/screens";
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => () => undefined,
   useMatchRoute: () => () => false,
+  // The page reads the address's hash (Upcoming is `/today#upcoming`); there is none here.
+  useRouterState: (options?: { select?: (state: unknown) => unknown }) => {
+    const state = { location: { hash: "", pathname: "/today", search: {} } };
+    return options?.select ? options.select(state) : state;
+  },
   Outlet: () => null,
 }));
 vi.mock("../../../src/features/tasks/env", () => ({

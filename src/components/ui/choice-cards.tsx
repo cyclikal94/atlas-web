@@ -26,9 +26,12 @@ export function ChoiceCards<Value extends string>({
   error,
   errorId,
   columns = 1,
+  legendHidden = false,
   ...rest
 }: {
   legend: string;
+  /** The legend is for assistive technology only (the section around the cards already carries the words). */
+  legendHidden?: boolean;
   name: string;
   value: Value;
   onChange(value: Value): void;
@@ -54,7 +57,11 @@ export function ChoiceCards<Value extends string>({
       className="flex min-w-0 flex-col gap-2"
       aria-describedby={error && errorId ? errorId : undefined}
     >
-      <legend className="mb-2 text-sm font-medium text-foreground">
+      <legend
+        className={
+          legendHidden ? "sr-only" : "mb-2 text-sm font-medium text-foreground"
+        }
+      >
         {legend}
       </legend>
       <div className={grid}>

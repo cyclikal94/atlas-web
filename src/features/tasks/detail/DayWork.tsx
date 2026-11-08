@@ -36,6 +36,7 @@ export function DayWork({
   focus,
   facts,
   extra,
+  rowActions,
 }: {
   row: RowModel;
   actions: TaskActions;
@@ -50,6 +51,8 @@ export function DayWork({
   facts?: ReactNode;
   /** More sections of the day's grouped box (the rota, when the task takes turns). */
   extra?: ReactNode;
+  /** The day's other acts beside the record control (the correction, the timer). */
+  rowActions?: ReactNode;
 }) {
   const env = useTasksEnv();
   const deps = useDependencies(row);
@@ -109,20 +112,20 @@ export function DayWork({
           onSee={() => openDialog(null)}
         />
       ) : null}
-      <div className="flex flex-col gap-6" data-day-top="">
-        {facts ? <div className="order-2 tablet:order-1">{facts}</div> : null}
-        <div className="order-1 tablet:order-2">
-          <RecordCard
-            key={`record:${row.id}`}
-            row={row}
-            actions={actions}
-            now={now}
-            zone={zone}
-            writable={writable}
-            focus={focus}
-            gate={gateOf(row, deps, env.online, now, openDialog)}
-          />
-        </div>
+      {/* The Final design: the facts strip, then the day's action row under it (on the phone the row stays at the bottom of the viewport). */}
+      <div className="flex flex-col gap-5" data-day-top="">
+        {facts}
+        <RecordCard
+          key={`record:${row.id}`}
+          row={row}
+          actions={actions}
+          now={now}
+          zone={zone}
+          writable={writable}
+          focus={focus}
+          gate={gateOf(row, deps, env.online, now, openDialog)}
+          extra={rowActions}
+        />
       </div>
       {/* The day's decisions and reference in one grouped box (the Final design): what needs doing first, the timer, the turns. */}
       <GroupedBox data-day-work="">

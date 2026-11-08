@@ -13,6 +13,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { HOME, ME, MO, record } from "../../support/people/records";
 import { fieldRow, peopleWorld, person } from "../../support/people/world";
+import { actions, findAction } from "./more-menu";
 
 /**
  * WF-PEOPLE-02 with the Q21 additions (A2, A9, A10, A12, A14): the linkage line only from a person read, rename routed by linkage
@@ -47,9 +48,9 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      within(header()).getByRole("button", { name: "Unlink account" }),
+      actions(header()).getByRole("button", { name: "Unlink account" }),
     ).toBeEnabled();
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     const name = within(header()).getByRole("textbox", { name: "Name" });
     fireEvent.change(name, { target: { value: "Kieran L." } });
     fireEvent.click(within(header()).getByRole("button", { name: "Save" }));
@@ -83,7 +84,7 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
     );
     await w.mount(`/people/${P}`);
     await within(header()).findByText("This is you — you control this profile");
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "K" },
     });
@@ -117,11 +118,11 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      within(header()).getByRole("button", { name: "Rename" }),
+      actions(header()).getByRole("button", { name: "Rename" }),
     ).toBeDisabled();
     expect(within(header()).getByText("Mo owns this name")).toBeInTheDocument();
     expect(
-      within(header()).getByRole("button", { name: "Unlink account" }),
+      actions(header()).getByRole("button", { name: "Unlink account" }),
     ).toBeDisabled();
     expect(
       within(header()).getByText(
@@ -140,9 +141,9 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
       await within(header()).findByText("Not linked to an account"),
     ).toBeInTheDocument();
     expect(
-      within(header()).queryByRole("button", { name: "Unlink account" }),
+      actions(header()).queryByRole("button", { name: "Unlink account" }),
     ).toBeNull();
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "Ada L." },
     });
@@ -166,7 +167,7 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
       "Not sent yet",
     );
     // Renaming again while that draft is unsent edits it in place (D-11a-15).
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
       target: { value: "Ada Lovelace" },
     });
@@ -183,7 +184,7 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
       await within(header()).findByText(/isn't known on this device/),
     ).toBeInTheDocument();
     expect(
-      within(header()).getByRole("button", { name: "Rename" }),
+      actions(header()).getByRole("button", { name: "Rename" }),
     ).toBeDisabled();
     expect(
       within(header()).getByText(
@@ -200,7 +201,7 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
     await within(header()).findByText("Not linked to an account");
     w.setOnline(false);
     expect(
-      within(header()).getByRole("button", { name: "Rename" }),
+      actions(header()).getByRole("button", { name: "Rename" }),
     ).toBeEnabled();
   });
 
@@ -210,7 +211,7 @@ describe("linkage and rename (D-11a-2, D-11a-5)", () => {
     w.api.linked.set(P, ME);
     await w.mount(`/people/${P}`);
     await within(header()).findByText("This is you — you control this profile");
-    fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+    fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
     w.setOnline(false);
     const save = within(header()).getByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
@@ -224,9 +225,7 @@ describe("unlink (D-11a-6)", () => {
     w.setCache([person({ id: P, label: "Kieran", version: 7 })]);
     w.api.linked.set(P, ME);
     await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Unlink account" }),
-    );
+    fireEvent.click(await findAction("Unlink account", header));
     const dialog = await screen.findByRole("dialog", {
       name: "Unlink your account from this profile?",
     });
@@ -255,9 +254,7 @@ describe("archive and restore (D-11a-10)", () => {
     const w = peopleWorld();
     w.setCache([person({ id: P, label: "Ada", version: 2 })]);
     await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Archive" }),
-    );
+    fireEvent.click(await findAction("Archive", header));
     await waitFor(() => expect(w.built).toHaveLength(1));
     expect(w.built[0]?.command).toEqual({
       command: { kind: "archive", id: P, expected_version: 2, archived: true },
@@ -267,9 +264,7 @@ describe("archive and restore (D-11a-10)", () => {
     ).toBeInTheDocument();
     w.setDrafts([]);
     w.putCache(person({ id: P, label: "Ada", version: 3, archived: true }));
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Restore" }),
-    );
+    fireEvent.click(await findAction("Restore", header));
     await waitFor(() => expect(w.built).toHaveLength(2));
     expect(w.built[1]?.command).toEqual({
       command: { kind: "archive", id: P, expected_version: 3, archived: false },
@@ -281,9 +276,7 @@ describe("archive and restore (D-11a-10)", () => {
     w.setCache([person({ id: P, label: "Ada" })]);
     w.outcomes.push({ kind: "refused", reason: "quota" });
     await w.mount(`/people/${P}`);
-    fireEvent.click(
-      await within(header()).findByRole("button", { name: "Archive" }),
-    );
+    fireEvent.click(await findAction("Archive", header));
     expect(
       await screen.findByText(
         "There isn't enough storage space on this device to save this.",

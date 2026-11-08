@@ -20,6 +20,8 @@ export function RouteFocus() {
     const off = router.subscribe("onResolved", (event) => {
       cancelAnimationFrame(frame);
       if (!event.fromLocation || !event.pathChanged) return;
+      // A hash names a place on the page (`/today#upcoming`): the page lands and focuses it itself, once it is there.
+      if (event.toLocation.hash !== "") return;
       const isDialogRoute = (location: { pathname: string; search: unknown }) =>
         router
           .matchRoutes(location.pathname, location.search as never)
@@ -27,12 +29,22 @@ export function RouteFocus() {
       if (isDialogRoute(event.toLocation) || isDialogRoute(event.fromLocation))
         return;
       claimed = false;
-      frame = requestAnimationFrame(() => {
+      // The page's heading may be a lazy screen's (a person, a task): a few frames are allowed for it to appear before <main> stands in.
+      let waited = 0;
+      const land = () => {
         if (claimed) return;
         const main = document.getElementById("main");
         const heading = main?.querySelector<HTMLElement>("[data-page-heading]");
+        if (heading === null || heading === undefined) {
+          waited += 1;
+          if (waited < 12) {
+            frame = requestAnimationFrame(land);
+            return;
+          }
+        }
         (heading ?? main)?.focus();
-      });
+      };
+      frame = requestAnimationFrame(land);
     });
     return () => {
       off();

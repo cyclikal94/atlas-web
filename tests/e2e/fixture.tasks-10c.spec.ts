@@ -763,7 +763,9 @@ test.describe("E-R2: a rota change answered after the person went away and came 
         await page.evaluate(() => {
           (window as unknown as { __r33: number }).__r33 = 1;
         });
-        await page.getByRole("link", { name: "‹ Tasks" }).click();
+        await page
+          .getByRole("link", { name: "All tasks", exact: true })
+          .click();
         await expect(page).toHaveURL(/\/tasks$/);
         await expect(page.locator("[data-rota-panel]")).toHaveCount(0);
         await page.goBack();

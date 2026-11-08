@@ -65,7 +65,8 @@ export function AppShell({
       id="main"
       tabIndex={-1}
       // isolate: nothing a screen positions inside main can be stacked above the sticky chrome.
-      className="isolate min-w-0 flex-1 px-4 py-3 tablet:px-9 tablet:py-8 desktop:px-12 desktop:py-10"
+      // The Final design: the page takes the whole width beside the rail, 36px down and 40px in from the tablet up.
+      className="isolate flex min-w-0 flex-1 flex-col px-4 py-4 tablet:px-10 tablet:py-9"
     >
       {railOpen ? null : updateSlot}
       {children}

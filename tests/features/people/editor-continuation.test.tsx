@@ -26,6 +26,7 @@ import {
   person,
 } from "../../support/people/world";
 import { ok } from "../../support/sharing/fake-api";
+import { findAction } from "./more-menu";
 
 /**
  * Review 11's design assessment: the REACHABLE continuations (DA11-06) and stale writes judged at the write (DA11-03), over the People
@@ -245,7 +246,7 @@ describe("DA11-06: save, reopen, save again: each write is the person's, on one 
     let first: DraftWithCommand | undefined;
     for (const name of ["A", "B", "C"]) {
       await w.mount(`/people/${P}`);
-      const rename = await screen.findByRole("button", { name: "Rename" });
+      const rename = await findAction("Rename");
       await waitFor(() => expect(rename).toBeEnabled());
       fireEvent.click(rename);
       const input = await screen.findByRole("textbox", { name: "Name" });
@@ -443,7 +444,7 @@ describe("DA11-03: the editor's reviewed body is judged at the write, after a ch
       );
       const queued = onlyDraft(w);
       await w.mount(`/people/${P}`);
-      const rename = await screen.findByRole("button", { name: "Rename" });
+      const rename = await findAction("Rename");
       await waitFor(() => expect(rename).toBeEnabled());
       fireEvent.click(rename);
       fireEvent.change(await screen.findByRole("textbox", { name: "Name" }), {

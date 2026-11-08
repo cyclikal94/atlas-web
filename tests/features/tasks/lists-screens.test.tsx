@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
+import { MENU_COPY } from "../../../src/components/ui/action-menu";
 import * as copy from "../../../src/features/tasks/copy";
 import { DETAIL, LISTS } from "../../../src/features/tasks/lists/copy";
 import { installMatchMedia } from "../../helpers/match-media";
@@ -64,10 +65,10 @@ describe("L5: the pane", () => {
     expect((await axe(document.body)).violations).toEqual([]);
   });
 
-  test("lists by name on the page, a count per list (unparseable: unknown), the selected list current", async () => {
+  test("lists by name on the page, a count per list (unparseable: unknown)", async () => {
     const [a, b, c] = [listId(), listId(), listId()];
     const t = await mountTasks({
-      path: `/tasks/lists/${b}`,
+      path: "/tasks/lists",
       rows: [
         listRow(a, "Zebra", [taskId(1), taskId(2)]),
         listRow(b, "apples", [taskId(1)]),
@@ -81,7 +82,6 @@ describe("L5: the pane", () => {
     expect(links.map((l) => l.querySelector(".truncate")?.textContent)).toEqual(
       ["apples", "Mango", "Zebra"],
     );
-    expect(links[0]?.getAttribute("aria-current")).toBe("page");
     expect(links[2]?.textContent).toContain(LISTS.count(2));
     expect(links[1]?.textContent).toContain(LISTS.countUnknown);
   });
@@ -168,10 +168,10 @@ describe("L5: the pane", () => {
     ).toContain(copy.PENDING.queued);
   });
 
-  test("the Tasks pane links to the Lists", async () => {
+  test("the rail links to the Lists from the Tasks page (the Final design: the lists are a destination of their own)", async () => {
     const t = await mountTasks({ path: "/tasks", rows: [] });
-    await t.until(() => document.querySelector("[data-lists-link]") !== null);
-    fireEvent.click(screen.getByRole("link", { name: "Lists" }));
+    await t.until(() => document.querySelector("[data-tasks-layout]") !== null);
+    fireEvent.click(screen.getByRole("link", { name: "All lists" }));
     await t.until(paneReady);
     expect(t.router.state.location.pathname).toBe("/tasks/lists");
   });
@@ -252,9 +252,15 @@ describe("L8: the detail", () => {
       ],
     });
     await t.until(detailReady(id));
-    for (const name of [DETAIL.rename, DETAIL.add, DETAIL.archive])
+    expect(
+      (screen.getByRole("button", { name: DETAIL.add }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    // Rename and Archive are behind "More" (the Final design, 8 November 2026), each disabled with its reason.
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    for (const name of [DETAIL.rename, DETAIL.archive])
       expect(
-        (screen.getByRole("button", { name }) as HTMLButtonElement).disabled,
+        (screen.getByRole("menuitem", { name }) as HTMLButtonElement).disabled,
       ).toBe(true);
     expect(screen.getAllByText(DETAIL.noEdit).length).toBeGreaterThanOrEqual(3);
     expect(
@@ -279,13 +285,17 @@ describe("L8: the detail", () => {
     await u.until(detailReady(bad));
     expect(screen.getByText(DETAIL.unreadable)).not.toBeNull();
     expect(screen.queryByRole("button", { name: DETAIL.add })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
     expect(
-      (screen.getByRole("button", { name: DETAIL.rename }) as HTMLButtonElement)
-        .disabled,
+      (
+        screen.getByRole("menuitem", {
+          name: DETAIL.rename,
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(false);
     expect(
       (
-        screen.getByRole("button", {
+        screen.getByRole("menuitem", {
           name: DETAIL.archive,
         }) as HTMLButtonElement
       ).disabled,
@@ -327,7 +337,8 @@ describe("L8: the detail", () => {
       env: { online: false },
     });
     await t.until(detailReady(id));
-    fireEvent.click(screen.getByRole("button", { name: DETAIL.archive }));
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    fireEvent.click(screen.getByRole("menuitem", { name: DETAIL.archive }));
     await t.settle();
     expect(bodyOf(t, "archive")).toEqual([
       { kind: "archive", id, expected_version: 2, archived: true },
@@ -377,15 +388,20 @@ describe("L8: the detail", () => {
       env: { online: false },
     });
     await t.until(detailReady(id));
-    fireEvent.click(screen.getByRole("button", { name: DETAIL.archive }));
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    fireEvent.click(screen.getByRole("menuitem", { name: DETAIL.archive }));
     await t.until(
-      () => screen.queryByRole("button", { name: DETAIL.restore }) !== null,
+      () => document.querySelector("[data-list-archived]") !== null,
     );
     expect(bodyOf(t, "archive")).toEqual([
       { kind: "archive", id, expected_version: 2, archived: true },
     ]);
-    expect(screen.getByText(DETAIL.archivedNote)).not.toBeNull();
-    // The pane's active filter no longer lists it; the archived filter does.
+    expect(
+      document.querySelector("[data-list-archived]")?.textContent,
+    ).toContain(DETAIL.archivedNote);
+    // Back at all the lists (a list is a page of its own now): the active filter no longer lists it; the archived filter does.
+    await t.router.navigate({ to: "/tasks/lists" });
+    await t.until(paneReady);
     expect(document.querySelector(`[data-list-link="${id}"]`)).toBeNull();
     fireEvent.click(
       screen.getByRole("checkbox", { name: LISTS.archivedFilter }),
@@ -393,9 +409,16 @@ describe("L8: the detail", () => {
     await t.until(
       () => document.querySelector(`[data-list-link="${id}"]`) !== null,
     );
-    fireEvent.click(screen.getByRole("button", { name: DETAIL.restore }));
+    await t.router.navigate({
+      to: "/tasks/lists/$listId",
+      params: { listId: id },
+      search: {},
+    });
+    await t.until(detailReady(id));
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    fireEvent.click(screen.getByRole("menuitem", { name: DETAIL.restore }));
     await t.until(
-      () => screen.queryByRole("button", { name: DETAIL.archive }) !== null,
+      () => document.querySelector("[data-list-archived]") === null,
     );
     expect(bodyOf(t, "archive").map((b) => b.archived)).toEqual([true, false]);
     expect(copy.PENDING.queued).toBe("Not sent yet");

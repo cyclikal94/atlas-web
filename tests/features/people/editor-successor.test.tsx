@@ -28,6 +28,7 @@ import {
   person,
 } from "../../support/people/world";
 import { ok } from "../../support/sharing/fake-api";
+import { findAction } from "./more-menu";
 
 /**
  * WEB-11a review 12, R12.1 (family `people-edit-baseline-rebinding`) and its reverse schedule, at both callers (DA12-05): the field editor
@@ -160,7 +161,7 @@ const rename: Caller = {
     renameEditRequest({ personId: P, name: text, policyVersion: 6 }),
   async open(w) {
     await w.mount(`/people/${P}`);
-    const button = await screen.findByRole("button", { name: "Rename" });
+    const button = await findAction("Rename");
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
     const input = (await screen.findByRole("textbox", {

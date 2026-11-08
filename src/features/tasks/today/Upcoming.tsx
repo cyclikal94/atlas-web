@@ -11,14 +11,14 @@ import {
   GROUP_ORDER,
   type Group,
   groupOf,
-  weekdayLabel,
+  longDayLabel,
 } from "../format";
 import { aheadHorizon } from "../model/ahead";
 import { addDays, todayIn } from "../model/time";
 import type { RowModel } from "../view";
 import { Ahead } from "./Ahead";
 import { RailFoldLine, RailHeading, RailLabel } from "./rail";
-import { TodayRow } from "./TodayRow";
+import { type RowOpen, TodayRow } from "./TodayRow";
 import { useUpcomingView } from "./useUpcomingView";
 
 /** The Monday-based weekday of a date (0 Monday … 6 Sunday). */
@@ -26,8 +26,11 @@ function weekdayIndex(day: string): number {
   const [y, m, d] = day.split("-").map(Number) as [number, number, number];
   return (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7;
 }
-const dayNumber = (day: string) => String(Number(day.slice(8, 10)));
 const monthFormat = new Intl.DateTimeFormat("en-GB", {
+  month: "long",
+  timeZone: "UTC",
+});
+const monthYearFormat = new Intl.DateTimeFormat("en-GB", {
   month: "long",
   year: "numeric",
   timeZone: "UTC",
@@ -38,7 +41,18 @@ const shortDay = new Intl.DateTimeFormat("en-GB", {
   timeZone: "UTC",
 });
 const utc = (day: string) => new Date(`${day}T00:00:00Z`);
-const monthLabel = (day: string) => monthFormat.format(utc(day));
+/** "November", or "January 2027" once the year is not the day's. */
+const monthLabel = (month: string, yearOf: string) =>
+  (month.slice(0, 4) === yearOf.slice(0, 4)
+    ? monthFormat
+    : monthYearFormat
+  ).format(utc(`${month}-01`));
+const monthEnd = (month: string) => {
+  const [y, m] = month.split("-").map(Number) as [number, number];
+  const next =
+    m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  return addDays(next, -1);
+};
 /** "3–9 Nov", or "27 Oct – 2 Nov" across a month boundary. */
 function weekLabel(start: string, end: string): string {
   const a = dayLabel(start).split(" ").slice(1).join(" ");
@@ -63,77 +77,95 @@ interface DayBlock {
   byDay: boolean;
   rows: RowModel[];
 }
+interface MonthBlock {
+  key: string;
+  label: string;
+  count: number;
+  weeks: DayBlock[];
+}
 
-/** The rows after `day`, in the Final design's groups: tomorrow, the rest of this week by day, the next four weeks, then by month. */
+/**
+ * The rows after `day`, in the Final design's groups (revised 8 November 2026): tomorrow, the rest of this week a day at a time, next
+ * week a day at a time, then each month a week at a time ("November · 23–29 Nov"). The sticky bar names the block and the day or
+ * week under it (`copy.UPCOMING.bar`).
+ */
 export function groupAhead(
   rows: readonly RowModel[],
   day: string,
 ): {
   tomorrow: RowModel[];
   week: DayBlock[];
-  weeks: DayBlock[];
-  later: DayBlock[];
+  nextWeek: DayBlock[];
+  months: MonthBlock[];
 } {
   const tomorrow = addDays(day, 1);
   const sunday = addDays(day, 6 - weekdayIndex(day));
-  const weeksEnd = addDays(sunday, 28);
+  const nextWeekEnd = addDays(sunday, 7);
   const byDay = new Map<string, RowModel[]>();
   for (const row of rows) {
     const date = row.data.slot.date as string;
     byDay.set(date, [...(byDay.get(date) ?? []), row]);
   }
-  const week: DayBlock[] = [];
-  for (let d = addDays(tomorrow, 1); d <= sunday; d = addDays(d, 1)) {
-    const dayRows = byDay.get(d);
-    if (!dayRows) continue;
-    week.push({
-      key: d,
-      label: weekdayLabel(d),
-      sub: dayNumber(d),
-      byDay: false,
-      rows: dayRows.sort(compareRows),
-    });
-  }
-  const weeks: DayBlock[] = [];
-  // Tomorrow has its own block: when the day is a Sunday the first week ahead begins the day after tomorrow.
-  const afterTomorrow = addDays(tomorrow, 1);
-  for (
-    let start = addDays(sunday, 1);
-    start <= weeksEnd;
-    start = addDays(start, 7)
-  ) {
-    const end = addDays(start, 6);
-    const first = start < afterTomorrow ? afterTomorrow : start;
-    const block: RowModel[] = [];
-    for (let d = first; d <= end; d = addDays(d, 1))
-      block.push(...(byDay.get(d) ?? []));
-    if (block.length === 0) continue;
-    weeks.push({
-      key: start,
-      label: weekLabel(first, end),
-      byDay: true,
-      rows: block.sort(compareAhead),
-    });
-  }
-  const later: DayBlock[] = [];
-  const months = new Map<string, RowModel[]>();
-  for (const [date, dayRows] of byDay)
-    if (date > weeksEnd) {
-      const month = date.slice(0, 7);
-      months.set(month, [...(months.get(month) ?? []), ...dayRows]);
+  const days = (from: string, until: string): DayBlock[] => {
+    const out: DayBlock[] = [];
+    for (let d = from; d <= until; d = addDays(d, 1)) {
+      const dayRows = byDay.get(d);
+      if (!dayRows) continue;
+      out.push({
+        key: d,
+        label: longDayLabel(d),
+        byDay: false,
+        rows: dayRows.sort(compareRows),
+      });
     }
-  for (const month of [...months.keys()].sort())
-    later.push({
+    return out;
+  };
+  // Tomorrow has its own block: the rest of the week starts the day after it (and when the day is a Sunday, so does next week).
+  const afterTomorrow = addDays(tomorrow, 1);
+  const week = days(afterTomorrow, sunday);
+  const nextWeek = days(
+    afterTomorrow > addDays(sunday, 1) ? afterTomorrow : addDays(sunday, 1),
+    nextWeekEnd,
+  );
+  const byMonth = new Map<string, Map<string, RowModel[]>>();
+  for (const [date, dayRows] of byDay)
+    if (date > nextWeekEnd) {
+      const month = date.slice(0, 7);
+      const weekStart = addDays(date, -weekdayIndex(date));
+      const weeks = byMonth.get(month) ?? new Map<string, RowModel[]>();
+      weeks.set(weekStart, [...(weeks.get(weekStart) ?? []), ...dayRows]);
+      byMonth.set(month, weeks);
+    }
+  const months: MonthBlock[] = [];
+  for (const month of [...byMonth.keys()].sort()) {
+    const weeks = byMonth.get(month) ?? new Map<string, RowModel[]>();
+    const first = `${month}-01`;
+    const last = monthEnd(month);
+    const blocks: DayBlock[] = [];
+    for (const start of [...weeks.keys()].sort()) {
+      const end = addDays(start, 6);
+      blocks.push({
+        key: `${month}-${start}`,
+        label: weekLabel(
+          start < first ? first : start,
+          end > last ? last : end,
+        ),
+        byDay: true,
+        rows: (weeks.get(start) ?? []).sort(compareAhead),
+      });
+    }
+    months.push({
       key: month,
-      label: monthLabel(`${month}-01`),
-      byDay: true,
-      rows: (months.get(month) ?? []).sort(compareAhead),
+      label: monthLabel(month, day),
+      count: blocks.reduce((n, block) => n + block.rows.length, 0),
+      weeks: blocks,
     });
+  }
   return {
     tomorrow: (byDay.get(tomorrow) ?? []).sort(compareRows),
     week,
-    weeks,
-    later,
+    nextWeek,
+    months,
   };
 }
 
@@ -147,11 +179,14 @@ export function Upcoming({
   zone,
   now,
   id,
+  open: openRow,
 }: {
   day: string;
   zone: string;
   now: number;
   id: string;
+  /** Where a row's title leads when the task opens beside the day (the "How tasks open" setting). */
+  open?: (row: RowModel) => RowOpen;
 }) {
   const env = useTasksEnv();
   const view = useUpcomingView(day, zone, now);
@@ -171,6 +206,8 @@ export function Upcoming({
     block: DayBlock,
     rowDay: (row: RowModel) => string,
     level: "h2" | "h3",
+    /** What the sticky bar says while this block is under it ("Rest of the week · Tuesday 10 November"). */
+    barLabel: string,
   ) => {
     const particular = block.rows.filter((row) => !routine(row));
     const folded = block.rows.filter(routine);
@@ -181,7 +218,13 @@ export function Upcoming({
       <section key={block.key} aria-labelledby={`${headingId}-${block.key}`}>
         <RailLabel
           heading={
-            <Heading id={`${headingId}-${block.key}`}>{block.label}</Heading>
+            <Heading
+              id={`${headingId}-${block.key}`}
+              data-rail-heading={barLabel}
+              data-rail-section="upcoming"
+            >
+              {block.label}
+            </Heading>
           }
           sub={block.sub}
         />
@@ -197,6 +240,7 @@ export function Upcoming({
               writable={env.writable}
               me={env.accountId}
               surface="upcoming"
+              {...(openRow ? { open: openRow } : {})}
               {...(block.byDay
                 ? { timeText: shortDay.format(utc(rowDay(row))) }
                 : {})}
@@ -226,7 +270,13 @@ export function Upcoming({
     (view.error === null || view.stale);
   const horizon = aheadHorizon(todayIn(zone, now));
   return (
-    <div id={id} data-upcoming="" className="flex flex-col">
+    // Focusable (not in the tab order): `#upcoming` lands the focus here, where the days ahead begin.
+    <div
+      id={id}
+      data-upcoming=""
+      tabIndex={-1}
+      className="flex flex-col outline-none"
+    >
       {view.loading ? null : (
         <Ahead targets={view.ahead} horizonLabel={dayLabel(horizon)} />
       )}
@@ -262,9 +312,18 @@ export function Upcoming({
         <section aria-labelledby={`${headingId}-tomorrow`}>
           <RailHeading
             heading={
-              <h2 id={`${headingId}-tomorrow`}>{copy.UPCOMING.tomorrow}</h2>
+              <h2
+                id={`${headingId}-tomorrow`}
+                data-rail-heading={copy.UPCOMING.bar(
+                  copy.UPCOMING.tomorrow,
+                  longDayLabel(tomorrow),
+                )}
+                data-rail-section="upcoming"
+              >
+                {copy.UPCOMING.tomorrow}
+              </h2>
             }
-            sub={`${weekdayLabel(tomorrow)} ${dayNumber(tomorrow)} · ${copy.THINGS(groups.tomorrow.length)}`}
+            sub={`${longDayLabel(tomorrow)} · ${copy.THINGS(groups.tomorrow.length)}`}
           />
           {["any", ...GROUP_ORDER.filter((g) => g !== "any")]
             .filter((g) => tomorrowGroups.has(g as Group))
@@ -278,6 +337,10 @@ export function Upcoming({
                 },
                 () => tomorrow,
                 "h3",
+                copy.UPCOMING.bar(
+                  copy.UPCOMING.tomorrow,
+                  `${longDayLabel(tomorrow)} · ${copy.GROUPS[g as Group]}`,
+                ),
               ),
             )}
         </section>
@@ -286,36 +349,90 @@ export function Upcoming({
         <section aria-labelledby={`${headingId}-week`}>
           <RailHeading
             heading={
-              <h2 id={`${headingId}-week`}>{copy.UPCOMING.restOfWeek}</h2>
+              <h2
+                id={`${headingId}-week`}
+                data-rail-heading={copy.UPCOMING.bar(
+                  copy.UPCOMING.restOfWeek,
+                  longDayLabel(groups.week[0]?.key ?? tomorrow),
+                )}
+                data-rail-section="upcoming"
+              >
+                {copy.UPCOMING.restOfWeek}
+              </h2>
             }
             sub={copy.UPCOMING.restOfWeekSub}
           />
-          {groups.week.map((block) => render(block, () => block.key, "h3"))}
+          {groups.week.map((block) =>
+            render(
+              block,
+              () => block.key,
+              "h3",
+              copy.UPCOMING.bar(
+                copy.UPCOMING.restOfWeek,
+                longDayLabel(block.key),
+              ),
+            ),
+          )}
         </section>
       ) : null}
-      {groups.weeks.length > 0 ? (
-        <section aria-labelledby={`${headingId}-weeks`}>
+      {groups.nextWeek.length > 0 ? (
+        <section aria-labelledby={`${headingId}-next-week`}>
           <RailHeading
             heading={
-              <h2 id={`${headingId}-weeks`}>{copy.UPCOMING.nextWeeks}</h2>
+              <h2
+                id={`${headingId}-next-week`}
+                data-rail-heading={copy.UPCOMING.bar(
+                  copy.UPCOMING.nextWeek,
+                  groups.nextWeek[0]?.label ?? "",
+                )}
+                data-rail-section="upcoming"
+              >
+                {copy.UPCOMING.nextWeek}
+              </h2>
             }
-            sub={copy.UPCOMING.nextWeeksSub}
+            sub={copy.UPCOMING.nextWeekSub}
           />
-          {groups.weeks.map((block) =>
-            render(block, (row) => row.data.slot.date as string, "h3"),
+          {groups.nextWeek.map((block) =>
+            render(
+              block,
+              () => block.key,
+              "h3",
+              copy.UPCOMING.bar(copy.UPCOMING.nextWeek, block.label),
+            ),
           )}
         </section>
       ) : null}
-      {groups.later.length > 0 ? (
-        <section aria-labelledby={`${headingId}-later`}>
+      {groups.months.map((month) => (
+        <section
+          key={month.key}
+          aria-labelledby={`${headingId}-${month.key}`}
+          data-upcoming-month={month.key}
+        >
           <RailHeading
-            heading={<h2 id={`${headingId}-later`}>{copy.UPCOMING.later}</h2>}
+            heading={
+              <h2
+                id={`${headingId}-${month.key}`}
+                data-rail-heading={copy.UPCOMING.bar(
+                  month.label,
+                  month.weeks[0]?.label ?? "",
+                )}
+                data-rail-section="upcoming"
+              >
+                {month.label}
+              </h2>
+            }
+            sub={copy.THINGS(month.count)}
           />
-          {groups.later.map((block) =>
-            render(block, (row) => row.data.slot.date as string, "h3"),
+          {month.weeks.map((block) =>
+            render(
+              block,
+              (row) => row.data.slot.date as string,
+              "h3",
+              copy.UPCOMING.bar(month.label, block.label),
+            ),
           )}
         </section>
-      ) : null}
+      ))}
       {empty ? (
         <p
           className="py-4 pl-[94px] text-sm text-muted-foreground"

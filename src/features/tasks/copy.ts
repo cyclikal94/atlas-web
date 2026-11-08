@@ -60,11 +60,15 @@ export const FOLD_UPCOMING = "Upcoming";
 export const UPCOMING = {
   id: "upcoming",
   tomorrow: "Tomorrow",
-  restOfWeek: "Rest of the week",
+  restOfWeek: "Rest of week",
   restOfWeekSub: "a line per task, routine ones folded",
-  nextWeeks: "Next weeks",
-  nextWeeksSub: "routine tasks folded",
-  later: "Later",
+  nextWeek: "Next week",
+  nextWeekSub: "routine tasks folded",
+  /**
+   * What the sticky bar says while a block of the days ahead is under it: "Tomorrow · Monday 9 November", "Rest of week · Tuesday 10
+   * November", "Next week · Monday 16 November", "November · 23–29 Nov", "December · 1–6 Dec".
+   */
+  bar: (block: string, detail: string) => `${block} · ${detail}`,
   routine: (n: number) => (n === 1 ? "1 routine task" : `${n} routine tasks`),
   show: "show",
   hide: "hide",
@@ -113,6 +117,8 @@ export const BACK_TO_TODAY = "Back to today";
 export const ZONE_TOGGLE = "Change the time zone";
 /** Today's way to a new task (the Final design, 8 November 2026). */
 export const NEW_TASK = "New task";
+/** Focus mode from the day (the Final design): one thing at a time. */
+export const FOCUS_MODE = "Focus on one thing at a time";
 export const FROM_DAY = (label: string) => `From ${label}`;
 export const UNTITLED = "Untitled task";
 export const UNREADABLE = "This item can't be shown on this device.";
@@ -179,10 +185,22 @@ export const CARRY: Readonly<Record<Carry, { label: string; line: string }>> = {
 export const FACTS = {
   day: "Day",
   who: "Who",
+  turn: "Turn",
   repeat: "Repeats",
   carry: "If missed",
   goal: "Goal",
+  timer: "Timer",
   streak: "Streak",
+  seenBy: "Seen by",
+} as const;
+/** The task page's summary line (the Final design): "18:30 today · every Monday · your turn". */
+export const SUMMARY_LINE = {
+  anyTime: "Any time",
+  today: "today",
+  tomorrow: "tomorrow",
+  yourTurn: "your turn",
+  theirTurn: (name: string) => `${name}'s turn`,
+  justYou: "just you",
 } as const;
 /** The goal as one short phrase for the facts strip. */
 export const GOAL_FACT = (goal: Goal): string =>
@@ -256,3 +274,35 @@ export const JOINT = {
   lastChecked: (outcome: Outcome, at: string) =>
     `${OUTCOME[outcome]}, last checked ${at}`,
 } as const;
+
+/** Quick add from the day (the Final design, 8 November 2026): the row at the end of the day and the search pill's "Add". */
+export const QUICK_ADD = {
+  placeholder: (dayLabel: string) => `Add to ${dayLabel}…`,
+  label: "Add a task",
+  added: (title: string) => `Added “${title}”. Not sent yet.`,
+  review:
+    "Added. Review who gets this task in the sync queue before it's sent.",
+  saving: "Adding…",
+} as const;
+
+/** The search pill and its palette (the Final design): one place to find a task, a list or a person, or add a task to the day. */
+export const PALETTE = {
+  placeholder: "Search or add anything…",
+  label: "Search or add",
+  title: "Search or add",
+  tasks: "Tasks",
+  lists: "Lists",
+  people: "People",
+  add: (text: string, day: string) => `Add “${text}” to ${day}`,
+  newTask: "New task with every option",
+  empty: "Type to search your tasks, lists and people, or to add a task.",
+  none: (query: string) => `Nothing matches “${query}”.`,
+  shortcut: "⌘K",
+} as const;
+
+/** Recording from a row (the Final design): an amount or a checklist is logged on the day, without leaving it. */
+export const LOG_AMOUNT = "Log an amount";
+export const TICK_ITEMS = "Tick off items";
+export const JUST_CHECKED = "Just checked";
+export const CLOSE_RECORDER = "Done logging";
+export const AMOUNT_LABEL = (unit: string) => `Amount (${unit})`;

@@ -1,6 +1,14 @@
-import { Outlet, useMatchRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import {
+  Outlet,
+  useMatchRoute,
+  useNavigate,
+  useRouterState,
+} from "@tanstack/react-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLayoutMode } from "../../app/shell/layout-mode";
+import { type TaskWrapper, useTaskWrapper } from "../../app/shell/preferences";
 import { getPageDataHost } from "../../data";
+import { CalendarPage } from "./calendar/CalendarPage";
 import {
   registerCatchUpConflicts,
   useCatchUpService,
@@ -8,13 +16,17 @@ import {
 import { TaskDetail } from "./detail/TaskDetail";
 import { TaskList } from "./detail/TaskList";
 import { TasksBoundary } from "./env";
+import { FocusPage } from "./focus/FocusPage";
 import { TaskFormPage } from "./form/TaskFormPage";
 import { ListsLayout } from "./lists/ListsLayout";
 import { isKnownZone } from "./model/primitives";
 import { dayEnd, todayIn } from "./model/time";
 import { StreakPage } from "./streak/StreakPage";
 import { TimersPage } from "./timers/TimersPage";
+import { UPCOMING_HASH } from "./titles";
+import { PANE_COPY, TaskPane } from "./today/TaskPane";
 import { TodayPage } from "./today/TodayPage";
+import type { RowOpen } from "./today/TodayRow";
 
 /**
  * The task screens, loaded LAZILY by their routes (one chunk, never part of an initial bundle: the fixture's entry includes the protected
@@ -31,11 +43,28 @@ export const deviceZone = (): string => {
   return isKnownZone(zone) ? zone : "UTC";
 };
 
-export function TodayScreen(props: {
-  search: { day?: string; tz?: string };
-  /** `/upcoming` opens the fold and starts there. */
-  section?: "today" | "upcoming";
-}) {
+export interface TodayScreenSearch {
+  day?: string;
+  tz?: string;
+  task?: string;
+  occurrence?: string;
+  new?: boolean;
+}
+
+/**
+ * The container a task opens in from this page, for this width (Settings · Layout): the phone always opens a page, and a split pane
+ * needs the desktop width (below it the setting falls back to a page). The peek and the overlay fit from the tablet up.
+ */
+export function effectiveWrapper(
+  wrapper: TaskWrapper,
+  mode: "desktop" | "tablet" | "mobile",
+): TaskWrapper {
+  if (mode === "mobile") return "page";
+  if (wrapper === "split" && mode !== "desktop") return "page";
+  return wrapper;
+}
+
+export function TodayScreen(props: { search: TodayScreenSearch }) {
   return (
     <TasksBoundary>
       <TodayWithDefaults {...props} />
@@ -43,17 +72,76 @@ export function TodayScreen(props: {
   );
 }
 
-function TodayWithDefaults({
-  search,
-  section = "today",
-}: {
-  search: { day?: string; tz?: string };
-  section?: "today" | "upcoming";
-}) {
+function TodayWithDefaults({ search }: { search: TodayScreenSearch }) {
   const navigate = useNavigate();
   const zone = search.tz ?? deviceZone();
   const [now, setNow] = useState(() => Date.now());
   const today = todayIn(zone, now);
+  const to = "/today" as const;
+  // Upcoming is the second half of this page: `#upcoming` starts at the fold, and the hash follows the scroll (`onSection`).
+  const hash = useRouterState({ select: (state) => state.location.hash });
+  const section: "today" | "upcoming" =
+    hash === UPCOMING_HASH ? "upcoming" : "today";
+  // How a task opens from this day (Settings · Layout, the Final design): beside it, over it, or as its own page.
+  const wrapper = effectiveWrapper(useTaskWrapper(), useLayoutMode());
+  const base = useMemo(
+    () => ({
+      ...(search.day ? { day: search.day } : {}),
+      ...(search.tz ? { tz: search.tz } : {}),
+    }),
+    [search.day, search.tz],
+  );
+  const opened:
+    | { kind: "new" }
+    | { kind: "task"; taskId: string; occurrence?: string }
+    | null =
+    wrapper === "page"
+      ? null
+      : search.new
+        ? { kind: "new" }
+        : search.task
+          ? {
+              kind: "task",
+              taskId: search.task,
+              ...(search.occurrence ? { occurrence: search.occurrence } : {}),
+            }
+          : null;
+  const close = useCallback(
+    () => void navigate({ to, search: base, replace: true }),
+    [navigate, to, base],
+  );
+  const openRow =
+    wrapper === "page"
+      ? undefined
+      : (row: { taskId: string; id: string }): RowOpen => ({
+          to,
+          search: { ...base, task: row.taskId, occurrence: row.id },
+        });
+  const newTask: RowOpen | undefined =
+    wrapper === "page" ? undefined : { to, search: { ...base, new: true } };
+  // ↑ and ↓ in the side peek: the day's rows in the order shown, read from the page itself.
+  const step = useCallback(
+    (direction: -1 | 1) => {
+      const rows = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-today-row]"),
+      );
+      const index = rows.findIndex(
+        (row) => row.dataset.todayRow === search.occurrence,
+      );
+      const next = rows[index + direction];
+      if (next?.dataset.taskId && next.dataset.todayRow)
+        void navigate({
+          to,
+          search: {
+            ...base,
+            task: next.dataset.taskId,
+            occurrence: next.dataset.todayRow,
+          },
+          replace: true,
+        });
+    },
+    [navigate, to, base, search.occurrence],
+  );
   // With no day in the address the view is today's, and rolls over at local midnight (R6, revision 1). The wait is capped at six hours,
   // and a wake that finds the same day arms the next wait ITSELF, so the chain continues until the day changes whatever the length of the
   // remaining wait; only a change of day re-renders. A device that slept or whose clock was changed reads the day again when the page is
@@ -87,22 +175,89 @@ function TodayWithDefaults({
       window.removeEventListener("focus", resume);
     };
   }, [search.day, today, zone]);
-  return (
+  const onSection = useCallback(
+    (next: "today" | "upcoming") => {
+      if (next === section) return;
+      void navigate({
+        to,
+        search: (current: TodayScreenSearch) => current,
+        hash: next === "upcoming" ? UPCOMING_HASH : "",
+        replace: true,
+        resetScroll: false,
+      });
+    },
+    [navigate, to, section],
+  );
+  const page = (
     <TodayPage
       day={search.day ?? today}
       zone={zone}
       dayGiven={search.day !== undefined}
       section={section}
+      onSection={onSection}
       onChange={(next) => {
         const day = next.day ?? search.day;
         const tz = next.zone ?? search.tz;
         void navigate({
-          to: section === "upcoming" ? "/upcoming" : "/today",
-          search: { ...(day ? { day } : {}), ...(tz ? { tz } : {}) },
+          to,
+          search: {
+            ...(day ? { day } : {}),
+            ...(tz ? { tz } : {}),
+            ...(search.task ? { task: search.task } : {}),
+            ...(search.occurrence ? { occurrence: search.occurrence } : {}),
+            ...(search.new ? { new: true } : {}),
+          },
           replace: true,
         });
       }}
+      {...(openRow ? { open: openRow } : {})}
+      {...(newTask ? { newTask } : {})}
     />
+  );
+  if (opened === null || wrapper === "page") return page;
+  const content =
+    opened.kind === "new" ? (
+      <TaskFormPage
+        mode={{ kind: "new" }}
+        embedded={{
+          onClose: close,
+          onSaved: (taskId) =>
+            void navigate({
+              to,
+              search: { ...base, task: taskId },
+              replace: true,
+            }),
+        }}
+      />
+    ) : (
+      <TaskDetail
+        key={`${opened.taskId}:${opened.occurrence ?? ""}`}
+        taskId={opened.taskId}
+        {...(opened.occurrence ? { occurrence: opened.occurrence } : {})}
+        embedded
+        onClose={close}
+      />
+    );
+  const label = opened.kind === "new" ? PANE_COPY.newLabel : PANE_COPY.label;
+  if (wrapper === "split")
+    return (
+      <div
+        className="grid items-start gap-8 desktop:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]"
+        data-today-split=""
+      >
+        {page}
+        <TaskPane wrapper="split" label={label} onClose={close}>
+          {content}
+        </TaskPane>
+      </div>
+    );
+  return (
+    <>
+      {page}
+      <TaskPane wrapper={wrapper} label={label} onClose={close} onStep={step}>
+        {content}
+      </TaskPane>
+    </>
   );
 }
 
@@ -120,28 +275,20 @@ function TasksLayoutInner() {
   // directly opened detail, the list or the account's timers finds a runner for the displayed identity.
   useCatchUpService();
   const matchRoute = useMatchRoute();
-  const selected = matchRoute({ to: "/tasks/$taskId", fuzzy: true });
   const child =
-    selected !== false || matchRoute({ to: "/tasks/new" }) !== false;
+    matchRoute({ to: "/tasks/$taskId", fuzzy: true }) !== false ||
+    matchRoute({ to: "/tasks/new" }) !== false;
+  // The Final design: the tasks take the page, and a task (or the form) is a page of its own.
   return (
-    <div className="flex flex-col gap-6 desktop:flex-row" data-tasks-layout="">
-      <aside
-        className={`${child ? "hidden desktop:block" : "block"} desktop:w-[300px]`}
-      >
-        {/* The list's heading is the route's (`route.tsx`), outside the cache gate and this lazy screen. */}
-        <div className={child ? "" : "mt-4"}>
-          <TaskList
-            selected={
-              selected === false
-                ? undefined
-                : (selected as { taskId: string }).taskId
-            }
-          />
-        </div>
-      </aside>
-      <div className="min-w-0 flex-1">
+    <div className="flex min-w-0 flex-col" data-tasks-layout="">
+      {child ? (
         <Outlet />
-      </div>
+      ) : (
+        // The destination's eyebrow heading is the route's (`route.tsx`), outside the cache gate and this lazy screen.
+        <div className="mt-1">
+          <TaskList />
+        </div>
+      )}
     </div>
   );
 }
@@ -182,6 +329,62 @@ export function ListsLayoutScreen() {
   return (
     <TasksBoundary>
       <ListsLayout />
+    </TasksBoundary>
+  );
+}
+
+/** Focus mode (the Final design): the day at `/focus?day=&tz=`, one thing at a time. */
+export function FocusScreen({
+  search,
+}: {
+  search: { day?: string; tz?: string };
+}) {
+  const zone = search.tz ?? deviceZone();
+  return (
+    <TasksBoundary>
+      <FocusPage day={search.day ?? todayIn(zone, Date.now())} zone={zone} />
+    </TasksBoundary>
+  );
+}
+
+/** The calendar at `/calendar?view=month|week&weekends=1|0&at=YYYY-MM-DD&tz=`: the view, the weekends and the day in view in the address. */
+export function CalendarScreen({
+  search,
+}: {
+  search: {
+    view?: "month" | "week";
+    weekends?: boolean;
+    at?: string;
+    tz?: string;
+  };
+}) {
+  const navigate = useNavigate();
+  const zone = search.tz ?? deviceZone();
+  const at = search.at ?? todayIn(zone, Date.now());
+  return (
+    <TasksBoundary>
+      <CalendarPage
+        view={search.view ?? "month"}
+        weekends={search.weekends !== false}
+        at={at}
+        zone={zone}
+        onChange={(next) => {
+          const view = next.view ?? search.view ?? "month";
+          const weekends = next.weekends ?? search.weekends !== false;
+          void navigate({
+            to: "/calendar",
+            search: {
+              ...(view === "week" ? { view } : {}),
+              ...(weekends ? {} : { weekends: false }),
+              at: next.at ?? at,
+              ...(search.tz ? { tz: search.tz } : {}),
+            },
+            replace: true,
+            // The page scrolls itself to the block (the router's reset would take the calendar back to its top).
+            resetScroll: false,
+          });
+        }}
+      />
     </TasksBoundary>
   );
 }

@@ -1,6 +1,5 @@
 import { cleanup, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { UPCOMING_FOLD_STORAGE_KEY } from "../../../src/app/shell/preferences";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { forgetCatchUp } from "../../../src/features/tasks/catchup/useCatchUp";
@@ -34,16 +33,16 @@ import {
 installMatchMedia({ width: 1440 });
 beforeEach(() => {
   localStorage.removeItem(AHEAD_STORAGE_KEY);
-  localStorage.removeItem(UPCOMING_FOLD_STORAGE_KEY);
 });
 afterEach(() => {
   cleanup();
   forgetTaskMemory();
   forgetCatchUp();
   localStorage.removeItem(AHEAD_STORAGE_KEY);
-  localStorage.removeItem(UPCOMING_FOLD_STORAGE_KEY);
 });
-const PATH = `/today?day=${TODAY}&tz=UTC`;
+// The look-ahead is asked for while the Upcoming fold is open (closed by default since 8 November 2026): these cases land on it.
+const PATH = `/today?day=${TODAY}&tz=UTC#upcoming`;
+const DAY_ONLY = `/today?day=${TODAY}&tz=UTC`;
 const HORIZON = addDays(TODAY, AHEAD_DAYS);
 const status = () =>
   document.querySelector("[data-ahead]") as HTMLElement | null;
@@ -165,16 +164,14 @@ describe("the look-ahead", () => {
     expect(localStorage.getItem(AHEAD_STORAGE_KEY)).toBeNull();
   });
 
-  test("with the fold folded away nothing is asked; offline the plan waits", async () => {
-    localStorage.setItem(UPCOMING_FOLD_STORAGE_KEY, "folded");
+  test("with the fold closed (the day alone) nothing is asked; offline the plan waits", async () => {
     const task = await daily();
     const { api, asked } = serverThatPlans(task);
-    const t = await mountTasks({ path: PATH, rows: task.rows, api });
+    const t = await mountTasks({ path: DAY_ONLY, rows: task.rows, api });
     await t.settle();
     expect(document.querySelector("[data-upcoming]")).toBeNull();
     expect(asked).toEqual([]);
     t.unmount();
-    localStorage.removeItem(UPCOMING_FOLD_STORAGE_KEY);
     const offline = serverThatPlans(task);
     const t2 = await mountTasks({
       path: PATH,

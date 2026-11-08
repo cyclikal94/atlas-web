@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { Plus } from "lucide-react";
 import {
   type ReactNode,
   type RefObject,
@@ -12,10 +13,14 @@ import {
   unpinList,
   usePinnedLists,
 } from "../../../app/shell/preferences";
+import { ActionMenu, type MenuItem } from "../../../components/ui/action-menu";
+import { Breadcrumb } from "../../../components/ui/breadcrumb";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
-import { PageActions } from "../../../components/ui/page-actions";
+import { Eyebrow, PageHeader } from "../../../components/ui/page-header";
 import { PageHeading } from "../../../components/ui/page-heading";
+import { ColourDot } from "../../../components/ui/row";
+import { cn } from "../../../lib/utils";
 import { ResourcePolicyEditor } from "../../sharing";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -23,9 +28,12 @@ import { keptKey, useKeptRecovery } from "../kept-input";
 import { archiveResource } from "../model/commands";
 import { atCapacity, listItemOf, listRows } from "../model/list-view";
 import { listItem } from "../model/lists";
+import { todayIn } from "../model/time";
 import { LISTS_TITLE } from "../titles";
+import { SearchPill } from "../today/CommandPalette";
+import type { RowOpen } from "../today/TodayRow";
 import { useListActions } from "./actions";
-import { DETAIL } from "./copy";
+import { DETAIL, LISTS } from "./copy";
 import {
   holdsInput,
   RenameListDialog,
@@ -51,7 +59,14 @@ import {
  * Every state has the page's one heading (R4): the list's name once it is read, else the destination's ("Lists", nothing of the list),
  * always the same element (`Frame`), so the focus a navigation gave it stays when the read completes.
  */
-export function ListDetail({ listId }: { listId: string }) {
+export function ListDetail({
+  listId,
+  openTask,
+}: {
+  listId: string;
+  /** Where a task row leads when the task opens beside the list (Settings · Layout). */
+  openTask?: (taskId: string) => RowOpen;
+}) {
   const env = useTasksEnv();
   const actions = useListActions();
   const view = useListDetail(listId);
@@ -121,6 +136,12 @@ export function ListDetail({ listId }: { listId: string }) {
       opener.current = event.currentTarget;
       setDialog(which);
     };
+  // A dialog opened from "More" returns focus to the More control (the menu itself has gone by then).
+  const openFromMenu = (which: "rename" | "sharing") => () => {
+    opener.current =
+      article.current?.querySelector<HTMLElement>("[data-list-more]") ?? null;
+    setDialog(which);
+  };
 
   if (value === null) {
     if (view.noDatabase) return absent();
@@ -177,6 +198,36 @@ export function ListDetail({ listId }: { listId: string }) {
         )
       : void actions.denied();
   const conflicted = list.attention > 0;
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const menu: MenuItem[] = [
+    editable
+      ? { label: DETAIL.rename, onSelect: openFromMenu("rename") }
+      : { label: DETAIL.rename, reason: noEdit, onSelect: () => undefined },
+    {
+      label: pinned ? DETAIL.unpin : DETAIL.pin,
+      onSelect: () =>
+        pinned ? unpinList(listId) : pinList({ id: listId, label: row.label }),
+    },
+    list.projected
+      ? {
+          label: DETAIL.sharing,
+          reason: DETAIL.sharingWait,
+          onSelect: () => undefined,
+        }
+      : { label: DETAIL.sharing, onSelect: openFromMenu("sharing") },
+    editable
+      ? {
+          label: row.archived ? DETAIL.restore : DETAIL.archive,
+          onSelect: archive,
+          tone: row.archived ? "default" : "destructive",
+        }
+      : {
+          label: row.archived ? DETAIL.restore : DETAIL.archive,
+          reason: noEdit,
+          onSelect: () => undefined,
+        },
+  ];
+  const count = list.members === null ? null : list.members.length;
 
   return (
     <Frame
@@ -194,49 +245,23 @@ export function ListDetail({ listId }: { listId: string }) {
           </span>
         ) : null
       }
-      header={
+      summary={
         <>
+          <ColourDot id={listId} size={8} />
+          {count === null ? LISTS.countUnknown : LISTS.count(count)}
           {row.archived ? (
-            <p className="text-sm text-muted-foreground" data-list-archived="">
-              {DETAIL.archivedNote}
-            </p>
+            <span data-list-archived="">{` · ${DETAIL.archivedNote}`}</span>
           ) : null}
-          <PageActions>
-            {editable ? (
-              <Button onClick={openFrom("rename")}>{DETAIL.rename}</Button>
-            ) : (
-              <Button disabled reason={noEdit}>
-                {DETAIL.rename}
-              </Button>
-            )}
-            {list.projected ? (
-              <Button disabled reason={DETAIL.sharingWait}>
-                {DETAIL.sharing}
-              </Button>
-            ) : (
-              <Button onClick={openFrom("sharing")}>{DETAIL.sharing}</Button>
-            )}
-            <Button
-              aria-pressed={pinned}
-              data-list-pin=""
-              onClick={() =>
-                pinned
-                  ? unpinList(listId)
-                  : pinList({ id: listId, label: row.label })
-              }
-            >
-              {pinned ? DETAIL.unpin : DETAIL.pin}
-            </Button>
-            {editable ? (
-              <Button onClick={archive}>
-                {row.archived ? DETAIL.restore : DETAIL.archive}
-              </Button>
-            ) : (
-              <Button disabled reason={noEdit}>
-                {row.archived ? DETAIL.restore : DETAIL.archive}
-              </Button>
-            )}
-          </PageActions>
+        </>
+      }
+      controls={
+        <>
+          <SearchPill
+            day={todayIn(zone, env.now())}
+            zone={zone}
+            className="min-w-0 flex-1 tablet:w-[260px] tablet:flex-none"
+          />
+          <ActionMenu items={menu} data-list-more="" />
         </>
       }
     >
@@ -280,17 +305,41 @@ export function ListDetail({ listId }: { listId: string }) {
           {DETAIL.unreadable}
         </p>
       ) : (
-        // The list's tasks as rows on hairlines in one box (the Final design, 8 November 2026), with the way to add one as its last row.
-        <section
-          className="divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-card"
-          data-list-box=""
-        >
+        // A list is Today's row design (the Final design, 8 November 2026): the way to add a task first, then one row per task, the
+        // withheld ones last; "Remove" is a quiet control at the end of a row, shown on hover and focus from the tablet up.
+        <section className="flex min-w-0 flex-col" data-list-box="">
+          <div data-list-add="" className="-mx-3.5">
+            {!editable ? (
+              <div className="px-3.5 py-1.5">
+                <Button disabled reason={noEdit}>
+                  {DETAIL.add}
+                </Button>
+              </div>
+            ) : full ? (
+              <div className="px-3.5 py-1.5">
+                <Button disabled reason={DETAIL.atLimit}>
+                  {DETAIL.add}
+                </Button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={openFrom("picker")}
+                className="atlas-transition flex min-h-12 w-full items-center gap-3.5 rounded-[10px] px-3.5 text-left text-[15px] text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              >
+                <Plus
+                  aria-hidden="true"
+                  className="size-[18px] flex-none"
+                  strokeWidth={1.9}
+                />
+                {DETAIL.add}
+              </button>
+            )}
+          </div>
           {rows.length === 0 ? (
-            <p className="px-4 py-3 text-sm text-muted-foreground">
-              {DETAIL.empty}
-            </p>
+            <p className="py-3 text-sm text-muted-foreground">{DETAIL.empty}</p>
           ) : (
-            <List className="flex flex-col divide-y divide-border">
+            <List className="flex flex-col">
               {rows.map((item, index) => {
                 const next = rows[index + 1]?.id ?? "add";
                 const title = item.kind === "task" ? item.title : null;
@@ -299,54 +348,65 @@ export function ListDetail({ listId }: { listId: string }) {
                     key={item.id}
                     data-list-row={item.kind}
                     data-list-task={item.id}
-                    className="flex min-h-12 list-none items-center gap-3 px-2 py-1"
+                    className="atlas-transition group -mx-3.5 flex min-h-12 list-none items-center gap-3.5 rounded-[10px] px-3.5 hover:bg-accent/60"
                   >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "size-[18px] flex-none rounded-full border-2",
+                        item.kind === "task" && item.archived
+                          ? "border-dashed border-input"
+                          : "border-input",
+                      )}
+                    />
                     {item.kind === "task" ? (
                       <Link
-                        to="/tasks/$taskId"
-                        params={{ taskId: item.id }}
+                        {...(openTask
+                          ? (() => {
+                              const target = openTask(item.id);
+                              return {
+                                to: target.to,
+                                params: target.params,
+                                search: target.search,
+                              };
+                            })()
+                          : {
+                              to: "/tasks/$taskId",
+                              params: { taskId: item.id },
+                            })}
                         search={{}}
-                        className="atlas-transition flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-sm text-foreground hover:bg-accent"
+                        className="atlas-transition flex min-h-11 min-w-0 flex-1 items-center gap-2 text-[15px] text-foreground hover:text-primary"
                       >
                         <span className="truncate">{item.title}</span>
-                        {item.archived ? (
-                          <span className="flex-none text-xs text-muted-foreground">
-                            {DETAIL.archivedTask}
-                          </span>
-                        ) : null}
-                        {item.projected ? (
-                          <span className="flex-none text-xs text-muted-foreground">
-                            {DETAIL.notSent}
-                          </span>
-                        ) : null}
                       </Link>
                     ) : (
                       <span
-                        className="flex min-w-0 flex-1 items-center gap-2 px-2 text-sm text-muted-foreground"
+                        className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-[15px] text-muted-foreground"
                         data-list-withheld=""
                       >
-                        <span
-                          aria-hidden="true"
-                          className="size-[7px] flex-none rounded-full bg-muted-foreground"
-                        />
                         {DETAIL.withheld}
                         <span className="text-xs text-muted-foreground">
                           {DETAIL.withheldTag}
                         </span>
                       </span>
                     )}
-                    {item.mark ? (
-                      <span
-                        data-pending-mark={item.mark}
-                        className="flex-none text-xs text-muted-foreground"
-                      >
-                        {copy.PENDING[item.mark]}
-                      </span>
-                    ) : null}
+                    <span className="flex flex-none items-center gap-2 text-xs text-muted-foreground">
+                      {item.kind === "task" && item.archived ? (
+                        <span>{DETAIL.archivedTask}</span>
+                      ) : null}
+                      {item.kind === "task" && item.projected ? (
+                        <span>{DETAIL.notSent}</span>
+                      ) : null}
+                      {item.mark ? (
+                        <span data-pending-mark={item.mark}>
+                          {copy.PENDING[item.mark]}
+                        </span>
+                      ) : null}
+                    </span>
                     {editable ? (
                       <Button
                         variant="ghost"
-                        className="text-muted-foreground"
+                        className="text-muted-foreground tablet:opacity-0 tablet:group-focus-within:opacity-100 tablet:group-hover:opacity-100 tablet:focus-visible:opacity-100"
                         data-list-remove={item.id}
                         aria-label={
                           title === null
@@ -363,19 +423,6 @@ export function ListDetail({ listId }: { listId: string }) {
               })}
             </List>
           )}
-          <div data-list-add="" className="px-3 py-2.5">
-            {!editable ? (
-              <Button disabled reason={noEdit}>
-                {DETAIL.add}
-              </Button>
-            ) : full ? (
-              <Button disabled reason={DETAIL.atLimit}>
-                {DETAIL.add}
-              </Button>
-            ) : (
-              <Button onClick={openFrom("picker")}>{DETAIL.add}</Button>
-            )}
-          </div>
         </section>
       )}
       <p
@@ -413,9 +460,10 @@ export function ListDetail({ listId }: { listId: string }) {
 }
 
 /**
- * The detail's frame in every state: "‹ Lists", the pending mark, the page heading (the same element throughout, R4), the header's
- * controls, then the state's content. `state` is the list's id once it is read, else `loading`, `error` or `absent`. `data-list-detail`
- * names only a read list or a settled state: while loading it is absent (`data-list-loading` instead), so nothing reads "loading" as an id.
+ * The detail's frame in every state (the Final design): the breadcrumb, the small word "List", the page heading (the same element
+ * throughout, R4) with its summary line, the search pill and "More" at the right, then the state's content. `state` is the list's id
+ * once it is read, else `loading`, `error` or `absent`. `data-list-detail` names only a read list or a settled state: while loading it is
+ * absent (`data-list-loading` instead), so nothing reads "loading" as an id.
  */
 function Frame({
   state,
@@ -423,7 +471,8 @@ function Frame({
   articleRef,
   heading = LISTS_TITLE,
   mark = null,
-  header = null,
+  summary = null,
+  controls = null,
   children,
 }: {
   state: string;
@@ -431,36 +480,41 @@ function Frame({
   articleRef?: RefObject<HTMLElement | null>;
   heading?: string;
   mark?: ReactNode;
-  header?: ReactNode;
+  summary?: ReactNode;
+  controls?: ReactNode;
   children: ReactNode;
 }) {
+  const read = state !== "loading" && state !== "error" && state !== "absent";
   return (
     <article
       ref={articleRef}
-      className="flex max-w-[760px] flex-col gap-6"
+      className="flex min-w-0 flex-col gap-5"
       data-list-detail={state === "loading" ? undefined : state}
       data-list-loading={state === "loading" ? "" : undefined}
       data-list-projected={projected ? "" : undefined}
     >
-      <div className="flex flex-col gap-2">
-        <BackLink />
-        {mark}
-        <PageHeading>{heading}</PageHeading>
-        {header}
-      </div>
+      <Breadcrumb
+        items={[{ label: LISTS_TITLE, to: "/tasks/lists" }]}
+        current={read ? heading : LISTS_TITLE}
+      />
+      <PageHeader
+        eyebrow={read ? <Eyebrow>{DETAIL.eyebrow}</Eyebrow> : undefined}
+        title={<PageHeading>{heading}</PageHeading>}
+        summary={
+          summary || mark ? (
+            <span
+              className="inline-flex flex-wrap items-center gap-2"
+              data-list-summary=""
+            >
+              {summary}
+              {mark}
+            </span>
+          ) : undefined
+        }
+        actions={controls ?? undefined}
+      />
       {children}
     </article>
-  );
-}
-
-function BackLink() {
-  return (
-    <Link
-      to="/tasks/lists"
-      className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground max-tablet:hidden"
-    >
-      {DETAIL.back}
-    </Link>
   );
 }
 

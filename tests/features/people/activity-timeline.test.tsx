@@ -38,6 +38,7 @@ import {
   peopleWorld,
   person,
 } from "../../support/people/world";
+import { actions } from "./more-menu";
 
 /**
  * WEB-19, "Recent changes" on the person detail (`activity/`), in the real `PersonDetail` composition over the people world (jsdom, axe;
@@ -1050,7 +1051,9 @@ describe("D-19-4: freshness (joins the summaries' invalidation)", () => {
       "[data-identity-header]",
     ) as HTMLElement;
     await within(header).findByText("This is you — you control this profile");
-    fireEvent.click(within(header).getByRole("button", { name: "Rename" }));
+    fireEvent.click(
+      actions(header as HTMLElement).getByRole("button", { name: "Rename" }),
+    );
     fireEvent.change(within(header).getByRole("textbox", { name: "Name" }), {
       target: { value: "Ada L." },
     });

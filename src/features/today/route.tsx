@@ -1,10 +1,10 @@
-import { type AnyRoute, createRoute } from "@tanstack/react-router";
+import { type AnyRoute, createRoute, redirect } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import { PageHeading } from "../../components/ui/page-heading";
 import { useOptionalDataEnv } from "../../data";
 import { CacheGate } from "../sync/CacheGate";
 import { isContractDate, isKnownZone } from "../tasks/model/primitives";
-import { TODAY_TITLE, UPCOMING_TITLE } from "../tasks/titles";
+import { TODAY_TITLE, UPCOMING_HASH } from "../tasks/titles";
 
 const TodayScreen = lazy(() =>
   import("../tasks/screens").then((m) => ({ default: m.TodayScreen })),
@@ -14,7 +14,13 @@ const TodayScreen = lazy(() =>
 export interface TodaySearch {
   day?: string;
   tz?: string;
+  /** A task opened beside or over the day (Settings · Layout, "How tasks open"): the task and the day of it shown. */
+  task?: string;
+  occurrence?: string;
+  /** A new task being made in the same container. */
+  new?: boolean;
 }
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const todayPath = (day?: string, zone?: string): string => {
   const params = new URLSearchParams();
   if (day) params.set("day", day);
@@ -26,32 +32,35 @@ export const todayPath = (day?: string, zone?: string): string => {
 const validateSearch = (search: Record<string, unknown>): TodaySearch => ({
   ...(isContractDate(search.day) ? { day: search.day } : {}),
   ...(isKnownZone(search.tz) ? { tz: search.tz } : {}),
+  ...(typeof search.task === "string" && UUID.test(search.task)
+    ? { task: search.task }
+    : {}),
+  ...(typeof search.occurrence === "string" && UUID.test(search.occurrence)
+    ? { occurrence: search.occurrence }
+    : {}),
+  ...(search.new === true || search.new === "true" ? { new: true } : {}),
 });
 
 /**
- * Today and Upcoming are one page (the day, then the days after it under an "Upcoming" fold), reached by two addresses: `/upcoming`
- * opens the fold and starts at it, so it can be linked to and the Upcoming item in the navigation lights up there.
+ * Today and Upcoming are ONE page (the day, then the days after it on the same rail), with Upcoming an anchor of it: `/today#upcoming`
+ * starts at the fold, and the address's hash follows the reader's scroll, so the Upcoming item in the navigation lights up when the
+ * days ahead are under the sticky bar (`TodayPage`). `/upcoming`, the old address, redirects there.
  */
-function dayRoute(
-  parent: AnyRoute,
-  path: "today" | "upcoming",
-  title: string,
-  section: "today" | "upcoming",
-) {
+export const todayRoute = (parent: AnyRoute) => {
   const route = createRoute({
     getParentRoute: () => parent,
-    path,
+    path: "today",
     validateSearch,
     component: function DayRoute() {
       // A shell rendered without the data layer (the shell's own tests) shows the destination's heading and no account data.
       if (useOptionalDataEnv() === null)
-        return <PageHeading>{title}</PageHeading>;
+        return <PageHeading>{TODAY_TITLE}</PageHeading>;
       // The heading is the route's, outside the cache gate and the lazy screen (revision 2): the page has its one level-one heading in every
       // gate state and at once, so a route change can move focus to it (RouteFocus), as the placeholder this replaced did. It is the small
       // eyebrow above the day's date (the Final design): the date is the page's large title, the destination its heading.
       return (
         <div className="flex flex-col gap-1">
-          <PageHeading eyebrow>{title}</PageHeading>
+          <PageHeading eyebrow>{TODAY_TITLE}</PageHeading>
           <CacheGate>
             <FromSearch />
           </CacheGate>
@@ -63,14 +72,24 @@ function dayRoute(
     const search = route.useSearch();
     return (
       <Suspense fallback={null}>
-        <TodayScreen search={search} section={section} />
+        <TodayScreen search={search} />
       </Suspense>
     );
   }
   return route;
-}
+};
 
-export const todayRoute = (parent: AnyRoute) =>
-  dayRoute(parent, "today", TODAY_TITLE, "today");
 export const upcomingRoute = (parent: AnyRoute) =>
-  dayRoute(parent, "upcoming", UPCOMING_TITLE, "upcoming");
+  createRoute({
+    getParentRoute: () => parent,
+    path: "upcoming",
+    validateSearch,
+    beforeLoad: ({ search }) => {
+      throw redirect({
+        to: "/today",
+        search: search as TodaySearch,
+        hash: UPCOMING_HASH,
+        replace: true,
+      });
+    },
+  });

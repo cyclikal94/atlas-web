@@ -1071,8 +1071,9 @@ test.describe("I-T11: archive and restore (A13)", () => {
       )
       .toBe(1);
     await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+    await page.getByRole("button", { name: "More", exact: true }).click();
     await page
-      .getByRole("button", { name: "Archive" })
+      .getByRole("menuitem", { name: "Archive" })
       .click({ timeout: 30_000 });
     await page.evaluate(() => window.__atlasData?.retryOutbox());
     await expect
@@ -1115,8 +1116,9 @@ test.describe("I-T11: archive and restore (A13)", () => {
       page.locator(`[data-today-row="${made.occurrenceId}"]`),
     ).toHaveCount(0);
     await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+    await page.getByRole("button", { name: "More", exact: true }).click();
     await page
-      .getByRole("button", { name: "Restore" })
+      .getByRole("menuitem", { name: "Restore" })
       .click({ timeout: 30_000 });
     await page.evaluate(() => window.__atlasData?.retryOutbox());
     await expect
@@ -2099,8 +2101,9 @@ test.describe("I-T19: a task edited in the UI, and its own sharing section (A10,
     });
     await untilCached(page, id.account_id, made.taskId);
     await go(page, `/tasks/${made.taskId}`);
+    await page.getByRole("button", { name: "More", exact: true }).click();
     await page
-      .getByRole("link", { name: "Edit task" })
+      .getByRole("menuitem", { name: "Edit task" })
       .click({ timeout: 60_000 });
     const renamed = `I-T19 renamed ${Date.now() % 100_000}`;
     await page.getByLabel("Name", { exact: true }).fill(renamed);

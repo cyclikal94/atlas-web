@@ -783,14 +783,27 @@ PostgreSQL, HTTPS, device or manual screen-reader evidence (WEB-09d), no copy or
 Every string in `activity/copy.ts` is provisional; the People 02 mock's sharing row ("narrowed … to only you") is deliberately absent. The
 rename sentence says "changed the name of {current label}" (or "renamed this person") and never presents the label shown as the earlier one.
 
-## The Final design on the person page (8 November 2026)
+## The Final design on the People screens (8 November 2026)
 
-Under the name and the linkage line, the header's controls (Manage sharing, Ask to link, Possible duplicates, Rename, Archive) sit in
-one row from the tablet up and fold behind one "Actions" disclosure on the phone (`components/ui/page-actions.tsx`). A **facts strip**
-(`detail/PersonFacts.tsx`) follows: who the profile is linked to, who can see the person, how many fields and who added them, from the
-viewer-safe summary (`GET /people/{id}/summary`, the read "Shared with" makes too), so it appears once that read has answered and says
-nothing before; an unsent person has none. The grouped box of fields, "Shared with", "Recent changes" and the defaults panel is
-unchanged. The detail is capped at 760 px of reading width; on the phone the shell's header carries the way back ("People") and the
-tab bar is away (`src/app/shell/mobile-back.ts`). A field's name wraps anywhere, and an unsent field shows no audience sentence (its
-pending mark beside the name says so; Edit says why it waits).
+**The list** (`list/PeopleList.tsx`, `screens.tsx`): the title and one summary line, the "Requests" entry at the right; under them the
+search pill and "New person" on one line, then the view chips; the rows at reading width (880 px). A row (`components/ui/row.tsx`
+`ListRow`) is the person's coloured initial, their name, and one grey line of facts from the viewer-safe summary (who added them, their
+account, who can see them), a pending mark only when something of theirs is unsent, the field count and a chevron on the phone. In "All",
+once the summaries have answered, the rows are grouped under "Added by you" and "Shared with you" (people whose attribution is unknown
+follow without a heading); a single group has no heading. The "Sharing checked at …" note is said once, at the end of the list.
+
+**The person** (`detail/PersonDetail.tsx`, `IdentityHeader.tsx`, `PersonFacts.tsx`): as a page of its own it carries the breadcrumb
+"People / {name}" (hidden on the phone, where the shell's header carries the way back); beside the list (the desktop) it has none. The
+header is the 56 px avatar, the name, the linkage line (and the archived, pending and updating marks when there are any), "Ask to link…"
+when it applies, and one "More" control (`MENU_COPY.more`): a disclosure (`aria-expanded`, `aria-controls`) that shows the person's other
+acts in place under the header (Manage sharing, Possible duplicates, Rename, Unlink account, Archive / Restore), each with its reason
+when it is withheld. They are a disclosure, not a menu that closes on choice, because a rename opens its form in place, an unlink
+confirms in a dialog that may be asked again, and an uncertain change keeps its entry to try again: those keep their places and their
+focus. The **facts strip** follows: "Seen by" (a button cell that opens the sharing editor, as every editor with consequences opens from
+the strip), "Linked", "Fields", "Added", and "Possible duplicate" with the primary dot and the first page's count when the server lists
+one (a link to the duplicates). Then the grouped box: the fields as rows of name (grey), value, who can see it (a grey control that opens
+the field's sharing editor, with the "checked at" and reach notes) and the row's acts (Edit, Archive), "Add a field" closing the list in
+the primary colour, the archived fields' disclosure and the held changes; "Shared with"; "Recent changes" (`activity/ActivitySection.tsx`,
+which takes the activity column beside the person, `frame="aside"`, only when the person is the whole page on a desktop width: beside the
+list there is no room for it); and "New fields start as". No width cap on the page: the facts and the box take the page's width.
 The "Sharing checked at …" note is said once on the person page, under the fields (not again under "Shared with").

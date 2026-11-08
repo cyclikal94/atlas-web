@@ -1,6 +1,6 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { List } from "../../components/ui/list";
-import { destinations } from "./destinations";
+import { destinationFor, destinations } from "./destinations";
 
 /**
  * Phone bottom navigation: Today, Upcoming, Calendar, People and Lists (min-height 48px, design README); Sharing, Settings and the
@@ -13,6 +13,14 @@ export function TabBar({
   /** The bar itself, for AppShell to measure (chrome-insets.ts). */
   barRef: (element: HTMLElement | null) => void;
 }) {
+  const location = useRouterState({
+    select: (state) => ({
+      pathname: state.location.pathname,
+      hash: state.location.hash,
+    }),
+  });
+  // Today and Upcoming are one page: the address's hash says which tab is lit.
+  const lit = destinationFor(location.pathname, location.hash)?.id;
   const item =
     "atlas-transition group relative flex min-h-12 flex-1 flex-col items-center justify-center gap-0.5 rounded-md text-[11px] text-sidebar-foreground";
   const pill =
@@ -35,6 +43,11 @@ export function TabBar({
               >
                 <Link
                   to={destination.to}
+                  {...(destination.hash ? { hash: destination.hash } : {})}
+                  activeOptions={{ exact: true, includeHash: true }}
+                  {...(lit === destination.id
+                    ? { "data-status": "active", "aria-current": "page" }
+                    : {})}
                   className={`${item} data-[status=active]:font-semibold data-[status=active]:text-sidebar-accent-foreground`}
                 >
                   <span

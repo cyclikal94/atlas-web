@@ -136,6 +136,16 @@ const queued = async (page: Page, kind?: string) => {
     .filter((x) => kind === undefined || x.body?.command.kind === kind);
 };
 const detail = (page: Page) => page.locator("[data-list-detail]");
+/** The list's other acts are behind "More" (the Final design, 8 November 2026): a menu of items. */
+const moreOf = (scope: Page | Locator) =>
+  ("locator" in scope ? scope.locator("[data-list-detail]") : scope).getByRole(
+    "button",
+    { name: "More", exact: true },
+  );
+async function viaMore(scope: Page | Locator, name: string) {
+  await moreOf(scope).click();
+  await scope.getByRole("menuitem", { name }).click();
+}
 const dialog = (page: Page) => page.getByRole("dialog");
 
 test.describe("E-LS1: the pane and the detail from the cache (L5, L8, L11, L17)", () => {
@@ -282,7 +292,12 @@ test.describe("E-LS1: the pane and the detail from the cache (L5, L8, L11, L17)"
           (observations.withheld as { ratio: number }).ratio,
         ).toBeGreaterThanOrEqual(4.5);
         if (width >= 1280) {
-          // The selected list's count: ink-2 on select-tint (the wireframe's R10 correction: at least 4.5:1).
+          // The list's count on its row (the Final design: the lists take their own page, so the row is measured there; the
+          // wireframe's R10 correction: at least 4.5:1), then back to the detail for the screenshot.
+          await navigateInApp(page, LISTS_ROUTE);
+          await expect(
+            page.locator(`[data-list-link="${list.id}"] [data-list-count]`),
+          ).toBeVisible();
           const badge = await painted(
             page.locator(`[data-list-link="${list.id}"] [data-list-count]`),
           );
@@ -293,6 +308,8 @@ test.describe("E-LS1: the pane and the detail from the cache (L5, L8, L11, L17)"
           expect(
             (observations.badge as { ratio: number }).ratio,
           ).toBeGreaterThanOrEqual(4.5);
+          await navigateInApp(page, detailRoute(list.id));
+          await expect(page.locator("[data-list-row]")).toHaveCount(2);
         }
         recordPaintedContrast(info, scheme, {
           engine: info.project.name,
@@ -352,7 +369,9 @@ test.describe("E-LS2: create offline, then sent (L2, L6, L14)", () => {
     const created = listUpsert(0, "Weekend groceries", [], { id, version: 1 });
     await syncPage(page, net, [created.upsert]);
     await expect(detail(page)).not.toHaveAttribute("data-list-projected", "");
-    await expect(page.getByRole("button", { name: "Sharing" })).toBeEnabled();
+    await moreOf(page).click();
+    await expect(page.getByRole("menuitem", { name: "Sharing" })).toBeEnabled();
+    await page.keyboard.press("Escape");
     recordEvidence(info, "e-ls2", { sent: net.commands });
   });
 
@@ -497,7 +516,7 @@ test.describe("E-LS4: remove, rename, read-only (L2, L7, L8)", () => {
     await expect(page.locator("[data-list-row]")).toHaveCount(1);
     await page.getByRole("button", { name: "Remove this task" }).click();
     await expect(page.locator("[data-list-row]")).toHaveCount(0);
-    await page.getByRole("button", { name: "Rename" }).click();
+    await viaMore(page, "Rename");
     await dialog(page).getByLabel("Name").fill("House chores");
     await dialog(page).getByRole("button", { name: "Save" }).click();
     await expect(dialog(page)).toHaveCount(0);
@@ -539,7 +558,7 @@ test.describe("E-LS4: remove, rename, read-only (L2, L7, L8)", () => {
     await dialog(page).getByLabel("Name").fill("Draft name");
     await dialog(page).getByRole("button", { name: "Create list" }).click();
     await expect(detail(page)).toBeVisible();
-    await page.getByRole("button", { name: "Rename" }).click();
+    await viaMore(page, "Rename");
     await dialog(page).getByLabel("Name").fill("Final name");
     await dialog(page).getByRole("button", { name: "Save" }).click();
     await expect(dialog(page)).toHaveCount(0);
@@ -554,11 +573,17 @@ test.describe("E-LS4: remove, rename, read-only (L2, L7, L8)", () => {
     const a = buildTask({ n: 7, title: "Their task" });
     const list = listUpsert(7, "Theirs", [a.taskId], { can_edit: false });
     const { page } = await setup(context, detailRoute(list.id), [a], [list]);
-    for (const name of ["Rename", "Add task to list", "Archive"])
-      await expect(page.getByRole("button", { name })).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Add task to list" }),
+    ).toBeDisabled();
+    // Rename and Archive are behind "More" (the Final design): withheld, they are disabled items with the reason.
+    await moreOf(page).click();
+    for (const name of ["Rename", "Archive"])
+      await expect(page.getByRole("menuitem", { name })).toBeDisabled();
     await expect(
       page.getByText("You can't change this list").first(),
     ).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(
       page.getByRole("button", { name: "Remove Their task" }),
     ).toHaveCount(0);
@@ -656,15 +681,17 @@ test.describe("E-LS6: archive and restore offline (L12)", () => {
     const list = listUpsert(10, "Seasonal", []);
     const { page } = await setup(context, detailRoute(list.id), [], [list]);
     await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "Archive" }).click();
+    await viaMore(page, "Archive");
     await expect(page.getByText("This list is archived.")).toBeVisible();
     await navigateInApp(page, LISTS_ROUTE);
     await expect(page.locator(`[data-list-link="${list.id}"]`)).toHaveCount(0);
     await page.getByRole("checkbox", { name: "Archived" }).check();
     await expect(page.locator(`[data-list-link="${list.id}"]`)).toBeVisible();
     await page.locator(`[data-list-link="${list.id}"]`).click();
-    await page.getByRole("button", { name: "Restore" }).click();
-    await expect(page.getByRole("button", { name: "Archive" })).toBeVisible();
+    await viaMore(page, "Restore");
+    await moreOf(page).click();
+    await expect(page.getByRole("menuitem", { name: "Archive" })).toBeVisible();
+    await page.keyboard.press("Escape");
     const all = await queued(page, "archive");
     expect(all.map((x) => x.body.command)).toEqual([
       { kind: "archive", id: list.id, expected_version: 2, archived: true },
@@ -686,7 +713,7 @@ test.describe("E-LS7: input kept through the sync control (L16)", () => {
     const a = buildTask({ n: 12, title: "Pick me" });
     const list = listUpsert(11, "Kept", []);
     const { page } = await setup(context, detailRoute(list.id), [a], [list]);
-    await page.getByRole("button", { name: "Rename" }).click();
+    await viaMore(page, "Rename");
     await dialog(page).getByLabel("Name").fill("  half typed ");
     await toSyncFromDialog(page);
     await page.goBack();
@@ -703,7 +730,7 @@ test.describe("E-LS7: input kept through the sync control (L16)", () => {
       dialog(page).locator(`[data-picker-task="${a.taskId}"] input`),
     ).toBeChecked();
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Rename" }).click();
+    await viaMore(page, "Rename");
     await expect(dialog(page).getByLabel("Name")).toHaveValue("Kept");
     await page.keyboard.press("Escape");
     await navigateInApp(page, LISTS_ROUTE);
@@ -1028,7 +1055,7 @@ test.describe("E-LS8: another tab (L7, L15)", () => {
       [],
       [list],
     );
-    await page.getByRole("button", { name: "Rename" }).click();
+    await viaMore(page, "Rename");
     await dialog(page).getByLabel("Name").fill("Renamed here");
     // The server's next page says this person may no longer edit the list (an access change made elsewhere).
     const denied = listUpsert(12, "Shared", [], {
@@ -1056,14 +1083,14 @@ test.describe("E-LS8: another tab (L7, L15)", () => {
     await dialog(page).getByRole("button", { name: "Create list" }).click();
     await expect(detail(page)).toBeVisible();
     const id = (await detail(page).getAttribute("data-list-detail")) as string;
-    await page.getByRole("button", { name: "Rename" }).click();
+    await viaMore(page, "Rename");
     await dialog(page).getByLabel("Name").fill("Mine");
     const other = await context.newPage();
     await other.goto(`/__session?route=${encodeURIComponent(detailRoute(id))}`);
     await other.waitForFunction(() => window.__atlasData !== undefined);
     await untilTreeSettled(other);
     await goOfflineAtBoundary(other);
-    await other.getByRole("button", { name: "Rename" }).click();
+    await viaMore(other, "Rename");
     await dialog(other).getByLabel("Name").fill("Theirs");
     await dialog(other).getByRole("button", { name: "Save" }).click();
     await expect(dialog(other)).toHaveCount(0);
@@ -1297,10 +1324,13 @@ test.describe("E-LS8 (a), (b): real-engine ordering (L7, L15, R5)", () => {
       expect(await outcome(), "the writing transaction's decision").toBe(
         denied ? "refused" : "queued",
       );
-      if (denied)
+      if (denied) {
+        await moreOf(page).click();
         await expect(
-          detail(page).getByRole("button", { name: "Rename" }),
+          page.getByRole("menuitem", { name: "Rename" }),
         ).toBeDisabled();
+        await page.keyboard.press("Escape");
+      }
       const log = (await logOf(page)).slice(before);
       recordEvidence(info, `e-ls8b-${denied ? "denied" : "control"}`, {
         log,
@@ -1393,16 +1423,22 @@ test.describe("E-LS9: keyboard only (L17)", () => {
     await expect(
       page.getByRole("button", { name: "Add task to list" }),
     ).toBeFocused();
-    await page.getByRole("button", { name: "Rename" }).focus();
+    // The list's other acts are a menu behind "More": Enter opens it on its first item (Rename), Enter chooses; the dialog returns
+    // focus to "More".
+    await moreOf(page).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menuitem", { name: "Rename" })).toBeFocused();
     await page.keyboard.press("Enter");
     await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.type("Renamed by keys");
     await page.keyboard.press("Enter");
     await expect(dialog(page)).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Rename" })).toBeFocused();
-    await page.getByRole("button", { name: "Archive" }).focus();
+    await expect(moreOf(page)).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
+    const archive = page.getByRole("menuitem", { name: "Archive" });
+    await archive.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-list-archived]")).toBeVisible();
     const kinds = (await queued(page)).map((x) => x.body.command.kind);
     expect(kinds).toEqual(["create_list", "list_item", "list_item", "archive"]);
   });

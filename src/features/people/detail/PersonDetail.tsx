@@ -1,14 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import {
-  type CSSProperties,
-  type ReactNode,
-  useId,
-  useRef,
-  useState,
-} from "react";
+import { Plus } from "lucide-react";
+import { type ReactNode, useId, useRef, useState } from "react";
+import { useLayoutMode } from "../../../app/shell/layout-mode";
+import { Breadcrumb } from "../../../components/ui/breadcrumb";
 import { Button } from "../../../components/ui/button";
 import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
 import { List } from "../../../components/ui/list";
+import { PageGrid } from "../../../components/ui/page-grid";
 import {
   useCachedResource,
   useConflictInbox,
@@ -141,6 +139,12 @@ function PersonRead({
   // A read answering during a press never moves the pressed action (review 6, finding 3): `[data-steady]` boxes keep their height.
   const root = useRef<HTMLDivElement>(null);
   useSteadyWhilePressed(root);
+  // The sharing editor on the person: opened from the header's acts and from the facts strip's "Seen by" cell alike.
+  const [sharing, setSharing] = useState(false);
+  const mode = useLayoutMode();
+  // The activity column beside the person (the Final design) needs the page's whole width: on the desktop the list sits beside the
+  // person, so the timeline stays in the grouped box there and takes the column only when the person is the whole page.
+  const aside = asPage && mode === "desktop";
   return (
     <OutstandingChain witness={personId}>
       {(outstanding) => {
@@ -218,15 +222,24 @@ function PersonRead({
         return (
           <div
             ref={root}
-            className="flex min-w-0 max-w-[760px] flex-col gap-6"
+            className="flex min-w-0 flex-col gap-5"
             data-person-detail={personId}
           >
+            {/* The way back from a page of its own (the Final design): the breadcrumb; on the phone the shell's header carries it. */}
+            {asPage ? (
+              <Breadcrumb
+                items={[{ label: copy.BACK_TO_PEOPLE, to: "/people" }]}
+                current={shown.row.label}
+              />
+            ) : null}
             {/* Everything above the fields whose height depends on a read: one steady box. */}
-            <div data-steady="" className="flex flex-col gap-6">
+            <div data-steady="" className="flex flex-col gap-5">
               <IdentityHeader
                 shown={shown}
                 asPage={asPage}
                 drafts={outstanding.rows}
+                sharing={sharing}
+                onSharingChange={setSharing}
                 {...(slots.headerActions
                   ? { headerActions: slots.headerActions }
                   : {})}
@@ -239,19 +252,35 @@ function PersonRead({
               ) : null}
               <Conflicts ids={[personId]} />
             </div>
-            <PersonFacts personId={personId} projected={shown.projected} />
-            <GroupedBox data-person-sections="">
-              <FieldsSection
-                person={shown}
-                changes={changes}
-                changesKnown={changesKnown}
+            <PageGrid
+              aside={
+                aside && !shown.projected ? (
+                  <ActivitySection personId={personId} frame="aside" />
+                ) : undefined
+              }
+            >
+              <PersonFacts
+                personId={personId}
+                projected={shown.projected}
+                {...(shown.projected
+                  ? {}
+                  : { onSharing: () => setSharing(true) })}
               />
-              {shown.projected ? null : (
-                <SharedWithSection personId={personId} />
-              )}
-              {shown.projected ? null : <ActivitySection personId={personId} />}
-              <DefaultsPanel />
-            </GroupedBox>
+              <GroupedBox data-person-sections="">
+                <FieldsSection
+                  person={shown}
+                  changes={changes}
+                  changesKnown={changesKnown}
+                />
+                {shown.projected ? null : (
+                  <SharedWithSection personId={personId} />
+                )}
+                {shown.projected || aside ? null : (
+                  <ActivitySection personId={personId} />
+                )}
+                <DefaultsPanel />
+              </GroupedBox>
+            </PageGrid>
             {children}
           </div>
         );
@@ -370,31 +399,31 @@ function FieldsSection({
     <GroupedSection
       aria-labelledby={heading}
       data-fields-section=""
-      heading={<h3 id={heading}>{copy.FIELDS}</h3>}
+      heading={<h2 id={heading}>{copy.FIELDS}</h2>}
     >
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="ml-auto">
-          {reviewing ? (
-            <Button disabled reason={copy.CREATE_BLOCKED_REVIEW}>
-              {copy.ADD_FIELD}
-            </Button>
-          ) : (
-            <Link
-              to="/people/$personId/fields/new"
-              params={{ personId }}
-              data-people-action="add-field"
-              className="atlas-transition inline-flex min-h-11 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              {copy.ADD_FIELD}
-            </Link>
-          )}
-        </span>
-      </div>
       <FieldSteps
         person={person}
         changes={changes}
         changesKnown={changesKnown}
       />
+      {/* The way to a new field closes the list (the Final design): a quiet link in the primary colour. */}
+      <div className="flex flex-wrap items-center gap-3">
+        {reviewing ? (
+          <Button variant="ghost" disabled reason={copy.CREATE_BLOCKED_REVIEW}>
+            {copy.ADD_FIELD}
+          </Button>
+        ) : (
+          <Link
+            to="/people/$personId/fields/new"
+            params={{ personId }}
+            data-people-action="add-field"
+            className="atlas-transition inline-flex min-h-11 items-center gap-1.5 rounded-md text-sm font-medium text-primary hover:underline"
+          >
+            <Plus aria-hidden="true" className="size-4" strokeWidth={2.2} />
+            {copy.ADD_FIELD}
+          </Link>
+        )}
+      </div>
       <HeldChanges personId={personId} />
     </GroupedSection>
   );
@@ -617,11 +646,6 @@ function AudiencedRows({
   );
 }
 
-/** "Field | Value | Who can see it | actions" from tablet width: the template is a variable, so its rule in the shared stylesheet is short. */
-const FIELD_COLUMNS = {
-  "--field-columns": "minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 1.2fr) auto",
-} as CSSProperties;
-
 function FieldRows({
   rows,
   start,
@@ -683,17 +707,7 @@ function FieldRows({
   };
   return (
     <div data-steady="" className="flex flex-col gap-1">
-      <div
-        aria-hidden="true"
-        className="hidden gap-3 px-3 text-xs text-muted-foreground tablet:grid tablet:grid-cols-(--field-columns)"
-        style={FIELD_COLUMNS}
-      >
-        <span>{copy.COLUMN_FIELD}</span>
-        <span>{copy.COLUMN_VALUE}</span>
-        <span>{copy.COLUMN_AUDIENCE}</span>
-        <span />
-      </div>
-      <List className="flex flex-col divide-y divide-border">
+      <List className="-mx-4 flex flex-col divide-y divide-border tablet:-mx-5 tablet:-ml-[42px]">
         {rows.map((row) => (
           <FieldRow
             key={row.row.id}
@@ -767,27 +781,28 @@ function FieldRow({
   const editable =
     !field.projected ||
     (field.createDraft !== null && field.pending === "not_sent");
+  // The design's row (8 November 2026): the field's name in grey, its value, then who can see it as a grey note (a control: it opens
+  // the field's sharing editor) and the row's acts at the end; one column on the phone.
   return (
     <li
-      className="list-none px-3 py-2.5"
+      className="list-none px-4 py-2 tablet:px-5"
       data-field-row={row.id}
       data-steady=""
     >
-      <div
-        className="grid grid-cols-1 gap-2 tablet:grid-cols-(--field-columns) tablet:items-center tablet:gap-3"
-        style={FIELD_COLUMNS}
-      >
+      <div className="grid grid-cols-1 gap-2 tablet:grid-cols-[160px_minmax(0,1fr)_minmax(0,1.1fr)_auto] tablet:items-center tablet:gap-4">
         <span className="flex min-w-0 flex-col gap-1">
           <span
             id={nameId}
-            className="text-sm font-medium text-foreground [overflow-wrap:anywhere]"
+            className="text-[13px] text-muted-foreground [overflow-wrap:anywhere]"
           >
             {row.label}
           </span>
           <PendingBadge mark={field.pending} />
         </span>
-        <FieldValueView raw={row.value} />
-        <span className="flex flex-col items-stretch gap-1">
+        <span className="min-w-0 text-[15px] text-foreground">
+          <FieldValueView raw={row.value} />
+        </span>
+        <span className="flex min-w-0 flex-col items-start gap-0.5">
           {/* An unsent field has no audience to set yet: its pending mark beside the name says so, and Edit says why it waits. */}
           {field.projected ? null : (
             <button
@@ -796,7 +811,7 @@ function FieldRow({
               data-field-audience={summary?.audience.disclosure ?? "unknown"}
               aria-describedby={nameId}
               onClick={() => setSharing(true)}
-              className="atlas-transition min-h-11 w-full rounded-md border border-border px-3 text-left text-xs text-foreground hover:bg-accent"
+              className="atlas-transition inline-flex min-h-11 max-w-full items-center truncate rounded-md text-left text-xs text-muted-foreground hover:text-foreground hover:underline"
             >
               {audience}
             </button>
@@ -818,13 +833,13 @@ function FieldRow({
             </span>
           ) : null}
         </span>
-        <span className="flex flex-wrap items-start gap-1.5">
+        <span className="flex flex-wrap items-start gap-1">
           {!row.can_edit ? (
-            <Button disabled reason={copy.CANNOT_EDIT_FIELD}>
+            <Button variant="ghost" disabled reason={copy.CANNOT_EDIT_FIELD}>
               {copy.EDIT}
             </Button>
           ) : !editable ? (
-            <Button disabled reason={copy.WAIT_FOR_SYNC_FIELD}>
+            <Button variant="ghost" disabled reason={copy.WAIT_FOR_SYNC_FIELD}>
               {copy.EDIT}
             </Button>
           ) : (
@@ -833,7 +848,7 @@ function FieldRow({
               params={{ personId: person.row.id, fieldId: row.id }}
               data-people-action="edit-field"
               aria-describedby={nameId}
-              className="atlas-transition inline-flex min-h-11 items-center rounded-md border border-border bg-card px-4 text-sm text-foreground hover:bg-accent"
+              className="atlas-transition inline-flex min-h-11 items-center rounded-md px-3 text-sm text-foreground hover:bg-accent hover:text-accent-foreground"
             >
               {copy.EDIT}
             </Link>
@@ -950,7 +965,7 @@ function ArchivedFields({ rows }: { rows: ShownRow[] }) {
 function ArchivedFieldRow({ field }: { field: ShownRow }) {
   const nameId = useId();
   return (
-    <li className="flex list-none flex-wrap items-center gap-3 border-t border-border px-3 py-2">
+    <li className="flex list-none flex-wrap items-center gap-3 border-t border-border py-2">
       <span id={nameId} className="text-sm text-foreground">
         {field.row.label}
       </span>
@@ -979,7 +994,7 @@ function DefaultsPanel() {
     <GroupedSection
       data-defaults-panel=""
       aria-labelledby={heading}
-      heading={<h3 id={heading}>{copy.NEW_FIELDS_START_AS}</h3>}
+      heading={<h2 id={heading}>{copy.NEW_FIELDS_START_AS}</h2>}
       summary={label}
     >
       {label === null ? (

@@ -258,10 +258,25 @@ installed PWA, manual screen-reader passes (T22 is WEB-09d's; WEB-15 collects th
 budgets beyond the figures above (WEB-09c), exhaustive mutation and stress (WEB-17), recording from a list (E-10b-1), list-filtered Today
 views, the Settings "Archived items" ledger and household management (WEB-12b).
 
-## The Final design on a list's page (8 November 2026)
+## The Final design on the Lists screens (8 November 2026)
 
-The list's tasks are rows on hairlines in one box (`data-list-box`), with "Add task to list" as its last row; "Remove" is a muted ghost
-control at the end of a row. The header's controls (Rename, Sharing, Pin to sidebar, Archive) sit in one row from the tablet up and
-fold behind one "Actions" disclosure on the phone (`components/ui/page-actions.tsx`); on the phone the shell's header carries the way
-back ("Lists") and the tab bar is away (`src/app/shell/mobile-back.ts`), so the pane's own "‹ Lists" is for the wider layouts.
-The pane's empty state offers "Create a list" (distinct from the header's "New list", so a query by name finds one control).
+**All lists** (`ListsLayout.tsx`): under the route's heading, a summary line ("9 lists · 2 pinned to the sidebar"), the search pill and
+"New list"; then the lists as rows, not tiles (`components/ui/row.tsx`): the list's colour (`ColourDot`, from its id, the same dot the
+sidebar's pin shows), its name, a grey fact (archived, not sent yet), its open count in mono and a chevron. The lists pinned on this
+device come first under "Pinned", the rest under "All lists" (or "Archived" with the filter). From 1280 px the pane (380 px) stays beside
+the detail; below that it is the page.
+
+**A list** (`ListDetail.tsx`): the breadcrumb ("Lists / Groceries", wider layouts only), the small word "List", the list's name as the
+page heading with its summary line (the colour dot, the count, "This list is archived." when it is), and at the right the search pill
+and "More" (`components/ui/action-menu.tsx`) holding Rename, Pin to sidebar / Unpin, Sharing and Archive / Restore, each a disabled
+item with its reason when it is withheld. The tasks are Today's row design (`data-list-box`): "Add task to list" first (the picker), then
+one row per task (an 18px circle, the title, a grey note for archived / not sent / withheld), the withheld rows last; "Remove"
+(`data-list-remove`) is a quiet control at the end of a row, shown on hover and focus from the tablet up and always on the phone. The
+access caption stays once at the bottom. On the phone the shell's header carries the way back ("Lists") and the tab bar is away
+(`src/app/shell/mobile-back.ts`). The pane's empty state offers "Create a list" (distinct from the header's "New list", so a query by
+name finds one control).
+
+**Your timers** (`timers/TimersPage.tsx`) follow the same rows: "Running now" and "Earlier" as row groups in bordered boxes (a lit dot,
+the title, "since 18:17" or the start and end, the elapsed time in mono, Stop and Discard as pills), with a summary line under the
+heading. The design's "This week / This month / All" control and its "Goals" column are not drawn: the sessions are read by state only,
+and the page reads no task goals.

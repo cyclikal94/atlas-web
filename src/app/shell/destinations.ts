@@ -29,6 +29,8 @@ export interface Destination {
   /** The document title where it differs from the label (the page's own heading: "Tasks" for All tasks). */
   title?: string;
   to: string;
+  /** An anchor of the page at `to` (Upcoming is the second half of Today's page), matched by the address's hash. */
+  hash?: string;
   icon: LucideIcon;
   /** Today, Upcoming, Calendar, People and Lists are tabs on the phone; the rest sit in the More sheet. */
   mobile: "tab" | "more";
@@ -48,7 +50,8 @@ export const destinations: readonly Destination[] = [
   {
     id: "upcoming",
     label: "Upcoming",
-    to: "/upcoming",
+    to: "/today",
+    hash: "upcoming",
     icon: CalendarRange,
     mobile: "tab",
     group: "main",
@@ -106,13 +109,21 @@ export const destinations: readonly Destination[] = [
 ];
 
 /** The destination a pathname belongs to (the longest matching path, so `/tasks/lists` is Lists, not All tasks), or undefined. */
-export function destinationFor(pathname: string): Destination | undefined {
+export function destinationFor(
+  pathname: string,
+  hash = "",
+): Destination | undefined {
   let best: Destination | undefined;
   for (const d of destinations)
     if (
       (pathname === d.to || pathname.startsWith(`${d.to}/`)) &&
-      (best === undefined || d.to.length > best.to.length)
+      (d.hash === undefined
+        ? best === undefined || d.to.length > best.to.length
+        : hash === d.hash)
     )
       best = d;
+  // `/upcoming` (the old address, now a redirect) still names Upcoming.
+  if (best === undefined && pathname === "/upcoming")
+    return destinations.find((d) => d.id === "upcoming");
   return best;
 }

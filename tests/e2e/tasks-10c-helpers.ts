@@ -66,15 +66,8 @@ export function detailOf(
 export async function serveTasks10c(
   context: BrowserContext,
 ): Promise<Reads10c> {
-  // These cases count the DAILY catch-up's calls alone: the days ahead (`today/Ahead.tsx`, asked for while the Upcoming fold is open,
-  // the Final design of 8 November 2026) are folded away on every page of the context; the look-ahead has its own cases (`ahead.test.tsx`).
-  await context.addInitScript(() => {
-    try {
-      localStorage.setItem("atlas.upcoming-fold.v1", "folded");
-    } catch {
-      // No storage: the fold stays open and the case may count the look-ahead's calls.
-    }
-  });
+  // These cases count the DAILY catch-up's calls alone: the days ahead (`today/Ahead.tsx`) are asked for only while the Upcoming
+  // fold is open, and it is closed by default (8 November 2026); the look-ahead has its own cases (`ahead.test.tsx`).
   const reads: Reads10c = {
     position: () => refusal(404, "not_found"),
     materialise: () => ({ status: 200, body: { revision: 1 } }),

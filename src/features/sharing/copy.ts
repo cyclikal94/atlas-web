@@ -7,6 +7,9 @@ import { anonymousLabel } from "./model/audience";
  */
 
 // ---- the page ----------------------------------------------------------------------------------------------------------------------
+/** The page's one summary line (the Final design). */
+export const PAGE_LEAD =
+  "Your defaults, what you have shared, and your households.";
 export const PAGE_TITLE = "Sharing";
 export const DEFAULTS_HEADING = "Sharing defaults";
 export const DEFAULTS_INTRO =

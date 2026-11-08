@@ -175,15 +175,17 @@ export function useUpcomingView(
   fromDay: string,
   zone: string,
   now: number,
+  /** How many days after `fromDay` the read reaches (the calendar reads a window of whole months). */
+  horizonDays: number = UPCOMING_HORIZON_DAYS,
 ): UpcomingView {
   const env = useTasksEnv();
   const data = useDataEnv();
   const position = useCachePosition();
   const [attempt, setAttempt] = useState(0);
-  const untilDay = addDays(fromDay, UPCOMING_HORIZON_DAYS);
+  const untilDay = addDays(fromDay, horizonDays);
   // The look-ahead reaches from the device's today (the server's horizon is counted from its own), not the displayed day.
   const today = todayIn(zone, now);
-  const key = `${env.identity}\u0000ahead\u0000${fromDay}\u0000${zone}\u0000${today}`;
+  const key = `${env.identity}\u0000ahead\u0000${fromDay}\u0000${untilDay}\u0000${zone}\u0000${today}`;
   const composition =
     position.status === "ready" ? (position.value?.composition ?? -1) : -2;
   const noDatabase =

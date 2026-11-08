@@ -233,7 +233,7 @@ for (const layout of layouts) {
         primaryNav(page).getByRole("link", { name: "Upcoming" }),
         "Upcoming link",
       );
-      await expect(page).toHaveURL(/\/upcoming/);
+      await expect(page).toHaveURL(/\/today#upcoming/);
       await expectChromeReachable(page, "after navigating from the bottom");
     });
 
@@ -330,26 +330,25 @@ for (const layout of layouts) {
         await expect(page.locator("main")).toBeFocused();
         expect(new URL(page.url()).hash).toBe("");
       }
-      // RouteFocus focuses the new heading, which sits at the top of a page the user has scrolled far away from.
+      // Upcoming is a place on Today's page (`/today#upcoming`): the page lands the days ahead under the sticky bar and focuses them,
+      // from a page the user has scrolled far away from.
       await scrollTo(page, "bottom");
       await pointerClick(
         page,
         primaryNav(page).getByRole("link", { name: "Upcoming" }),
         "Upcoming link",
       );
-      const heading = page.getByRole("heading", {
-        level: 1,
-        name: "Upcoming",
-      });
-      await expect(heading).toBeFocused();
+      const ahead = page.locator("[data-upcoming]");
+      await expect(ahead).toBeFocused();
       const band = await contentBand(page, mode);
-      const box = await boxOf(heading, "Upcoming heading");
-      expect(box.y, "heading is not under the header").toBeGreaterThanOrEqual(
-        band.top - SLACK,
-      );
+      const box = await boxOf(ahead, "the days ahead");
       expect(
-        box.y + box.height,
-        "heading is not under the bottom navigation",
+        box.y,
+        "the days ahead start clear of the header",
+      ).toBeGreaterThanOrEqual(band.top - SLACK);
+      expect(
+        box.y,
+        "the days ahead start above the bottom navigation",
       ).toBeLessThanOrEqual(band.bottom + SLACK);
     });
   });

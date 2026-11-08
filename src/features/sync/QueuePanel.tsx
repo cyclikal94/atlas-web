@@ -2,6 +2,7 @@ import { type KeyboardEvent, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { List } from "../../components/ui/list";
+import { Eyebrow, PageHeader } from "../../components/ui/page-header";
 import { PageHeading } from "../../components/ui/page-heading";
 import {
   type DraftRow,
@@ -106,20 +107,20 @@ export function QueuePanel({
   const panel = useRef<HTMLDivElement>(null);
 
   return (
-    <div className="atlas-enter flex max-w-[760px] flex-col gap-5">
-      <header className="flex flex-wrap items-start gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <PageHeading>{PANEL_HEADING}</PageHeading>
-          <p className="text-sm text-muted-foreground">{PANEL_SUBTITLE}</p>
-          <p
-            data-phase-label=""
-            className="font-num text-xs text-muted-foreground"
-          >
-            {chip.phaseLabel}
-          </p>
-        </div>
-        {onClose ? <Button onClick={onClose}>Close</Button> : null}
-      </header>
+    <div className="atlas-enter flex min-w-0 max-w-[880px] flex-col gap-5">
+      <PageHeader
+        eyebrow={<Eyebrow>{PANEL_HEADING}</Eyebrow>}
+        title={<PageHeading>{PANEL_HEADING}</PageHeading>}
+        summary={
+          <>
+            {PANEL_SUBTITLE}{" "}
+            <span data-phase-label="" className="font-num text-xs">
+              {chip.phaseLabel}
+            </span>
+          </>
+        }
+        actions={onClose ? <Button onClick={onClose}>Close</Button> : undefined}
+      />
 
       <NoticeList />
 

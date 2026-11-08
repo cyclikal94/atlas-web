@@ -14,6 +14,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { REVISION, record } from "../../support/people/records";
 import { fieldRow, peopleWorld, person } from "../../support/people/world";
+import { findAction, identityHeader } from "./more-menu";
 
 /**
  * WF-PEOPLE-04 (A13, PPL-3), the Settings "Archived items" ledger (A12, A14) and "New person" (A7, A8 at the client, A16). jsdom, axe;
@@ -120,9 +121,11 @@ describe("possible duplicates (PPL-3)", () => {
       },
     });
     await w.mount(`/people/${P}`);
-    const link = await screen.findByRole("link", {
-      name: /Possible duplicates/,
-    });
+    const link = await findAction(
+      /Possible duplicates/,
+      identityHeader,
+      "link",
+    );
     await waitFor(() =>
       expect(link.querySelector("[data-duplicates-count]")).toHaveTextContent(
         "2+",

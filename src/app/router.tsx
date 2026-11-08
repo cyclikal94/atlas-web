@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-router";
 import { joinRoute } from "../features/authentication/route";
 import { calendarRoute } from "../features/calendar/route";
+import { focusRoute } from "../features/focus/route";
 import { peopleRoute } from "../features/people/route";
 import { settingsRoute } from "../features/settings/route";
 import { sharingRoute } from "../features/sharing/route";
@@ -34,6 +35,7 @@ export function createAppRouter(
     todayRoute(rootRoute),
     upcomingRoute(rootRoute),
     calendarRoute(rootRoute),
+    focusRoute(rootRoute),
     tasksRoute(rootRoute),
     listsRoute(rootRoute),
     peopleRoute(rootRoute),

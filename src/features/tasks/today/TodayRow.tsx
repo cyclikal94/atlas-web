@@ -1,11 +1,16 @@
 import { Link } from "@tanstack/react-router";
-import { useId, useState } from "react";
+import { Check, Hash, ListChecks, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { BadgeVariant } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
+import { Pill } from "../../../components/ui/chip";
 import { cn } from "../../../lib/utils";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { dayLabel, whoLabel } from "../format";
+import type { Evidence } from "../model/contract";
+import { parseDecimalInput } from "../model/decimal";
+import { MESSAGES } from "../model/form";
 import { dateIn, gapShifted, timeIn } from "../model/time";
 import { recordBlock } from "../reasons";
 import type { RowModel } from "../view";
@@ -39,11 +44,19 @@ const PILL_TEXT: Record<BadgeVariant, string> = {
   muted: "text-muted-foreground",
 };
 
+/** Where a row's title leads: the task's page, or the same page with the task opened beside it (the "How tasks open" setting). */
+export interface RowOpen {
+  to: string;
+  params?: Record<string, string>;
+  search: Record<string, unknown>;
+}
+
 /**
- * One row on the rail (WF-TODAY-01): the time (or "all day"), the title (a link to the task for this day), who takes part and my state
- * in words with any pending mark, and the quick action as the tick at the end. "Mark done" records in place for a checkbox goal; anything
- * else is recorded on the task (D-10a-12). A disabled tick states why beside it. The same row draws the days ahead (`surface:
- * "upcoming"`), without the quick action and with the day in the time column where the section spans more than one day.
+ * One row on the rail (WF-TODAY-01, the Final design): the time (or "all day"), the title (a link to the task for this day), who takes
+ * part and my state in words with any pending mark, and the quick action as the tick at the end. "Mark done" records in place for a
+ * checkbox goal; an amount or a checklist is logged in place too (the Final design, 8 November 2026): the tick opens a recorder under
+ * the title, with the same evidence the task page records. A disabled tick states why beside it. The same row draws the days ahead
+ * (`surface: "upcoming"`), without the quick action and with the day in the time column where the section spans more than one day.
  */
 export function TodayRow({
   row,
@@ -55,6 +68,7 @@ export function TodayRow({
   me,
   surface = "today",
   timeText,
+  open,
 }: {
   me: string;
   row: RowModel;
@@ -66,10 +80,15 @@ export function TodayRow({
   surface?: "today" | "upcoming";
   /** The time column, when it is not the row's own time ("Tue 4" in a section that spans days). */
   timeText?: string;
+  /** Where the title leads when it is not the task's own page (a task opened beside the day). */
+  open?: (row: RowModel) => RowOpen;
 }) {
   const titleId = useId();
   const reasonId = useId();
+  const recorderId = useId();
   const [busy, setBusy] = useState(false);
+  const [logging, setLogging] = useState(false);
+  const tickRef = useRef<HTMLButtonElement>(null);
   const { data } = row;
   const instant = data.slot.instant;
   const overdue =
@@ -100,15 +119,11 @@ export function TodayRow({
     surface === "today" ? recordBlock(row, now, zone, writable) : null;
   const done = row.outcome === "complete";
   const past = timed ? instant * 1000 <= now : done;
-  const mark = async (complete: boolean) => {
+  const goal = data.definition.goal;
+  const record = async (evidence: Evidence, announce: string) => {
     setBusy(true);
     try {
-      await actions.record(
-        row,
-        { kind: "checkbox", complete },
-        null,
-        complete ? copy.ANNOUNCE_DONE : copy.ANNOUNCE_NOT_DONE,
-      );
+      await actions.record(row, evidence, null, announce);
     } finally {
       setBusy(false);
     }
@@ -118,67 +133,98 @@ export function TodayRow({
   const quiet = row.pill === "to_do" || row.pill === "on_track";
   // A day ahead is not open yet by definition: only a state that says more is written on its row.
   const stateShown = !(surface === "upcoming" && row.pill === "not_open");
-  const tickLabel = done ? copy.MARK_NOT_DONE : copy.MARK_DONE;
+  const tickLabel =
+    goal.kind === "checkbox"
+      ? done
+        ? copy.MARK_NOT_DONE
+        : copy.MARK_DONE
+      : logging
+        ? copy.CLOSE_RECORDER
+        : goal.kind === "numeric"
+          ? copy.LOG_AMOUNT
+          : copy.TICK_ITEMS;
   const tick = (disabled: string | null) => (
     <button
+      ref={tickRef}
       type="button"
       aria-label={tickLabel}
       aria-describedby={disabled ? `${reasonId} ${titleId}` : titleId}
+      {...(goal.kind === "checkbox"
+        ? {}
+        : { "aria-expanded": logging, "aria-controls": recorderId })}
       disabled={disabled !== null}
       data-row-tick=""
-      onClick={() => void mark(!done)}
+      onClick={() =>
+        goal.kind === "checkbox"
+          ? void record(
+              { kind: "checkbox", complete: !done },
+              done ? copy.ANNOUNCE_NOT_DONE : copy.ANNOUNCE_DONE,
+            )
+          : setLogging((value) => !value)
+      }
       className="flex size-11 flex-none items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-50"
     >
-      <TickGlyph done={done} />
+      {goal.kind === "checkbox" ? (
+        <TickGlyph done={done} />
+      ) : (
+        <span
+          aria-hidden="true"
+          className={cn(
+            "atlas-transition flex size-7 items-center justify-center rounded-full border-2",
+            done
+              ? "border-success bg-success text-success-foreground"
+              : logging
+                ? "border-primary bg-accent text-primary"
+                : "border-input text-muted-foreground group-hover:border-foreground group-hover:text-foreground",
+          )}
+        >
+          {logging ? (
+            <X className="size-3.5" strokeWidth={2.4} />
+          ) : goal.kind === "numeric" ? (
+            <Hash className="size-3.5" strokeWidth={2.2} />
+          ) : (
+            <ListChecks className="size-3.5" strokeWidth={2.2} />
+          )}
+        </span>
+      )}
     </button>
   );
   const quick =
-    surface !== "today" ? null : data.definition.goal.kind === "checkbox" ? (
-      reason !== null ? (
-        <>
-          <span
-            id={reasonId}
-            className="hidden max-w-[180px] truncate text-xs text-muted-foreground tablet:inline"
-          >
-            {reason}
-          </span>
-          {tick(reason)}
-        </>
-      ) : busy ? (
-        <>
-          <span id={reasonId} className="sr-only">
-            {copy.SAVING}
-          </span>
-          {tick(copy.SAVING)}
-        </>
-      ) : (
-        tick(null)
-      )
-    ) : data.definition.goal.kind === "numeric" ? (
-      <Button
-        asChild
-        variant="outline"
-        size="sm"
-        className="rounded-full text-xs"
-        aria-describedby={titleId}
-      >
-        <Link
-          to="/tasks/$taskId"
-          params={{ taskId: row.taskId }}
-          search={{ occurrence: row.id, record: true }}
+    surface !== "today" ? null : reason !== null ? (
+      <>
+        <span
+          id={reasonId}
+          className="hidden max-w-[180px] truncate text-xs text-muted-foreground tablet:inline"
         >
-          {copy.RECORD}
-        </Link>
-      </Button>
-    ) : null;
+          {reason}
+        </span>
+        {tick(reason)}
+      </>
+    ) : busy && goal.kind === "checkbox" ? (
+      <>
+        <span id={reasonId} className="sr-only">
+          {copy.SAVING}
+        </span>
+        {tick(copy.SAVING)}
+      </>
+    ) : (
+      tick(null)
+    );
   const idAttr =
     surface === "today"
       ? { "data-today-row": row.id }
       : { "data-upcoming-row": row.id };
+  const summary = row.personal.kind === "result" ? row.personal.action : null;
+  const target = open?.(row) ?? {
+    to: "/tasks/$taskId",
+    params: { taskId: row.taskId },
+    search: { occurrence: row.id },
+  };
   return (
     <RailRow
       aria-labelledby={titleId}
       {...idAttr}
+      data-task-id={row.taskId}
       data-pill={row.pill}
       data-source={row.source}
       data-structure={row.structureFrom}
@@ -187,12 +233,25 @@ export function TodayRow({
       time={time}
       past={past}
       compact={surface === "upcoming"}
+      className={logging ? "bg-accent/40" : undefined}
       trailing={
-        <span className="flex flex-none items-center gap-2">
-          {row.pending ? (
+        <span className="flex min-w-0 flex-none items-center gap-2 self-start pt-[3px]">
+          {logging && goal.kind !== "checkbox" ? (
+            <RowRecorder
+              id={recorderId}
+              row={row}
+              busy={busy}
+              onRecord={record}
+              onClose={() => {
+                setLogging(false);
+                tickRef.current?.focus();
+              }}
+            />
+          ) : null}
+          {row.pending && !logging ? (
             <span
               data-pending-mark={row.pending}
-              className="hidden text-xs text-muted-foreground tablet:inline"
+              className="hidden h-7 items-center rounded-full bg-muted px-2.5 text-xs leading-none text-muted-foreground tablet:inline-flex"
             >
               {copy.PENDING[row.pending]}
             </span>
@@ -205,9 +264,9 @@ export function TodayRow({
         <div className="flex min-w-0 flex-col gap-0.5 tablet:flex-row tablet:items-baseline tablet:gap-3">
           <Link
             id={titleId}
-            to="/tasks/$taskId"
-            params={{ taskId: row.taskId }}
-            search={{ occurrence: row.id }}
+            to={target.to}
+            params={target.params}
+            search={target.search}
             className={cn(
               "atlas-transition min-w-0 flex-1 truncate text-[15px] leading-6 hover:text-primary",
               done ? "text-muted-foreground line-through" : "text-foreground",
@@ -217,9 +276,17 @@ export function TodayRow({
           </Link>
           <span className="flex min-w-0 items-baseline gap-1 text-xs text-muted-foreground tablet:max-w-[55%] tablet:flex-none">
             <span className="truncate">
-              {copy.PARTICIPATION[participation]}
-              {participation === "personal" ? "" : ` · ${whoLabel(row, me)}`}
-              {from ? ` · ${from}` : ""}
+              {[
+                participation === "personal"
+                  ? copy.PARTICIPATION.personal
+                  : `${copy.PARTICIPATION[participation]} · ${whoLabel(row, me)}`,
+                goal.kind === "numeric" && summary !== null
+                  ? `${summary.amount ?? "0"}${goal.minimum !== null ? ` / ${goal.minimum}` : ""} ${goal.unit}`
+                  : null,
+                from,
+              ]
+                .filter((part) => part !== null)
+                .join(" · ")}
             </span>
             {stateShown ? (
               <>
@@ -263,4 +330,142 @@ export function TodayRow({
       </div>
     </RailRow>
   );
+}
+
+/**
+ * The recorder that comes out of a row's button (the Final design, revised 8 November 2026): for an amount, the field with its unit and
+ * Record, in line with the tick; for a checklist, the items as pressed pills. It records the same evidence the task page does; nothing
+ * is kept between visits (the task page keeps what is typed there).
+ */
+function RowRecorder({
+  id,
+  row,
+  busy,
+  onRecord,
+  onClose,
+}: {
+  id: string;
+  row: RowModel;
+  busy: boolean;
+  onRecord(evidence: Evidence, announce: string): Promise<void>;
+  onClose(): void;
+}) {
+  const goal = row.data.definition.goal;
+  const [amount, setAmount] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const field = useId();
+  const first = useRef<HTMLInputElement>(null);
+  // The recorder opened from the tick: its first field takes focus (the tick's expanded state announces it).
+  useEffect(() => {
+    first.current?.focus();
+  }, []);
+  const summary = row.personal.kind === "result" ? row.personal.action : null;
+  if (goal.kind === "numeric")
+    return (
+      <form
+        id={id}
+        data-row-recorder="numeric"
+        className="flex items-center gap-1.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const value = parseDecimalInput(amount);
+          if (value === null) {
+            setError(MESSAGES.amount);
+            return;
+          }
+          void onRecord(
+            { kind: "quantity", amount: value },
+            copy.ANNOUNCE_SAVED,
+          ).then(() => {
+            setAmount("");
+            onClose();
+          });
+        }}
+      >
+        <label htmlFor={field} className="sr-only">
+          {copy.AMOUNT_LABEL(goal.unit)}
+        </label>
+        <span className="flex h-7 items-center rounded-full border border-input bg-background pl-2.5 pr-2 focus-within:border-ring">
+          <input
+            ref={first}
+            id={field}
+            inputMode="decimal"
+            value={amount}
+            placeholder="0"
+            aria-invalid={error !== null}
+            aria-describedby={error ? `${field}-error` : undefined}
+            onChange={(event) => {
+              setAmount(event.target.value);
+              setError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                onClose();
+              }
+            }}
+            className="w-12 min-w-0 bg-transparent font-num text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+          />
+          <span className="text-xs text-muted-foreground">{goal.unit}</span>
+        </span>
+        {busy ? (
+          <Button
+            size="sm"
+            disabled
+            reason={copy.SAVING}
+            className="h-7 rounded-full px-3 text-xs"
+          >
+            {copy.RECORD}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="default"
+            type="submit"
+            className="h-7 rounded-full px-3 text-xs"
+          >
+            {copy.RECORD}
+          </Button>
+        )}
+        {error ? (
+          <span id={`${field}-error`} className="sr-only">
+            {error}
+          </span>
+        ) : null}
+      </form>
+    );
+  if (goal.kind === "checklist")
+    return (
+      <fieldset
+        id={id}
+        data-row-recorder="checklist"
+        className="m-0 flex flex-wrap items-center justify-end gap-1.5 border-0 p-0"
+      >
+        <legend className="sr-only">{copy.TICK_ITEMS}</legend>
+        {goal.items.map((item, index) => {
+          const checked = summary?.checked.includes(item.id) ?? false;
+          return (
+            <Pill
+              key={item.id}
+              pressed={checked}
+              disabled={busy}
+              onClick={() =>
+                void onRecord(
+                  { kind: "checklist", item_id: item.id, complete: !checked },
+                  copy.ANNOUNCE_SAVED,
+                )
+              }
+              className="h-7 px-2.5 text-xs"
+              {...(index === 0 ? { "data-first-item": "" } : {})}
+            >
+              {checked ? (
+                <Check aria-hidden="true" className="size-3.5" />
+              ) : null}
+              {item.label}
+            </Pill>
+          );
+        })}
+      </fieldset>
+    );
+  return null;
 }

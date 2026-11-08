@@ -14,6 +14,10 @@ const rules: ReadonlyArray<{
   back: (m: RegExpExecArray) => MobileBack;
 }> = [
   {
+    pattern: /^\/focus\/?$/,
+    back: () => ({ label: "Today", to: "/today" }),
+  },
+  {
     pattern: /^\/tasks\/new\/?$/,
     back: () => ({ label: "Tasks", to: "/tasks" }),
   },

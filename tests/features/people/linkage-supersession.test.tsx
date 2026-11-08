@@ -12,6 +12,7 @@ import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { ME } from "../../support/people/records";
 import { peopleWorld, person } from "../../support/people/world";
+import { actions } from "./more-menu";
 
 /**
  * Review 20, R20.1 (A9, A10, Q21): a linkage read asked before an unlink never replaces the one asked after it. The header's rename,
@@ -90,7 +91,7 @@ async function renamedThenUnlinked(late: boolean) {
   );
   await w.mount(`/people/${P}`);
   await waitFor(() => expect(linkage()).toBe("self"));
-  fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+  fireEvent.click(actions(header()).getByRole("button", { name: "Rename" }));
   fireEvent.change(within(header()).getByRole("textbox", { name: "Name" }), {
     target: { value: "Kieran L." },
   });
@@ -100,7 +101,7 @@ async function renamedThenUnlinked(late: boolean) {
     expect(header().querySelector("[data-rename-form]")).toBeNull(),
   );
   fireEvent.click(
-    within(header()).getByRole("button", { name: "Unlink account" }),
+    actions(header()).getByRole("button", { name: "Unlink account" }),
   );
   const dialog = await screen.findByRole("dialog", {
     name: "Unlink your account from this profile?",
@@ -151,7 +152,7 @@ describe("rename, a conflicting unlink, then the unlink (DA20-08)", () => {
         version: 3,
       });
       expect(
-        within(header()).queryByRole("button", { name: "Unlink account" }),
+        actions(header()).queryByRole("button", { name: "Unlink account" }),
       ).toBeNull();
       expect(within(header()).getByText("Not linked to an account")).toBe(
         header().querySelector("[data-linkage]"),
@@ -165,7 +166,9 @@ describe("after the unlink, an offline rename is the ordinary queued edit (DA20-
     test(`${late ? "the rename's read answers last" : "control, in order"}: Save is enabled offline and queues one content edit over v3; no rename_profile`, async () => {
       const w = await renamedThenUnlinked(late);
       w.setOnline(false);
-      fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+      fireEvent.click(
+        actions(header()).getByRole("button", { name: "Rename" }),
+      );
       fireEvent.change(
         within(header()).getByRole("textbox", { name: "Name" }),
         { target: { value: "Kieran Lane" } },
@@ -217,7 +220,9 @@ describe("Reload after a conflicting rename asks a new read each time", () => {
       w.api.next.people.push({ ok: false, kind: "conflict" });
       await w.mount(`/people/${P}`);
       await waitFor(() => expect(linkage()).toBe("self"));
-      fireEvent.click(within(header()).getByRole("button", { name: "Rename" }));
+      fireEvent.click(
+        actions(header()).getByRole("button", { name: "Rename" }),
+      );
       fireEvent.change(
         within(header()).getByRole("textbox", { name: "Name" }),
         { target: { value: "Kieran L." } },

@@ -14,11 +14,23 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     no time of day), the rail with a node per row (filled once its time has passed, outlined ahead of it), "Any time" under the date, then
     Morning, Afternoon and Evening; the present as a red mark between the rows whose times bracket it; a gap of two hours or more between
     timed rows said on a dotted stretch of rail ("5 h 30 m"); a done row strikes its title only. The sticky bar under the date names the
-    section the reader is in and holds the filters. The rail runs past the day into **Upcoming** (`today/Upcoming.tsx`, the fold; open at
-    `/upcoming`, which is the same page started at the fold): Tomorrow with its times of day, the rest of the week a day at a time, the next
-    four weeks, then months, routine (repeating) tasks folded to a count in every block. The days ahead are read from THIS DEVICE only
+    section the reader is in and holds the filters. The rail runs past the day into **Upcoming** (`today/Upcoming.tsx`, the fold, CLOSED
+    to begin with so the day reads as one page; `#upcoming` opens it, as does a pull past the end of the day or the fold's pill, below):
+    Tomorrow with its times of day, the rest of the week a day at a time, the next four weeks, then months, routine (repeating) tasks
+    folded to a count in every block. The days ahead are read from THIS DEVICE only
     (`useUpcomingView`: one certified snapshot of every cached occurrence dated after the day, composed as an offline day is, re-read on every
     local commit); `/daily` is a one-day read and is asked for the displayed day alone.
+  - **One page, two destinations (revised 8 November 2026).** Today and Upcoming are ONE page: Upcoming is the anchor `/today#upcoming`
+    (`features/today/route.tsx`; `/upcoming`, the old address, redirects there), the Upcoming item of the rail and the tabs leads to the
+    anchor and is lit by the address's hash (`destinations.ts` `hash`, `destinationFor(pathname, hash)`), and the hash FOLLOWS THE
+    SCROLL: the block under the sticky bar says which half the reader is in (`data-rail-section`), and once they have scrolled the page
+    replaces the address's hash (`TodayScreen` `onSection`, `resetScroll: false`), so the navigation switches from Today to Upcoming as
+    the days ahead come under the bar and back again at the top. The sticky bar names the block under it: "Tomorrow · Monday 9
+    November", "Tomorrow · Monday 9 November · Morning", "Rest of week · Tuesday 10 November" (a day at a time), "Next week · Monday 16
+    November" (a day at a time), then each month a week at a time, "November · 23–29 Nov", "December · 1–6 Dec" (`groupAhead`;
+    `data-rail-heading` on each block's heading, `copy.UPCOMING.bar`); revealed or landed on, the days ahead are brought so that
+    "Tomorrow" is the block under the bar. The page's one h1 is
+    "Today" (the eyebrow); the date is its title; nothing is duplicated.
   - **The look-ahead (8 November 2026).** The server makes an occurrence only when asked (`materialise`), and Today's catch-up asks only
     through today, so a day ahead held nothing until it came. While the fold is open, Today asks the page's runner to bring every task this
     device holds details of (the `execution` rows) up to date through `AHEAD_DAYS` (30, inside the server's 31-day horizon in any zone).
@@ -29,23 +41,95 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     `today/Ahead.tsx`, trigger `ahead`, one sequence per task and day under the runner's own budget and stops). The fold says "Planning the month ahead…" while it works,
     each stop with its reason and Try again, and "Planned with the server through {day}" once settled; a settled plan is noted on the
     device (`atlas.ahead.v1`) and not asked again until it changes (a new task, a new day). The caption under the last block says that the
-    next 30 days are planned with the server and anything further off appears as it comes within a month. The fold is OPEN by default
-    (the day runs on into the days ahead) and a person's choice to fold it away is kept on the device (`atlas.upcoming-fold.v1`); `/upcoming`
-    always opens it. In the first week block, tomorrow's rows are not repeated (tomorrow has its own block).
+    next 30 days are planned with the server and anything further off appears as it comes within a month. In the first week block,
+    tomorrow's rows are not repeated (tomorrow has its own block).
+  - **Revealing the days ahead (revised 8 November 2026).** The fold is CLOSED to begin with: Today reads as one page that ends at the
+    "Add to today…" row and the fold's pill. Scrolled to the end, a further pull (a wheel or a touch; `today/reveal.ts`,
+    `usePullToReveal`) fills the fold's line with a little resistance (`REVEAL_DISTANCE`, the pill turning as it fills; a pause or a pull
+    back lets it go) and past it the days ahead are revealed: the fold opens, the page glides to them under the sticky bar and the
+    navigation moves to Upcoming. The pill does the same on a click (and folds the days away again, bringing the navigation back to
+    Today). `#upcoming` (the rail's Upcoming, the old `/upcoming`) opens the fold and starts there, and the days ahead are kept at the top
+    while the day's rows settle, until the reader scrolls. A scroll the page makes itself is never taken for the reader's (the navigation
+    follows only a wheel, a touch, a key or a later scroll), and above every heading the bar and the hash are the day's. Nothing of the
+    fold's state is kept on the device.
   - **A carried row keeps its time in its note** ("From Sun 8 Nov, 17:40"): the time column says "all day", because on this day the row is
     open at any time, and the note says when it was meant for.
-  - **The task page (the Final design, 7 November 2026).** Under the heading and its actions, a **facts strip** (`TaskDetail.tsx`,
-    `Facts`): the day, who takes part, how the task repeats (`copy.CADENCE`), what happens when it is missed, and the way to the streak,
-    as labelled cells. The day's work follows: the record card, then ONE grouped box (`components/ui/grouped.tsx`, `DayWork.tsx`) of
-    disclosure sections on hairlines: WEB-10c's "What needs doing first" (a warning dot while a prerequisite is open, the count beside the
-    heading), the timer (a green dot while one runs), and the turns of an Anyone task. The timers page draws its running and earlier
-    sessions as the same grouped sections, with rows on hairlines. Since 8 November 2026 the same box holds the rest of the day's
-    reference: "Recent entries" (`EntryHistory`, with "Full history"), "Who's on this" (with "Your settings" and "Who sees my progress")
-    and "This day" (the closure and the streak exclusion), and the timer section exists only for a task measured in time. On the phone
-    the record card comes before the facts strip (the primary action on the first screen) and the header's controls fold behind one
-    "Actions" disclosure (`components/ui/page-actions.tsx`); the streak cell links as "View". The streak page draws its figures as the
-    same facts strip and its day-by-day strip in a grouped box; a list's tasks are rows on hairlines in one box with "Add task to list"
-    as its last row (`lists/ListDetail.tsx`).
+  - **The task page (the Final design, 8 November 2026, after the "Atlas layout redesign" export).** The page is the frame's anatomy
+    (`TaskDetail.tsx`): a breadcrumb ("Today / Monday 26 October", hidden on the phone, where the shell's header carries the way back), the
+    title with a 40 px state glyph (filled with a tick once the day is done) and ONE summary line ("18:30 today · every Monday · your
+    turn", the state pill, a pending mark), and "More" (`components/ui/action-menu.tsx`, a `menu` of `menuitem`s: Edit task, Sharing,
+    Who sees my progress, the streak, Archive or Restore, a withheld act a disabled item with its reason). Then the **facts strip**
+    (`components/ui/facts-strip.tsx`, `Facts`): the day, who takes part or whose turn it is (with the roster's initials), how the task
+    repeats (`copy.CADENCE`), what it measures (or "Timer" for a task measured in time), what happens when it is missed, the way to the
+    streak (a link cell) and "Seen by" (a button cell that opens the sharing editor: editors with consequences open as a centred dialog
+    from the strip). Under the strip the day's **action row** (`RecordCard.tsx`, `data-record-card`): Mark done, or the amount with its
+    unit and "Log an amount" / "Just checked on it" as pills, or the checklist, with "Correct this day" beside it; on the phone the row
+    stays at the bottom of the viewport. Then ONE grouped box (`components/ui/grouped.tsx`, `DayWork.tsx`) of disclosure sections on
+    hairlines for the day's decisions and reference: WEB-10c's "What needs doing first" (a warning dot while a prerequisite is open, the
+    count beside the heading), the timer (a green dot while one runs; only for a task measured in time), the turns of an Anyone task,
+    "Who's on this" (with "Your settings" and "Who sees my progress") and "This day" (the closure and the streak exclusion). The
+    **activity** ("Recent entries", `EntryHistory`, with "Full history") stands beside the day in a 300 px column from the desktop up
+    (`components/ui/page-grid.tsx`, `frame="aside"`) and is a section of the box below it. The page takes the whole width beside the rail
+    (`AppShell`'s main: 36 px down, 40 px in from the tablet up; no page sets a narrower column except the row lists, 880 px). The streak
+    page draws its figures as the same facts strip and its day-by-day strip in a grouped box; a list's tasks are rows on hairlines
+    (`lists/ListDetail.tsx`, docs/lists.md).
+  - **How tasks open (Settings · Layout, 8 November 2026).** The task view is one component and each container is a layout around it
+    (`today/TaskPane.tsx`, `screens.tsx` `TodayScreen`): a page (`/tasks/<id>`), the right half of a **split pane** beside the day (the
+    default), a **side peek** floating over the day (Escape closes; ↑ and ↓ move to the previous and next row of the day) or an **overlay**
+    centred over it (the dialog pattern). The choice is kept on this device (`atlas.task-wrapper.v1`, `shell/preferences.ts`;
+    `/settings/layout`, `settings/layout/LayoutPage.tsx`). The container is addressed: `/today?task=<id>&occurrence=<id>` (and `&new=1`
+    for a task being made, "same container as opening one"), so Back and a reload keep it. The phone always opens a page, and the split
+    pane needs the desktop width: below it the setting falls back to a page (`effectiveWrapper`). A task drawn in a container keeps the
+    day's one h1 (its title is an h2, `PageHeading as="h2"`) and shows a Close control in place of the breadcrumb. People and lists keep
+    their own page: the people, the lists and the tasks take the whole page as rows under the shared header
+    (`components/ui/page-header.tsx`), and a person, a list or a task from those pages is a page of its own with a breadcrumb back
+    (no pane beside it); a task opened from a list opens in the chosen container (`/tasks/lists/<id>?task=<id>`, `ListsLayout`).
+  - **Recording from the day (8 November 2026).** A row's tick records a tick-box task in place as before; for an amount the tick (named
+    "Log an amount", `aria-expanded`) opens a recorder IN LINE with it, in the row's trailing group (the amount with its unit and
+    Record; Escape or the button, now "Done logging", closes it), and for a checklist ("Tick off items") the items as pressed pills
+    beside the button (`TodayRow.tsx`, `RowRecorder`): the same evidence the task page records, nothing kept between visits. "Just
+    checked on it" (an `observe` entry: the day counted as looked at without an amount, so it is "not done" rather than "not known")
+    stays on the task page only. The day ends with an **"Add to today…"** row on the rail (`today/AddRow.tsx`, `useQuickAdd`): Enter saves a
+    one-off tick for the day by the same `create_task` the form sends, with my sharing defaults, and the row appears above at once,
+    "Not sent yet". The header's **search pill** ("Search or add anything… ⌘K", `today/CommandPalette.tsx`) finds a task, a list or a
+    person by name among what this device holds and adds a typed line to the day as the last choice; "New task" beside it is the full
+    form (`/tasks/new`, or `?new=1` in the chosen container). The day's controls (the arrows, the date, the time zone) sit on the sticky
+    bar with the filters.
+  - **Focus mode (8 November 2026).** `/focus?day=&tz=` (`focus/FocusPage.tsx`, from the crosshair beside the search pill): the day's
+    rows in Today's order, one at a time, the current one large with its time, its line and Done / Skip / Open; ← and → move, D marks
+    done (an amount or a checklist opens the task's page to record), S skips (closes the day without completing, as "This day" does),
+    Escape returns to the day; the day in order beside it, with the done count. On the phone the order is a row of bars at the top and
+    the acts sit at the bottom.
+  - **The calendar (8 November 2026, revised the same day after the review).** `/calendar?view=month|week&weekends=1|0&at=YYYY-MM-DD&tz=`
+    (`calendar/CalendarPage.tsx`, the arithmetic in `calendar/model.ts`; `month=YYYY-MM` is still read as the first of that month for one
+    release). The page is the "FD_Calendar" frame's anatomy, and its header STAYS at the top as the reader scrolls (revised after
+    the review of 8 November 2026: the month is named once, in the header, and the header never gives way to a smaller bar): the
+    eyebrow heading ("Calendar", the page's h1; the route shows it alone while the gate hides the page), the month ("November 2026")
+    or the week ("9 – 15 November") in view as the large title, which opens the picker (the year with ‹ ›, the twelve months, Today),
+    its count of things ("week 46 · 3 things" in the week view), and at the right the search pill,
+    "Today", "Month" / "Week" and "Weekends". The months, or the weeks (Monday first, ISO week numbers), are stacked without end and
+    scrolled through: the page reads a window of whole months from this device (the same read as the days ahead, `useUpcomingView` with a
+    horizon of the window's length, from the day before it; the look-ahead planning is unchanged), first two months behind the day in
+    view to eight ahead, and six more are added whenever the reader nears an edge (a prepend keeps the viewport where it was: the added
+    height is measured and scrolled by before paint; what was read stays on screen until the wider read lands). The header's title is
+    the block whose top has passed under it, so the next month takes the header as it arrives; under the controls the weekday names
+    stand over the columns; ↑ ↓ move a block. A block carries no label of its own (its name is for assistive technology only): the
+    first of a month says "1 Nov", and the days of the months before and after are dimmed. The picker, the arrows, "Today" and a day in view that arrives from outside the page (Back, a typed address) write `at` to
+    the address and scroll there: smooth when near, a jump to just short of a far month and then smooth, instant under reduced motion;
+    a window that grows to hold a far day grows by six months on that side, and the window does not grow at an edge while such a scroll
+    is still gliding (the prepend moved the target from under the glide, which is how January could land in the October before). A
+    month is its weeks as rows of day cards (the days of the months before and after dimmed, so the columns hold; the day's number as a
+    small pill, lit when today; each task a row with its dot, its title and its time; "+N more" past three), a week one row of tall
+    cards with every task; without weekends the grid is Monday to Friday. On the phone a month is its days in a small grid (the number,
+    up to three dots) and then its agenda a day at a time ("Monday 26 · today", "4 things · 2 done", every task a row with its time), a
+    week its agenda alone ("FD_CalendarPhone"). A day number leads to Today's view of it. Calendar events, people lanes ("FD_CalendarPeople")
+    and import ("FD_CalendarImport") come with the calendar events slice.
+  - **The form (8 November 2026).** The task form is the task's page in edit mode (`form/TaskFormPage.tsx`): the eyebrow heading ("New
+    task" / "Edit task"), the name as the large title field, a facts strip of the choices (When, Repeats, Who, Done when, If missed, Seen
+    by) whose cells lead to their sections, the save row under the strip (at the bottom of the phone's viewport), then one grouped box
+    of sections ("When" with Today / Tomorrow / No date and Any / 09:00 / 18:00 pills beside the native fields, "What counts as done",
+    "If a day gets missed", "Who takes part", "Who gets this task"). The frame's popovers under each cell were not built: the sections keep
+    every field reachable without a second step, and the preset picker keeps its dialog.
   - **The form kit (8 November 2026).** The task form's choices ("What counts as done", "If a day gets missed", "Who takes part", "Who
     gets this task") are one control, `components/ui/choice-cards.tsx`: a fieldset of native radios drawn as cards, each with its label
     and one line of meaning (the radio is named by its label alone, `aria-labelledby`, and described by the line), the chosen one marked by

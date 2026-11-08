@@ -3,6 +3,7 @@ import { useId } from "react";
 import { buttonVariants } from "../../components/ui/button";
 import { GroupedBox, GroupedSection } from "../../components/ui/grouped";
 import { List } from "../../components/ui/list";
+import { Eyebrow, PageHeader } from "../../components/ui/page-header";
 import { PageHeading } from "../../components/ui/page-heading";
 import { TEMPLATE_KINDS, useSharingDefaults } from "../../data";
 import * as copy from "./copy";
@@ -24,10 +25,14 @@ export function SharingPage() {
   const record = defaults.record;
   return (
     <div
-      className="atlas-enter flex max-w-[720px] flex-col gap-8"
+      className="atlas-enter flex min-w-0 flex-col gap-6"
       data-sharing-page=""
     >
-      <PageHeading>{copy.PAGE_TITLE}</PageHeading>
+      <PageHeader
+        eyebrow={<Eyebrow>{copy.PAGE_TITLE}</Eyebrow>}
+        title={<PageHeading>{copy.PAGE_TITLE}</PageHeading>}
+        summary={copy.PAGE_LEAD}
+      />
       {/* One grouped box (the Final design, 8 November 2026): the defaults, item sharing and the households as sections on hairlines. */}
       <GroupedBox data-sharing-box="">
         <GroupedSection

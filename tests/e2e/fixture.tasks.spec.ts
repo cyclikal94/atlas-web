@@ -528,8 +528,13 @@ test.describe("E-T6: archive offline leaves the day (A13)", () => {
       page,
       `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
     );
-    await page.getByRole("button", { name: "Archive" }).click();
-    await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
+    // Archive and Restore are behind "More" (the Final design, 8 November 2026).
+    await page.getByRole("button", { name: "More", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Archive" }).click();
+    await expect(page.locator("[data-archive=archived]")).toBeVisible();
+    await page.getByRole("button", { name: "More", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "Restore" })).toBeVisible();
+    await page.keyboard.press("Escape");
     await navigateInApp(page, todayRoute());
     await expect(page.locator("[data-today-page]")).toBeVisible();
     await expect(rowOf(page, stays.occurrenceId)).toBeVisible();
@@ -541,7 +546,8 @@ test.describe("E-T6: archive offline leaves the day (A13)", () => {
       page,
       `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
     );
-    await page.getByRole("button", { name: "Restore" }).click();
+    await page.getByRole("button", { name: "More", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Restore" }).click();
     await navigateInApp(page, todayRoute());
     await expect(rowOf(page, a.occurrenceId)).toBeVisible();
   });
@@ -4897,12 +4903,15 @@ test.describe("E-T36: a known denial of the task or its details admits no revisi
       );
       await goOfflineAtBoundary(page);
       await expect(page.locator("[data-task-detail]")).toBeVisible();
-      await expect(
-        page.getByRole("link", { name: "Edit task", exact: true }),
-      ).toHaveCount(0);
-      await expect(
-        page.getByRole("button", { name: "Edit task", exact: true }),
-      ).toBeDisabled();
+      // Edit task is behind "More" (the Final design): withheld, it is a disabled item with its reason, never a link.
+      await page.getByRole("button", { name: "More", exact: true }).click();
+      const edit = page.getByRole("menuitem", {
+        name: "Edit task",
+        exact: true,
+      });
+      await expect(edit).toBeDisabled();
+      await expect(edit).not.toHaveAttribute("href", /./);
+      await page.keyboard.press("Escape");
       await navigateInApp(page, `/tasks/${task.taskId}/edit`);
       await expect(page.locator('[data-task-form="edit"]')).toBeVisible();
       const name = page.getByLabel("Name", { exact: true });
@@ -6230,7 +6239,11 @@ test.describe("E-T43: the logical visit owns its day and the input typed for it 
       await expect(page.locator("[data-day-unavailable]")).toBeVisible();
       await expect(page.locator("[data-record-card]")).toHaveCount(0);
       if (leave) {
-        await page.getByRole("link", { name: "‹ Tasks" }).click();
+        // The detail's own way out is the breadcrumb or the rail (the Final design): the rail's "All tasks" ends the visit as the old
+        // "‹ Tasks" link did.
+        await page
+          .getByRole("link", { name: "All tasks", exact: true })
+          .click();
         await expect(page).toHaveURL(/\/tasks$/);
       }
       await commitOnWriter(writer, net, 3, [dayA], (ids) =>

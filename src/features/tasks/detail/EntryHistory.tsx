@@ -7,7 +7,10 @@ import {
   useSyncExternalStore,
 } from "react";
 import { Button } from "../../../components/ui/button";
-import { GroupedSection } from "../../../components/ui/grouped";
+import {
+  GroupedSection,
+  type GroupedSectionProps,
+} from "../../../components/ui/grouped";
 import { Input } from "../../../components/ui/input";
 import { useFormRecoveryPort } from "../../../data";
 import { headingFocus } from "../../../lib/form-recovery/focus";
@@ -454,6 +457,7 @@ export function EntryHistory({
   zone,
   writable,
   current = true,
+  frame = "section",
 }: {
   row: RowModel;
   actions: Pick<TaskActions, "record">;
@@ -461,6 +465,11 @@ export function EntryHistory({
   writable: boolean;
   /** The detail's local read is current (revision 6, D6-5): while it is not, an entry known only from the full history cannot be saved. */
   current?: boolean;
+  /**
+   * How the history is framed (the Final design, 8 November 2026): a section of the day's grouped box, or the activity column beside the
+   * day on a wide screen, with its small heading. The entries and their controls are the same in both.
+   */
+  frame?: "section" | "aside";
 }) {
   const env = useTasksEnv();
   const visitOf = useTaskVisit();
@@ -1330,8 +1339,9 @@ export function EntryHistory({
       />
     );
   const fixShown = fix !== null && shown.some((s) => s.id === fix.entry.id);
+  const Frame = frame === "aside" ? AsideFrame : GroupedSection;
   return (
-    <GroupedSection
+    <Frame
       sectionRef={historyRef}
       aria-labelledby={heading}
       data-entry-history=""
@@ -1505,7 +1515,27 @@ export function EntryHistory({
           </Button>
         ) : null}
       </span>
-    </GroupedSection>
+    </Frame>
+  );
+}
+
+/** The history as the activity column beside the day (the Final design): the small uppercase heading, then the entries, no fold. */
+function AsideFrame({
+  heading,
+  sectionRef,
+  children,
+  ...rest
+}: GroupedSectionProps) {
+  return (
+    <section
+      {...rest}
+      ref={sectionRef}
+      className="flex flex-col gap-3 [&>h2]:text-[11px] [&>h2]:font-semibold [&>h2]:uppercase [&>h2]:tracking-[0.08em] [&>h2]:text-muted-foreground"
+      data-entry-history-frame="aside"
+    >
+      {heading}
+      {children}
+    </section>
   );
 }
 

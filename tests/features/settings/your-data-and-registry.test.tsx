@@ -98,13 +98,14 @@ describe("WF-SETTINGS-06 Your data (F-DATA)", () => {
 });
 
 describe("the Settings registry (F-REG)", () => {
-  test("Signing in, Sessions & devices, Appearance, Calendars, Your data and Archived items are registered in order", () => {
+  test("Signing in, Sessions & devices, Appearance, Layout, Calendars, Your data and Archived items are registered in order", () => {
     expect(
       settingsSections().map((s) => [s.id, s.label, s.owner, s.route]),
     ).toEqual([
       ["signing-in", "Signing in", "WEB-08", "signing-in"],
       ["sessions", "Sessions & devices", "WEB-08", "sessions"],
       ["appearance", "Appearance", "WEB-07", "appearance"],
+      ["layout", "Layout", "WEB-07", "layout"],
       ["calendars", "Calendars", "WEB-13", "calendars"],
       ["data", "Your data", "WEB-08", "data"],
       ["archived", "Archived items", "WEB-11", "archived"],
@@ -133,7 +134,11 @@ describe("the Settings registry (F-REG)", () => {
     // never for a cold transform of the chunk (about 2 s on a cold cache, measured, against the query's 1 s).
     await import("../../../src/features/people/screens");
     // The calendar page's heading is the wireframe's ("Calendar sources"), under its "Settings · Calendars" eyebrow (WEB-13a).
-    const headings: Record<string, string> = { calendars: "Calendar sources" };
+    // Settings · Layout's heading is the frame's ("How tasks open"), under its "Settings · Layout" eyebrow (the Final design).
+    const headings: Record<string, string> = {
+      calendars: "Calendar sources",
+      layout: "How tasks open",
+    };
     for (const section of settingsSections()) {
       cleanup();
       await mount(`/settings/${section.route}`);

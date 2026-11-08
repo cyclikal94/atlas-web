@@ -77,7 +77,9 @@ function Gated({
   child: boolean;
   children: ReactNode;
 }) {
-  const heading = <PageHeading>{title}</PageHeading>;
+  // The destination's h1 is its eyebrow (as Today's and the calendar's); the page draws the large title under it. A child page
+  // (a task, a list) has its own heading, so the eyebrow stands in only while the gate hides it.
+  const heading = <PageHeading eyebrow>{title}</PageHeading>;
   if (useOptionalDataEnv() === null) return heading;
   return (
     <>
@@ -202,6 +204,15 @@ export const listsRoute = (parent: AnyRoute) => {
   });
   // The detail is drawn by the lazy layout from the matched id (no second lazy screen in the routes' first load).
   const index = createRoute({ getParentRoute: () => lists, path: "/" });
-  const detail = createRoute({ getParentRoute: () => lists, path: "$listId" });
+  // A task opened from the list in the chosen container (Settings · Layout): `?task=<id>`, as Today's address names it.
+  const detail = createRoute({
+    getParentRoute: () => lists,
+    path: "$listId",
+    validateSearch: (search: Record<string, unknown>): { task?: string } => ({
+      ...(typeof search.task === "string" && UUID.test(search.task)
+        ? { task: search.task }
+        : {}),
+    }),
+  });
   return lists.addChildren([index, detail]);
 };

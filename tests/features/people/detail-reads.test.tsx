@@ -4,7 +4,6 @@ import {
   fireEvent,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -261,7 +260,10 @@ describe("review 6, finding 2: the person", () => {
       }
       act(() => w.releaseReads());
       await waitFor(() => expect(detail()).not.toBeNull());
-      expect(within(detail() as HTMLElement).getByText("Ada")).toBeDefined();
+      // The name is the page's heading (its breadcrumb names the person too).
+      expect(
+        (detail() as HTMLElement).querySelector("[data-person-name]"),
+      ).toHaveTextContent("Ada");
     });
 
   test("more unsent changes than the chain reads (its cap) and the person among none of them: not 'not on this device'", async () => {

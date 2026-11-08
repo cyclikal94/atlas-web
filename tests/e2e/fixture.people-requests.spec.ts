@@ -779,6 +779,12 @@ test.describe("E-R10: a request to merge, and a merged alias (A6, A9)", () => {
     await expect(
       page.getByRole("link", { name: copy.MERGED_ALIAS("Mo") }),
     ).toBeVisible();
+    // Restore is behind the header's "More" (the Final design): disabled there, with its reason beside it.
+    const more = page
+      .locator("[data-identity-header]")
+      .getByRole("button", { name: "More", exact: true });
+    if ((await more.getAttribute("aria-expanded")) !== "true")
+      await more.click();
     await expect(page.getByRole("button", { name: "Restore" })).toBeDisabled();
     await expect(
       page.locator("main").getByText(copy.ALIAS_NO_RESTORE),

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
+import { MENU_COPY } from "../../../src/components/ui/action-menu";
 import { StoreFailure } from "../../../src/data/store/port";
 import * as copy from "../../../src/features/tasks/copy";
 import { DETAIL } from "../../../src/features/tasks/lists/copy";
@@ -186,7 +187,9 @@ describe("L13: Sharing on a list (WEB-12a's editor, consumed)", () => {
     await t.until(
       () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
     );
-    fireEvent.click(screen.getByRole("button", { name: DETAIL.sharing }));
+    // Sharing is behind "More" (the Final design, 8 November 2026).
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    fireEvent.click(screen.getByRole("menuitem", { name: DETAIL.sharing }));
     await t.until(() => t.sharing.calls.some((c) => c.op === "readPolicy"));
     expect(screen.queryByRole("dialog"), "the sharing editor").not.toBeNull();
     expect(
@@ -219,7 +222,8 @@ describe("L13: Sharing on a list (WEB-12a's editor, consumed)", () => {
     await t.until(
       () => document.querySelector(`[data-list-detail="${fresh}"]`) !== null,
     );
-    const sharing = screen.queryByRole("button", {
+    fireEvent.click(screen.getByRole("button", { name: MENU_COPY.more }));
+    const sharing = screen.queryByRole("menuitem", {
       name: DETAIL.sharing,
     }) as HTMLButtonElement | null;
     expect(sharing?.disabled, "Sharing is withheld").toBe(true);

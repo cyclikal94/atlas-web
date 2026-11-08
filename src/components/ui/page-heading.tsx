@@ -8,26 +8,29 @@ import { cn } from "../../lib/utils";
 export function PageHeading({
   children,
   eyebrow = false,
+  as: Tag = "h1",
   className,
 }: {
   children: ReactNode;
   eyebrow?: boolean;
+  /** An `h2` when the page is drawn inside another page (a task opened beside the day), which keeps its own h1. */
+  as?: "h1" | "h2";
   className?: string;
 }) {
   return (
-    <h1
-      data-page-heading=""
+    <Tag
+      {...(Tag === "h1" ? { "data-page-heading": "" } : {})}
       tabIndex={-1}
       // Route focus lands here: the ring hugs the words (`w-fit`), not the whole column.
       className={cn(
         "w-fit max-w-full rounded-sm",
         eyebrow
           ? "text-xs font-semibold uppercase tracking-[0.08em] text-primary"
-          : "text-2xl font-semibold leading-tight tracking-tight text-foreground tablet:text-3xl",
+          : "text-[28px] font-semibold leading-[1.08] tracking-[-0.03em] text-foreground tablet:text-[40px] tablet:leading-[1.05] tablet:tracking-[-0.035em]",
         className,
       )}
     >
       {children}
-    </h1>
+    </Tag>
   );
 }

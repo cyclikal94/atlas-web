@@ -1,8 +1,9 @@
 import { useRouterState } from "@tanstack/react-router";
-import { PanelLeftClose, PanelLeftOpen, Pin } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import type { ReactNode } from "react";
 import { AtlasLockup } from "../../components/ui/brand";
 import { List } from "../../components/ui/list";
+import { ColourDot } from "../../components/ui/row";
 import { SyncStatusChip } from "../../components/ui/sync-status";
 import { Tooltip } from "../../components/ui/tooltip";
 import { cn } from "../../lib/utils";
@@ -160,11 +161,13 @@ export function Rail({
                   collapsed={false}
                   exact
                   icon={
-                    <Pin
+                    // A pinned list keeps its colour (the Final design): the dot it has on its rows, centred in the icon column.
+                    <span
                       aria-hidden="true"
-                      className="size-[18px] flex-none group-data-[status=active]:text-primary"
-                      strokeWidth={1.9}
-                    />
+                      className="flex w-[18px] flex-none justify-center"
+                    >
+                      <ColourDot id={list.id} size={8} />
+                    </span>
                   }
                 />
               </li>
@@ -182,11 +185,15 @@ export function Rail({
         )}
       >
         {collapsed ? null : footerSlot}
-        <SyncStatusChip variant={collapsed ? "rail-collapsed" : "rail"} />
         {renderSlot(env.accountSlot, collapsed)}
+        {/* The Final design: the sync status and the collapse toggle share the rail's last row. */}
         <div
-          className={cn("flex", collapsed ? "justify-center" : "justify-end")}
+          className={cn(
+            "flex items-center",
+            collapsed ? "flex-col gap-1" : "gap-1",
+          )}
         >
+          <SyncStatusChip variant={collapsed ? "rail-collapsed" : "rail"} />
           {collapsed ? (
             <Tooltip content={RAIL_COPY.expand}>{toggle}</Tooltip>
           ) : (

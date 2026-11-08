@@ -33,16 +33,26 @@ export function RailItem({
     (other) =>
       other !== destination && other.to.startsWith(`${destination.to}/`),
   );
+  const hash = useRouterState({ select: (state) => state.location.hash });
+  // A destination that is an anchor of a page (Upcoming) and the page it is on (Today) are told apart by the hash.
+  const anchored =
+    destination.hash !== undefined ||
+    destinations.some(
+      (other) => other.to === destination.to && other.hash !== undefined,
+    );
   return (
     <RailLink
       to={destination.to}
+      {...(destination.hash ? { hash: destination.hash } : {})}
       label={label}
       collapsed={collapsed}
       {...(override !== undefined
         ? { active: override }
-        : nested
-          ? { active: destinationFor(pathname)?.id === destination.id }
-          : {})}
+        : anchored
+          ? { active: destinationFor(pathname, hash)?.id === destination.id }
+          : nested
+            ? { active: destinationFor(pathname)?.id === destination.id }
+            : {})}
       icon={
         <Icon
           aria-hidden="true"
@@ -58,6 +68,7 @@ export function RailItem({
 export function RailLink({
   to,
   params,
+  hash,
   label,
   collapsed,
   icon,
@@ -67,6 +78,7 @@ export function RailLink({
 }: {
   to: string;
   params?: Record<string, string>;
+  hash?: string;
   label: string;
   collapsed: boolean;
   icon: ReactNode;
@@ -80,8 +92,11 @@ export function RailLink({
     <Link
       to={to}
       params={params}
+      hash={hash}
       activeOptions={
-        exact || active !== undefined ? { exact: true } : undefined
+        exact || active !== undefined
+          ? { exact: true, includeHash: true }
+          : undefined
       }
       {...(active ? { "data-status": "active", "aria-current": "page" } : {})}
       aria-label={label}
