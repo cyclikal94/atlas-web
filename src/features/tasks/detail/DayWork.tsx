@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { GroupedBox } from "../../../components/ui/grouped";
 import type { DraftWithCommand } from "../../../data";
 import type { TaskActions } from "../actions";
@@ -83,6 +83,17 @@ export function DayWork({
       : null;
   const openDialog = (root: RootEvidence | null) =>
     setDialog({ root, replacing: null });
+  // The timer's section into view with its control focused: the facts strip's Timer cell and Focus's Timer act (#timer) lead here.
+  const focusTimer = () => {
+    const block = document.querySelector<HTMLElement>(
+      "[data-day-work] [data-timer-block]",
+    );
+    if (!block) return;
+    block.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    block
+      .querySelector<HTMLElement>("button:not([disabled])")
+      ?.focus({ preventScroll: true });
+  };
   const review = (
     draft: DraftWithCommand,
     mode: Mode,
@@ -124,24 +135,13 @@ export function DayWork({
         />
       ) : null}
       {/* The Final design: the facts strip, then the day's action row under it (on the phone the row stays at the bottom of the viewport). */}
+      <TimerHash timer={focusTimer} />
       <div className="flex flex-col gap-5" data-day-top="">
         {typeof facts === "function"
           ? facts({
               deps,
               see: () => openDialog(null),
-              timer: () => {
-                const block = document.querySelector<HTMLElement>(
-                  "[data-day-work] [data-timer-block]",
-                );
-                if (!block) return;
-                block.scrollIntoView?.({
-                  block: "nearest",
-                  behavior: "smooth",
-                });
-                block
-                  .querySelector<HTMLElement>("button:not([disabled])")
-                  ?.focus({ preventScroll: true });
-              },
+              timer: focusTimer,
             })
           : facts}
         <RecordCard
@@ -210,4 +210,15 @@ export function DayWork({
       ) : null}
     </>
   );
+}
+
+/** A page opened at #timer (Focus's Timer act) lands on the timer's section once it is drawn. */
+function TimerHash({ timer }: { timer(): void }) {
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, when the day's work mounts
+  useEffect(() => {
+    if (window.location.hash !== "#timer") return;
+    const frame = requestAnimationFrame(timer);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  return null;
 }

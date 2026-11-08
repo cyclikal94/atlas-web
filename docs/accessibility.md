@@ -148,6 +148,14 @@ A green layer 1 does not mean the product is accessible. It means the failures a
   name says what becomes a chip. The facts are buttons with `aria-expanded`, each opening a `dialog` named for the choice under its cell,
   as the task page's are. Add task and Add and another are plain buttons; a withheld save says why beside it.
 
+### Focus and Timers (the Final design, 8 November 2026)
+
+- Focus's acts are buttons whose key is shown as a `kbd` inside the label on the desktop (Done D, Later L, Skip S, Timer T); the keys
+  work only while no field has focus. The order beside the current thing is a list of buttons (`aria-current` on the current one); a
+  thing put off reads "later" in the order. The phone's ring is decorative (`aria-hidden` SVG) with its reading as text beside it.
+- The timers page's window is a segmented control named "Show" (pressed state on the chosen pill); the goals aside is an `aside` named
+  for the window with a list of tasks, each a link, its reading as text and a progress bar.
+
 ## The dependency graph (WEB-18)
 
 - **Decorative map, real list** (TASK-04: "the diagram is decoration… the list is the real control"). The map is `aria-hidden` and holds nothing

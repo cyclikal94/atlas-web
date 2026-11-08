@@ -295,7 +295,8 @@ test.describe("keyboard and focus (B8)", () => {
     // Strict on every engine, macOS WebKit included (Option+Tab there): forward, reverse, and a whole turn.
     const ring = await expectFocusLoop(page, dialog);
     expect(ring.join(" | ")).toContain("Close");
-    expect(ring.length, "sync control, Close and the four links").toBe(6);
+    // Up to date, the sheet carries no sync control (it shows only while there is news, since 8 November 2026): Close and the four links.
+    expect(ring.length, "Close and the four links").toBe(5);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     await expect(more).toBeFocused();
@@ -321,9 +322,22 @@ test.describe("keyboard and focus (B8)", () => {
         const close = await dialog
           .getByRole("button", { name: "Close" })
           .boundingBox();
-        const chip = await dialog
-          .getByRole("button", { name: /Open (sync queue|conflicts)/ })
-          .boundingBox();
+        const chipControl = dialog.getByRole("button", {
+          name: /Open (sync queue|conflicts)/,
+        });
+        if (state === "phase=synced") {
+          // Up to date, a dialog carries no sync control (it shows only while there is news, since 8 November 2026).
+          await expect(chipControl, `no sync control, ${where}`).toHaveCount(0);
+          if (!close) throw new Error(`Close not laid out (${where})`);
+          expect(close.width, `Close width, ${where}`).toBeGreaterThanOrEqual(
+            44,
+          );
+          expect(close.height, `Close height, ${where}`).toBeGreaterThanOrEqual(
+            44,
+          );
+          continue;
+        }
+        const chip = await chipControl.boundingBox();
         const title = await dialog
           .getByRole("heading", { name: "Signing in" })
           .boundingBox();

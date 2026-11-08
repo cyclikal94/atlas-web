@@ -14,9 +14,12 @@ import { Button } from "../../../components/ui/button";
 import { Pill } from "../../../components/ui/chip";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { GroupedBox } from "../../../components/ui/grouped";
+import { PageGrid } from "../../../components/ui/page-grid";
 import { Eyebrow, PageHeader } from "../../../components/ui/page-header";
 import { PageHeading } from "../../../components/ui/page-heading";
+import { Progress } from "../../../components/ui/progress";
 import { RowGroupHeading } from "../../../components/ui/row";
+import { Segmented } from "../../../components/ui/segmented";
 import {
   type AccountService,
   commitTimerCopy,
@@ -42,8 +45,10 @@ import {
   parseOccurrenceData,
 } from "../model/contract";
 import { progressId } from "../model/ids";
+import { addDays, dayStart, todayIn } from "../model/time";
 import {
   elapsed,
+  isTimerGoal,
   SEVEN_DAYS,
   type StopChoice,
   stillRunning,
@@ -87,7 +92,51 @@ export const TIMERS_COPY = {
   earlier: "Earlier",
   since: (time: string) => `since ${time}`,
   tasks: "Tasks",
+  /** The Final design (phase 12, 8 November 2026): the window pills, the summary's total and the goals aside. */
+  windows: { week: "This week", month: "This month", all: "All" } as const,
+  windowLabel: "Show",
+  total: (duration: string, window: "week" | "month" | "all") =>
+    window === "week"
+      ? `${duration} this week`
+      : window === "month"
+        ? `${duration} this month`
+        : `${duration} in all`,
+  goals: {
+    week: "Goals this week",
+    month: "Goals this month",
+    all: "Time per task",
+  } as const,
+  goalOf: (done: string, goal: string) => `${done} / ${goal}`,
+  noGoals: "Nothing timed yet.",
 } as const;
+
+export type TimerWindow = "week" | "month" | "all";
+
+/** The first second of the window, in the display zone: Monday of this week, the first of this month, or the beginning of time. */
+export function windowStart(
+  window: TimerWindow,
+  today: string,
+  zone: string,
+): number {
+  if (window === "all") return 0;
+  if (window === "month") return dayStart(`${today.slice(0, 7)}-01`, zone);
+  const weekday = (new Date(`${today}T00:00:00Z`).getUTCDay() + 6) % 7;
+  return dayStart(addDays(today, -weekday), zone);
+}
+
+/** How many of a task's days a window holds, from its cadence: a daily task seven a week, a weekly one one, anything else one. */
+export function daysInWindow(
+  repeat: { frequency: string; interval: number } | null,
+  window: TimerWindow,
+): number {
+  if (window === "all" || repeat === null) return 1;
+  const span = window === "week" ? 7 : 30;
+  if (repeat.frequency === "daily")
+    return Math.max(1, Math.round(span / Math.max(1, repeat.interval)));
+  if (repeat.frequency === "weekly")
+    return Math.max(1, Math.round(span / 7 / Math.max(1, repeat.interval)));
+  return 1;
+}
 
 const PAGE = 50;
 const TIMER_KINDS = ["start_timer", "stop_timer", "cancel_timer"];
@@ -497,6 +546,7 @@ export function TimersPage() {
   const evidence = useTimerEvidence();
   const copied = evidence.copy;
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [window, setWindow] = useState<TimerWindow>("week");
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => {
@@ -675,7 +725,67 @@ export function TimersPage() {
       closedAt: closed,
     };
   };
-  const historyRows = history.value.kind === "ready" ? history.value.rows : [];
+  const allHistory = history.value.kind === "ready" ? history.value.rows : [];
+  // The window (the Final design): this week, this month or everything; a session counts by when it ended.
+  const since = windowStart(window, todayIn(zone, now), zone);
+  const historyRows = allHistory.filter(
+    (row) => row.stopped_at === null || row.stopped_at >= since,
+  );
+  // The goals aside: every timed task of the window, its time against its goal (from a day of it this device holds).
+  const historyDays = useCachedResources(
+    allHistory.flatMap((r) =>
+      r.access === "available" ? [r.occurrence_id] : [],
+    ),
+  );
+  const goals = (() => {
+    const perTask = new Map<
+      string,
+      {
+        title: string;
+        seconds: number;
+        goal: number | null;
+        occurrence: string;
+      }
+    >();
+    const add = (row: AccountTimerSession, seconds: number) => {
+      if (row.access !== "available") return;
+      const entry = perTask.get(row.task_id) ?? {
+        title: row.task_title,
+        seconds: 0,
+        goal: null,
+        occurrence: row.occurrence_id,
+      };
+      entry.seconds += Math.max(0, seconds);
+      perTask.set(row.task_id, entry);
+    };
+    for (const row of historyRows)
+      if (row.stopped_at !== null) add(row, row.stopped_at - row.started_at);
+    for (const row of shownRunning)
+      add(row, Math.floor(now / 1000) - row.started_at);
+    for (const entry of perTask.values()) {
+      const day =
+        (historyDays.status === "ready"
+          ? historyDays.value[entry.occurrence]?.merged
+          : undefined) ??
+        (cached.status === "ready"
+          ? cached.value[entry.occurrence]?.merged
+          : undefined);
+      const data = day ? parseOccurrenceData(day.value) : null;
+      if (
+        data !== null &&
+        isTimerGoal(data) &&
+        data.definition.goal.kind === "numeric" &&
+        data.definition.goal.minimum !== null
+      )
+        entry.goal =
+          Number(data.definition.goal.minimum) *
+          daysInWindow(data.definition.schedule.repeat, window);
+    }
+    return [...perTask.entries()]
+      .map(([taskId, entry]) => ({ taskId, ...entry }))
+      .sort((a, b) => b.seconds - a.seconds);
+  })();
+  const totalSeconds = goals.reduce((sum, g) => sum + g.seconds, 0);
   const nothing =
     running.value.kind === "ready" &&
     history.value.kind === "ready" &&
@@ -700,9 +810,22 @@ export function TimersPage() {
         summary={
           <span data-timers-summary="">
             {running.value.kind === "ready" || offline
-              ? TIMERS_COPY.summary(shownRunning.length)
+              ? totalSeconds > 0
+                ? `${TIMERS_COPY.summary(shownRunning.length)} · ${TIMERS_COPY.total(copy.DURATION(String(totalSeconds)), window)}`
+                : TIMERS_COPY.summary(shownRunning.length)
               : TIMERS_COPY.loading}
           </span>
+        }
+        actions={
+          <Segmented
+            label={TIMERS_COPY.windowLabel}
+            value={window}
+            onChange={(w) => setWindow(w as TimerWindow)}
+            options={(["week", "month", "all"] as const).map((w) => ({
+              value: w,
+              label: TIMERS_COPY.windows[w],
+            }))}
+          />
         }
       />
       {nothing ? (
@@ -710,142 +833,202 @@ export function TimersPage() {
           {TIMERS_COPY.empty}
         </EmptyState>
       ) : (
-        <div className="flex flex-col gap-5" data-timers-sections="">
-          <section
-            aria-labelledby={heading}
-            data-timers-running={running.value.kind}
-            className="flex flex-col gap-2"
-          >
-            <RowGroupHeading id={heading}>
-              {TIMERS_COPY.runningNow}
-            </RowGroupHeading>
-            {running.value.kind === "loading" ? (
-              <div aria-busy="true" className="flex flex-col gap-2">
-                <span className="sr-only">{TIMERS_COPY.loading}</span>
-                {[0, 1].map((n) => (
-                  <div key={n} className="min-h-12 rounded-lg bg-card" />
-                ))}
-              </div>
-            ) : running.value.kind === "error" ? (
-              <div className="flex flex-col gap-1">
+        <PageGrid
+          aside={
+            <aside
+              aria-label={TIMERS_COPY.goals[window]}
+              className="flex flex-col gap-3 rounded-[14px] border border-sidebar-border bg-sidebar p-5"
+              data-timers-goals=""
+            >
+              <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                {TIMERS_COPY.goals[window]}
+              </h2>
+              {goals.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  {TIMERS_COPY.failed}
+                  {TIMERS_COPY.noGoals}
                 </p>
-                {running.value.requestId ? (
-                  <p className="select-all font-num text-xs text-muted-foreground">
-                    {copy.REQUEST_ID(running.value.requestId)}
+              ) : (
+                <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
+                  {goals.map((goal) => (
+                    <li
+                      key={goal.taskId}
+                      className="flex flex-col gap-1.5 py-2.5 first:pt-0 last:pb-0"
+                      data-timers-goal={goal.taskId}
+                    >
+                      <div className="flex items-baseline justify-between gap-3 text-sm">
+                        <Link
+                          to="/tasks/$taskId"
+                          params={{ taskId: goal.taskId }}
+                          search={{}}
+                          className="min-w-0 truncate font-medium text-foreground hover:underline"
+                        >
+                          {goal.title}
+                        </Link>
+                        <span className="font-num flex-none text-xs text-muted-foreground">
+                          {goal.goal === null
+                            ? copy.DURATION(String(goal.seconds))
+                            : TIMERS_COPY.goalOf(
+                                copy.DURATION(String(goal.seconds)),
+                                copy.DURATION(String(goal.goal)),
+                              )}
+                        </span>
+                      </div>
+                      {goal.goal === null ? null : (
+                        <Progress
+                          value={Math.min(
+                            100,
+                            Math.round((goal.seconds / goal.goal) * 100),
+                          )}
+                          className="h-1.5"
+                          indicatorClassName={
+                            goal.seconds >= goal.goal ? "bg-success" : ""
+                          }
+                        />
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </aside>
+          }
+        >
+          <div className="flex flex-col gap-5" data-timers-sections="">
+            <section
+              aria-labelledby={heading}
+              data-timers-running={running.value.kind}
+              className="flex flex-col gap-2"
+            >
+              <RowGroupHeading id={heading}>
+                {TIMERS_COPY.runningNow}
+              </RowGroupHeading>
+              {running.value.kind === "loading" ? (
+                <div aria-busy="true" className="flex flex-col gap-2">
+                  <span className="sr-only">{TIMERS_COPY.loading}</span>
+                  {[0, 1].map((n) => (
+                    <div key={n} className="min-h-12 rounded-lg bg-card" />
+                  ))}
+                </div>
+              ) : running.value.kind === "error" ? (
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm text-muted-foreground">
+                    {TIMERS_COPY.failed}
                   </p>
-                ) : null}
-                <span>
-                  <Button onClick={running.retry}>{copy.TRY_AGAIN}</Button>
-                </span>
-              </div>
-            ) : offline ? (
-              <>
-                {copied ? (
-                  <p className="text-xs text-muted-foreground">
-                    {TIMERS_COPY.lastChecked(
-                      momentLabel(copied.readAt, now, zone),
-                    )}
-                  </p>
-                ) : null}
-                {copiedRows.length === 0 ? (
+                  {running.value.requestId ? (
+                    <p className="select-all font-num text-xs text-muted-foreground">
+                      {copy.REQUEST_ID(running.value.requestId)}
+                    </p>
+                  ) : null}
+                  <span>
+                    <Button onClick={running.retry}>{copy.TRY_AGAIN}</Button>
+                  </span>
+                </div>
+              ) : offline ? (
+                <>
+                  {copied ? (
+                    <p className="text-xs text-muted-foreground">
+                      {TIMERS_COPY.lastChecked(
+                        momentLabel(copied.readAt, now, zone),
+                      )}
+                    </p>
+                  ) : null}
+                  {copiedRows.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      {TIMERS_COPY.noRunning}
+                    </p>
+                  ) : (
+                    rowsBox(
+                      copiedRows.map((row) => (
+                        <SessionRow
+                          key={row.id}
+                          row={row}
+                          nowMs={now}
+                          zone={zone}
+                          offlineTitle={offlineTitleOf(row)}
+                          act={
+                            offlineTitleOf(row) === null || !env.writable
+                              ? null
+                              : (r, w) => void act(r, w)
+                          }
+                          {...rowProps(row)}
+                        />
+                      )),
+                    )
+                  )}
+                </>
+              ) : runningRows.length === 0 ? (
+                nothing ? null : (
                   <p className="text-sm text-muted-foreground">
                     {TIMERS_COPY.noRunning}
                   </p>
-                ) : (
-                  rowsBox(
-                    copiedRows.map((row) => (
-                      <SessionRow
-                        key={row.id}
-                        row={row}
-                        nowMs={now}
-                        zone={zone}
-                        offlineTitle={offlineTitleOf(row)}
-                        act={
-                          offlineTitleOf(row) === null || !env.writable
-                            ? null
-                            : (r, w) => void act(r, w)
-                        }
-                        {...rowProps(row)}
-                      />
-                    )),
-                  )
-                )}
-              </>
-            ) : runningRows.length === 0 ? (
-              nothing ? null : (
-                <p className="text-sm text-muted-foreground">
-                  {TIMERS_COPY.noRunning}
-                </p>
-              )
-            ) : (
-              rowsBox(
-                runningRows.map((row) => (
-                  <SessionRow
-                    key={row.id}
-                    row={row}
-                    nowMs={now}
-                    zone={zone}
-                    act={env.writable ? (r, w) => void act(r, w) : null}
-                    {...rowProps(row)}
-                  />
-                )),
-              )
-            )}
-            {running.more ? (
-              <span>
-                <Button variant="ghost" onClick={running.more}>
-                  {TIMERS_COPY.loadMore}
-                </Button>
-              </span>
-            ) : null}
-          </section>
-          <section
-            aria-labelledby={historyHeading}
-            data-timers-history={history.value.kind}
-            className="flex flex-col gap-2"
-          >
-            <RowGroupHeading id={historyHeading}>
-              {TIMERS_COPY.earlier}
-            </RowGroupHeading>
-            {history.value.kind === "offline" ? (
-              <p className="text-sm text-muted-foreground">
-                {TIMERS_COPY.historyOffline}
-              </p>
-            ) : history.value.kind === "loading" ? (
-              <div aria-busy="true" className="min-h-12 rounded-lg bg-card" />
-            ) : history.value.kind === "error" ? (
-              <div className="flex flex-col gap-1">
-                <p className="text-sm text-muted-foreground">
-                  {TIMERS_COPY.failed}
-                </p>
+                )
+              ) : (
+                rowsBox(
+                  runningRows.map((row) => (
+                    <SessionRow
+                      key={row.id}
+                      row={row}
+                      nowMs={now}
+                      zone={zone}
+                      act={env.writable ? (r, w) => void act(r, w) : null}
+                      {...rowProps(row)}
+                    />
+                  )),
+                )
+              )}
+              {running.more ? (
                 <span>
-                  <Button onClick={history.retry}>{copy.TRY_AGAIN}</Button>
+                  <Button variant="ghost" onClick={running.more}>
+                    {TIMERS_COPY.loadMore}
+                  </Button>
                 </span>
-              </div>
-            ) : historyRows.length === 0 ? null : (
-              rowsBox(
-                historyRows.map((row) => (
-                  <SessionRow
-                    key={row.id}
-                    row={row}
-                    nowMs={now}
-                    zone={zone}
-                    act={null}
-                  />
-                )),
-              )
-            )}
-            {history.more ? (
-              <span>
-                <Button variant="ghost" onClick={history.more}>
-                  {TIMERS_COPY.loadMore}
-                </Button>
-              </span>
-            ) : null}
-          </section>
-        </div>
+              ) : null}
+            </section>
+            <section
+              aria-labelledby={historyHeading}
+              data-timers-history={history.value.kind}
+              className="flex flex-col gap-2"
+            >
+              <RowGroupHeading id={historyHeading}>
+                {TIMERS_COPY.earlier}
+              </RowGroupHeading>
+              {history.value.kind === "offline" ? (
+                <p className="text-sm text-muted-foreground">
+                  {TIMERS_COPY.historyOffline}
+                </p>
+              ) : history.value.kind === "loading" ? (
+                <div aria-busy="true" className="min-h-12 rounded-lg bg-card" />
+              ) : history.value.kind === "error" ? (
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm text-muted-foreground">
+                    {TIMERS_COPY.failed}
+                  </p>
+                  <span>
+                    <Button onClick={history.retry}>{copy.TRY_AGAIN}</Button>
+                  </span>
+                </div>
+              ) : historyRows.length === 0 ? null : (
+                rowsBox(
+                  historyRows.map((row) => (
+                    <SessionRow
+                      key={row.id}
+                      row={row}
+                      nowMs={now}
+                      zone={zone}
+                      act={null}
+                    />
+                  )),
+                )
+              )}
+              {history.more ? (
+                <span>
+                  <Button variant="ghost" onClick={history.more}>
+                    {TIMERS_COPY.loadMore}
+                  </Button>
+                </span>
+              ) : null}
+            </section>
+          </div>
+        </PageGrid>
       )}
     </article>
   );

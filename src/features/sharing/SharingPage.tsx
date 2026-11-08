@@ -1,10 +1,12 @@
 import { Link } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
 import { useId } from "react";
 import { buttonVariants } from "../../components/ui/button";
 import { GroupedBox, GroupedSection } from "../../components/ui/grouped";
 import { List } from "../../components/ui/list";
 import { Eyebrow, PageHeader } from "../../components/ui/page-header";
 import { PageHeading } from "../../components/ui/page-heading";
+import { ListRow } from "../../components/ui/row";
 import { TEMPLATE_KINDS, useSharingDefaults } from "../../data";
 import * as copy from "./copy";
 import { useSharingEnv } from "./env";
@@ -40,19 +42,7 @@ export function SharingPage() {
           data-sharing-section="defaults"
           heading={<h2 id={heading}>{copy.DEFAULTS_HEADING}</h2>}
         >
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            {copy.DEFAULTS_INTRO}
-          </p>
-          <span>
-            <Link
-              to="/sharing/defaults"
-              search={{ kind: "person" }}
-              data-sharing-link="defaults"
-              className={buttonVariants({ variant: "outline" })}
-            >
-              {copy.DEFAULTS_EDIT}
-            </Link>
-          </span>
+          {/* The Final design (phase 12): each kind a row with its default as the fact, leading to the defaults editor on that kind. */}
           {record === null ? (
             <p
               className="text-sm text-muted-foreground"
@@ -63,35 +53,52 @@ export function SharingPage() {
                 : copy.DEFAULTS_NONE_YET}
             </p>
           ) : (
-            <>
-              <List className="flex flex-col divide-y divide-border rounded-lg border border-border">
-                {TEMPLATE_KINDS.map((kind) => {
-                  const described = describeTemplate(
-                    record.snapshot.defaults[kind],
-                    record.snapshot.defaults.primary_household_id,
-                    record.snapshot.households,
-                  );
-                  return (
-                    <li
-                      key={kind}
-                      data-defaults-kind={kind}
-                      className="flex list-none flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2.5"
+            <List className="flex flex-col">
+              {TEMPLATE_KINDS.map((kind) => {
+                const described = describeTemplate(
+                  record.snapshot.defaults[kind],
+                  record.snapshot.defaults.primary_household_id,
+                  record.snapshot.households,
+                );
+                return (
+                  <li
+                    key={kind}
+                    data-defaults-kind={kind}
+                    className="list-none"
+                  >
+                    <ListRow
+                      to="/sharing/defaults"
+                      search={{ kind }}
+                      fact={described.summary}
+                      trailing={
+                        <ChevronRight
+                          aria-hidden="true"
+                          className="size-3.5 flex-none text-muted-foreground"
+                        />
+                      }
                     >
-                      <span className="w-24 text-sm font-medium text-foreground">
-                        {KIND_LABEL[kind]}
-                      </span>
-                      <span className="min-w-0 flex-1 text-sm text-foreground">
-                        {described.summary}
-                      </span>
-                    </li>
-                  );
-                })}
-              </List>
-              <p className="text-xs text-muted-foreground">
-                {copy.AS_OF(formatWhen(record.fetched_at, env.now()))}
-              </p>
-            </>
+                      {KIND_LABEL[kind]}
+                    </ListRow>
+                  </li>
+                );
+              })}
+            </List>
           )}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <Link
+              to="/sharing/defaults"
+              search={{ kind: "person" }}
+              data-sharing-link="defaults"
+              className={buttonVariants({ variant: "outline" })}
+            >
+              {copy.DEFAULTS_EDIT}
+            </Link>
+            {record === null ? null : (
+              <span className="text-xs text-muted-foreground">
+                {copy.AS_OF(formatWhen(record.fetched_at, env.now()))}
+              </span>
+            )}
+          </div>
         </GroupedSection>
         <GroupedSection
           aria-labelledby={items}

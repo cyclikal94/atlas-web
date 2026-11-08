@@ -117,10 +117,22 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     form (`/tasks/new`, or `?new=1` in the chosen container). The day's controls (the arrows, the date, the time zone) sit on the sticky
     bar with the filters.
   - **Focus mode (8 November 2026).** `/focus?day=&tz=` (`focus/FocusPage.tsx`, from the crosshair beside the search pill): the day's
-    rows in Today's order, one at a time, the current one large with its time, its line and Done / Skip / Open; ← and → move, D marks
-    done (an amount or a checklist opens the task's page to record), S skips (closes the day without completing, as "This day" does),
-    Escape returns to the day; the day in order beside it, with the done count. On the phone the order is a row of bars at the top and
-    the acts sit at the bottom.
+    rows in Today's order, one at a time, the current one large with its time, its line and Done / Later / Skip / Timer / Open, the
+    keys shown on the acts (phase 12, 8 November 2026, "FD_Focus"); ← and → move, D marks done (an amount or a checklist opens the
+    task's page to record), L puts the thing off to the end of this session's order (marked "later" in the order; nothing is saved), S
+    skips (closes the day without completing, as "This day" does), T (a task measured in time only) opens the task's page at its timer
+    section (`#timer`: `DayWork` scrolls to the timer block and focuses its control), Escape returns to the day; the day in order beside
+    it, with the done count, and under it "Meanwhile" (`data-focus-meanwhile`): the day's shared tasks whose joint result says someone
+    else finished them (the names live in streams this device may not hold, so the line says "done by someone else"). On the phone the
+    order is a row of bars at the top, the four acts sit at the bottom without key caps, and a timed task shows a ring
+    (`data-focus-ring`, the share in percent) of its time today against its goal ("23 min of 20 min today").
+  - **Timers (phase 12, 8 November 2026, "FD_Timers").** `/tasks/timers` (`timers/TimersPage.tsx`) keeps its rows ("Running now" with
+    Stop and Discard, "Earlier") and gains the window pills (Show: This week / This month / All, `windowStart`: Monday of this week,
+    the first of the month, or everything; a session counts by when it ended), the summary's total ("1 running · 50 min this week")
+    and the "Goals this week" aside (`data-timers-goals`, `data-timers-goal=<taskId>`; the desktop's aside column, under the rows on
+    narrower screens): each timed task of the window with its time (stopped sessions plus the running ones' elapsed) against its goal
+    (the day's minimum × the days the window holds by its cadence, `daysInWindow`: a daily task seven a week, a weekly one one), a
+    bar that turns green when met; a task whose day this device does not hold shows its time alone.
   - **The calendar (8 November 2026, revised the same day after the review).** `/calendar?view=month|week&weekends=1|0&at=YYYY-MM-DD&tz=`
     (`calendar/CalendarPage.tsx`, the arithmetic in `calendar/model.ts`; `month=YYYY-MM` is still read as the first of that month for one
     release). The page is the "FD_Calendar" frame's anatomy, and its header STAYS at the top as the reader scrolls (revised after

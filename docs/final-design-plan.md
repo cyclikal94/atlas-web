@@ -160,8 +160,13 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   to the sync screens. Not done: people and #lists as chips (no list-on-create in the backend; "Who" is participation, not a person);
   the "Looks like" aside (the preset picker keeps its dialog before the form: its retention and recovery contracts, R33 and DA-R40-E,
   and some forty tests sit on it); the Reminder cell (no backend).
-- **Phase 12 — Timers, Focus, Sharing.** The goals aside; Focus's Later / Timer / key caps / "Meanwhile" and the phone ring;
-  Sharing on the row design or folded into People and "Seen by".
+- **Phase 12 — Timers, Focus, Sharing (done, 8 November 2026).** Timers: the window pills (This week / This month / All), the
+  summary's total and the "Goals this week" aside (time per task against its goal, a bar). Focus: Done D / Later L / Skip S / Timer T
+  with the keys on the acts, Later putting a thing to the end of the session's order, Timer landing on the task's timer section,
+  "Meanwhile" under the order, and the phone's ring of a timed task's time today. Sharing: the defaults as rows (each kind with its
+  default as the fact, leading to the editor on that kind), the intro prose gone. Not done: the phone ring's Pause / Done for today /
+  Discard (a running timer's state lives in the task's timer block; the ring shows the day's recorded time), names in "Meanwhile"
+  (the others' streams), the Sharing page folded into People (kept as a page).
 - **Phase 13 — Motion and feel (first pass done, pulled forward).** On the stylesheet's veiled entrances and stagger: a tick pops
   when it completes; the day's title, the calendar's month and Focus's thing swap in with a rise; the side peek slides in from its
   edge and the split pane rises; the days ahead rise in with their rows one after another; pills, buttons and ticks shrink a touch

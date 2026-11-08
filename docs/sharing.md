@@ -32,7 +32,7 @@ defaultsReviewCase, reviewKinds, parseDefaultsContext, TEMPLATE_KINDS and the sn
 
 **`ResourcePolicyEditor`** opens on a resource the cache holds (`useCachedResource`), reads `GET /policies/{id}` (owner only; `403` shows "Only the owner can change who can see this", `404` "no longer available") and `GET /households` for labels and the households a grant can name (with its own loading, failure and Try again, read again on reconnect: D-12a-15), shows the effective visibility of the policy as edited, and saves with one `replace_policy` guarded by the policy version it read (never the cache's `policy_version`, which may lag: D-12a-3). It renders its own absent, offline, owner-only, gone, conflict and uncertain states. It knows nothing about any resource kind. `onSaved` receives the receipt's revision; return `false` to keep the dialog open.
 
-**Routes** (D-12a-7): `/sharing` (the resolved defaults per kind, item-sharing explanation, the household demonstration), `/sharing/defaults?kind=person|field|task|list|progress` (WF-SHARING-03) and `/sharing/items/<id>` (WF-SHARING-04). The directory lookup (WF-SHARING-05) is a view inside those dialogs (D-12a-11).
+**Routes** (D-12a-7): `/sharing` (the resolved defaults per kind as rows leading to the editor on that kind, since the Final design's phase 12 of 8 November 2026; the item-sharing explanation; the household demonstration), `/sharing/defaults?kind=person|field|task|list|progress` (WF-SHARING-03) and `/sharing/items/<id>` (WF-SHARING-04). The directory lookup (WF-SHARING-05) is a view inside those dialogs (D-12a-11).
 
 ### Extensions for WEB-11a
 

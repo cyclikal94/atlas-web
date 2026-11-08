@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Check } from "lucide-react";
+import { Check, Timer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useLayoutMode } from "../../../app/shell/layout-mode";
 import { Button } from "../../../components/ui/button";
@@ -19,6 +19,7 @@ import {
   whoLabel,
 } from "../format";
 import { timeIn } from "../model/time";
+import { isTimerGoal } from "../model/timers";
 import { recordBlock } from "../reasons";
 import { useTodayView } from "../today/useTodayView";
 import type { RowModel } from "../view";
@@ -32,8 +33,17 @@ export const FOCUS_COPY = {
     "Everything on today's list is done. Back to the day to add more.",
   nothing: "Nothing on today's list yet.",
   done: "Done",
+  later: "Later",
   skip: "Skip",
+  timer: "Timer",
   open: "Open",
+  /** The "Meanwhile" aside (the Final design): what the day's shared tasks say others have done. */
+  meanwhile: "Meanwhile",
+  meanwhileDone: (title: string) => `${title} · done by someone else`,
+  meanwhileNone: "Nothing from the others yet.",
+  ofToday: (goal: string) => `of ${goal} today`,
+  nothingYet: "0 min",
+  deferred: "later",
   keys: "← → move between things · Esc back to the day",
   order: "Today, in order",
   wholeDay: "See the whole day",
@@ -70,20 +80,33 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
       (groups.get(g) ?? []).sort(compareRows),
     );
   }, [view.rows, day, zone]);
-  const firstOpen = rows.findIndex((row) => row.outcome !== "complete");
+  // "Later" (the Final design): a thing put off goes to the end of this session's order; the next open one comes up.
+  const [deferred, setDeferred] = useState<readonly string[]>([]);
+  const ordered = useMemo(() => {
+    if (deferred.length === 0) return rows;
+    const rank = new Map(deferred.map((id, i) => [id, i]));
+    return [
+      ...rows.filter((row) => !rank.has(row.id)),
+      ...rows
+        .filter((row) => rank.has(row.id))
+        .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0)),
+    ];
+  }, [rows, deferred]);
+  const firstOpen = ordered.findIndex((row) => row.outcome !== "complete");
   const [index, setIndex] = useState<number | null>(null);
   const current =
-    rows.length === 0
+    ordered.length === 0
       ? null
-      : (rows[Math.min(index ?? Math.max(firstOpen, 0), rows.length - 1)] ??
-        null);
-  const position = current === null ? 0 : rows.indexOf(current) + 1;
+      : (ordered[
+          Math.min(index ?? Math.max(firstOpen, 0), ordered.length - 1)
+        ] ?? null);
+  const position = current === null ? 0 : ordered.indexOf(current) + 1;
   const done = rows.filter((row) => row.outcome === "complete").length;
   const [busy, setBusy] = useState(false);
   const step = (direction: -1 | 1) =>
     setIndex((value) => {
       const from = value ?? Math.max(firstOpen, 0);
-      return Math.max(0, Math.min(rows.length - 1, from + direction));
+      return Math.max(0, Math.min(ordered.length - 1, from + direction));
     });
   const reason =
     current === null
@@ -113,6 +136,22 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
       setBusy(false);
     }
   };
+  const later = () => {
+    if (current === null || current.outcome === "complete") return;
+    const id = current.id;
+    setDeferred((list) => [...list.filter((x) => x !== id), id]);
+    setIndex(null);
+  };
+  const timerTask = current !== null && isTimerGoal(current.data);
+  const openTimer = () => {
+    if (current === null || !timerTask) return;
+    void navigate({
+      to: "/tasks/$taskId",
+      params: { taskId: current.taskId },
+      search: { occurrence: current.id },
+      hash: "timer",
+    });
+  };
   const skip = async () => {
     if (current === null || !current.canEdit || busy) return;
     setBusy(true);
@@ -137,6 +176,8 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
         void navigate({ to: "/today", search: {} });
       else if (event.key === "d" || event.key === "D") void markDone();
       else if (event.key === "s" || event.key === "S") void skip();
+      else if (event.key === "l" || event.key === "L") later();
+      else if (event.key === "t" || event.key === "T") openTimer();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -190,6 +231,18 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
           )}
         </Button>
       )}
+      {current === null || current.outcome === "complete" ? null : (
+        <Button
+          onClick={later}
+          className="h-14 rounded-[14px] text-[15px]"
+          data-focus-later=""
+        >
+          {FOCUS_COPY.later}
+          {phone ? null : (
+            <kbd className="font-num text-xs text-muted-foreground">L</kbd>
+          )}
+        </Button>
+      )}
       {current === null ? null : !current.canEdit || busy ? (
         <Button
           disabled
@@ -210,6 +263,19 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
           )}
         </Button>
       )}
+      {current === null || !timerTask ? null : (
+        <Button
+          onClick={openTimer}
+          className="h-14 rounded-[14px] text-[15px]"
+          data-focus-timer=""
+        >
+          <Timer aria-hidden="true" className="size-4" />
+          {FOCUS_COPY.timer}
+          {phone ? null : (
+            <kbd className="font-num text-xs text-muted-foreground">T</kbd>
+          )}
+        </Button>
+      )}
       {current === null || phone ? null : (
         <Button asChild className="h-14 rounded-[14px] text-[15px]">
           <Link
@@ -223,6 +289,28 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
       )}
     </div>
   );
+  // "Meanwhile": the day's shared tasks whose joint result says someone else finished them (their names live in the streams this
+  // device may not hold, so the line says what it knows).
+  const meanwhile = rows.filter(
+    (row) =>
+      row.outcome !== "complete" &&
+      row.data.definition.participation !== "personal" &&
+      row.joint !== null &&
+      (row.joint.outcome === "complete" || row.joint.outcome === "provisional"),
+  );
+  // The phone's ring (the Final design, FD_FocusPhone): a timed task's time today against its goal.
+  const ring = (() => {
+    if (current === null || !timerTask) return null;
+    const goal = current.data.definition.goal;
+    const minimum =
+      goal.kind === "numeric" && goal.minimum !== null
+        ? Number(goal.minimum)
+        : null;
+    const seconds = Number(current.progress?.period.amount ?? "0") || 0;
+    const share =
+      minimum === null || minimum <= 0 ? 0 : Math.min(1, seconds / minimum);
+    return { seconds, minimum, share };
+  })();
   const stage = view.loading ? (
     <p aria-busy="true" className="text-sm text-muted-foreground">
       {copy.LOADING}
@@ -243,6 +331,50 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
           : FOCUS_COPY.upNext(position, rows.length)}
       </span>
       <div className="flex max-w-[620px] flex-col items-center gap-3">
+        {phone && ring !== null ? (
+          <div
+            className="relative flex size-[168px] items-center justify-center"
+            data-focus-ring={String(Math.round(ring.share * 100))}
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 100 100"
+              className="absolute inset-0 size-full -rotate-90"
+            >
+              <circle
+                cx="50"
+                cy="50"
+                r="44"
+                fill="none"
+                stroke="var(--border)"
+                strokeWidth="6"
+              />
+              <circle
+                cx="50"
+                cy="50"
+                r="44"
+                fill="none"
+                stroke="var(--primary)"
+                strokeWidth="6"
+                strokeLinecap="round"
+                strokeDasharray={`${(ring.share * 276.46).toFixed(1)} 276.46`}
+                className="atlas-transition"
+              />
+            </svg>
+            <div className="flex flex-col items-center gap-0.5">
+              <span className="font-num text-[30px] leading-none tracking-[-0.03em] text-foreground">
+                {ring.seconds < 60
+                  ? FOCUS_COPY.nothingYet
+                  : copy.DURATION(String(ring.seconds))}
+              </span>
+              {ring.minimum === null ? null : (
+                <span className="text-[11px] text-muted-foreground">
+                  {FOCUS_COPY.ofToday(copy.DURATION(String(ring.minimum)))}
+                </span>
+              )}
+            </div>
+          </div>
+        ) : null}
         <span
           className={
             instant !== null
@@ -294,7 +426,7 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
             aria-label={FOCUS_COPY.progress}
             className="m-0 flex list-none gap-1.5 p-0"
           >
-            {rows.map((row) => (
+            {ordered.map((row) => (
               <li
                 key={row.id}
                 aria-label={row.title ?? copy.UNTITLED}
@@ -349,7 +481,7 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
           className="m-0 flex list-none flex-col gap-1 p-0"
           data-focus-order=""
         >
-          {rows.map((row) => {
+          {ordered.map((row) => {
             const isCurrent = row === current;
             const isDone = row.outcome === "complete";
             const at = row.data.slot.instant;
@@ -386,19 +518,43 @@ export function FocusPage({ day, zone }: { day: string; zone: string }) {
                     {row.title ?? copy.UNTITLED}
                   </span>
                   <span className="font-num text-[11px]">
-                    {at !== null
-                      ? timeIn(at, zone)
-                      : row.data.slot.date === null
-                        ? ""
-                        : dayLabel(row.data.slot.date) === dayLabel(day)
+                    {deferred.includes(row.id) && !isDone
+                      ? FOCUS_COPY.deferred
+                      : at !== null
+                        ? timeIn(at, zone)
+                        : row.data.slot.date === null
                           ? ""
-                          : dayLabel(row.data.slot.date)}
+                          : dayLabel(row.data.slot.date) === dayLabel(day)
+                            ? ""
+                            : dayLabel(row.data.slot.date)}
                   </span>
                 </button>
               </li>
             );
           })}
         </ol>
+        {meanwhile.length === 0 ? null : (
+          <div
+            className="flex flex-col gap-1.5 border-t border-sidebar-border pt-3"
+            data-focus-meanwhile=""
+          >
+            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              {FOCUS_COPY.meanwhile}
+            </span>
+            {meanwhile.map((row) => (
+              <span
+                key={row.id}
+                className="flex items-center gap-2 text-[13px] text-muted-foreground"
+              >
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 flex-none rounded-full bg-success"
+                />
+                {FOCUS_COPY.meanwhileDone(row.title ?? copy.UNTITLED)}
+              </span>
+            ))}
+          </div>
+        )}
       </aside>
     </div>
   );
