@@ -1,5 +1,9 @@
 import { CalendarX2, ChevronLeft, ChevronRight } from "lucide-react";
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useUpcomingFold,
+  writeUpcomingFold,
+} from "../../../app/shell/preferences";
 import { Button } from "../../../components/ui/button";
 import { EmptyState } from "../../../components/ui/empty-state";
 import { inputClass } from "../../../components/ui/input";
@@ -130,7 +134,11 @@ export function TodayPage({
   const view = useTodayView(day, zone);
   const actions = useTaskActions();
   const [filter, setFilter] = useState<Filter>("all");
-  const [ahead, setAhead] = useState(section === "upcoming");
+  // The fold is open unless this device folded it away (the day runs on into the days ahead); `/upcoming` always opens it.
+  const foldPreference = useUpcomingFold();
+  const [ahead, setAhead] = useState(
+    section === "upcoming" || foldPreference === "open",
+  );
   const filterName = useId();
   const zoneId = useId();
   const dayId = useId();
@@ -468,7 +476,12 @@ export function TodayPage({
         label={copy.FOLD_UPCOMING}
         expanded={ahead}
         controls={upcomingId}
-        onToggle={() => setAhead((open) => !open)}
+        onToggle={() =>
+          setAhead((open) => {
+            writeUpcomingFold(open ? "folded" : "open");
+            return !open;
+          })
+        }
       />
       {ahead ? (
         <div data-rail-heading={copy.FOLD_UPCOMING}>

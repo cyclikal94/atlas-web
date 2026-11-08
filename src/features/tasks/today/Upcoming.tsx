@@ -13,8 +13,10 @@ import {
   groupOf,
   weekdayLabel,
 } from "../format";
-import { addDays } from "../model/time";
+import { aheadHorizon } from "../model/ahead";
+import { addDays, todayIn } from "../model/time";
 import type { RowModel } from "../view";
+import { Ahead } from "./Ahead";
 import { RailFoldLine, RailHeading, RailLabel } from "./rail";
 import { TodayRow } from "./TodayRow";
 import { useUpcomingView } from "./useUpcomingView";
@@ -93,19 +95,22 @@ export function groupAhead(
     });
   }
   const weeks: DayBlock[] = [];
+  // Tomorrow has its own block: when the day is a Sunday the first week ahead begins the day after tomorrow.
+  const afterTomorrow = addDays(tomorrow, 1);
   for (
     let start = addDays(sunday, 1);
     start <= weeksEnd;
     start = addDays(start, 7)
   ) {
     const end = addDays(start, 6);
+    const first = start < afterTomorrow ? afterTomorrow : start;
     const block: RowModel[] = [];
-    for (let d = start; d <= end; d = addDays(d, 1))
+    for (let d = first; d <= end; d = addDays(d, 1))
       block.push(...(byDay.get(d) ?? []));
     if (block.length === 0) continue;
     weeks.push({
       key: start,
-      label: weekLabel(start, end),
+      label: weekLabel(first, end),
       byDay: true,
       rows: block.sort(compareAhead),
     });
@@ -219,8 +224,12 @@ export function Upcoming({
     !view.loading &&
     view.rows.length === 0 &&
     (view.error === null || view.stale);
+  const horizon = aheadHorizon(todayIn(zone, now));
   return (
     <div id={id} data-upcoming="" className="flex flex-col">
+      {view.loading ? null : (
+        <Ahead targets={view.ahead} horizonLabel={dayLabel(horizon)} />
+      )}
       {view.error !== null ? (
         <div
           className="my-3 flex flex-col gap-2 rounded-xl border border-destructive/35 bg-card p-4"

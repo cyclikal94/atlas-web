@@ -100,7 +100,9 @@ export function IdentityHeader({
   const person = shown.row;
   // The synced row's version is known of the person too (an unsent create's projection has none): an older linkage answer is not current.
   const synced = shown.projected ? undefined : person.version;
-  const { linkage, retry } = usePersonLinkage(person.id, synced);
+  const { linkage, retry } = usePersonLinkage(person.id, synced, {
+    unsent: shown.projected,
+  });
   const [renaming, setRenaming] = useState(false);
   // WEB-14a (F-INT-PEOPLE-Q4): a rename left by the page before an update reload opens again on its copy (never sent).
   const renameKey = `rename:${person.id}`;

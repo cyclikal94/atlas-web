@@ -17,8 +17,11 @@ export type LinkageState =
     }
   | {
       known: false;
-      /** `offline`: nothing read this page and no connection; `loading`; `failed`: the read failed; `refused`: 403/404. */
-      reason: "offline" | "loading" | "failed" | "refused";
+      /**
+       * `offline`: nothing read this page and no connection; `loading`; `failed`: the read failed; `refused`: 403/404; `pending`: the
+       * person exists only as a create saved on this device, so the server cannot be asked yet (nothing is read until it lands).
+       */
+      reason: "offline" | "loading" | "failed" | "refused" | "pending";
     };
 
 export const unknownLinkage = (

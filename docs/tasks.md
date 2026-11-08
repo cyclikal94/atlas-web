@@ -18,7 +18,22 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     `/upcoming`, which is the same page started at the fold): Tomorrow with its times of day, the rest of the week a day at a time, the next
     four weeks, then months, routine (repeating) tasks folded to a count in every block. The days ahead are read from THIS DEVICE only
     (`useUpcomingView`: one certified snapshot of every cached occurrence dated after the day, composed as an offline day is, re-read on every
-    local commit); `/daily` is a one-day read and is asked for the displayed day alone, and the page says so under the last block.
+    local commit); `/daily` is a one-day read and is asked for the displayed day alone.
+  - **The look-ahead (8 November 2026).** The server makes an occurrence only when asked (`materialise`), and Today's catch-up asks only
+    through today, so a day ahead held nothing until it came. While the fold is open, Today asks the page's runner to bring every task this
+    device holds details of (the `execution` rows) up to date through `AHEAD_DAYS` (30, inside the server's 31-day horizon in any zone).
+    The server's position after a `materialise` is the LAST SLOT IT MADE, never the day asked for, so each task is asked for through its
+    own last slot on or before the horizon (`lastSlotOnOrBefore`: daily and weekly step from the start date; monthly and yearly keep the
+    start's day of the month and skip a month without it, as observed against v0.31.0-rc.1): a one-off through its day, nothing for an
+    undated, past or archived task, one starting beyond the horizon or one repeating after completion (`model/ahead.ts`, PURE;
+    `today/Ahead.tsx`, trigger `ahead`, one sequence per task and day under the runner's own budget and stops). The fold says "Planning the month ahead…" while it works,
+    each stop with its reason and Try again, and "Planned with the server through {day}" once settled; a settled plan is noted on the
+    device (`atlas.ahead.v1`) and not asked again until it changes (a new task, a new day). The caption under the last block says that the
+    next 30 days are planned with the server and anything further off appears as it comes within a month. The fold is OPEN by default
+    (the day runs on into the days ahead) and a person's choice to fold it away is kept on the device (`atlas.upcoming-fold.v1`); `/upcoming`
+    always opens it. In the first week block, tomorrow's rows are not repeated (tomorrow has its own block).
+  - **A carried row keeps its time in its note** ("From Sun 8 Nov, 17:40"): the time column says "all day", because on this day the row is
+    open at any time, and the note says when it was meant for.
   - **The task page (the Final design, 7 November 2026).** Under the heading and its actions, a **facts strip** (`TaskDetail.tsx`,
     `Facts`): the day, who takes part, how the task repeats (`copy.CADENCE`), what happens when it is missed, and the way to the streak,
     as labelled cells. The day's work follows: the record card, then ONE grouped box (`components/ui/grouped.tsx`, `DayWork.tsx`) of

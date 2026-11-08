@@ -775,19 +775,19 @@ function FieldRow({
         className="grid grid-cols-1 gap-2 tablet:grid-cols-(--field-columns) tablet:items-center tablet:gap-3"
         style={FIELD_COLUMNS}
       >
-        <span className="flex flex-col gap-1">
-          <span id={nameId} className="text-sm font-medium text-foreground">
+        <span className="flex min-w-0 flex-col gap-1">
+          <span
+            id={nameId}
+            className="text-sm font-medium text-foreground [overflow-wrap:anywhere]"
+          >
             {row.label}
           </span>
           <PendingBadge mark={field.pending} />
         </span>
         <FieldValueView raw={row.value} />
         <span className="flex flex-col items-stretch gap-1">
-          {field.projected ? (
-            <span className="text-xs text-muted-foreground">
-              {copy.WAIT_FOR_SYNC_FIELD}
-            </span>
-          ) : (
+          {/* An unsent field has no audience to set yet: its pending mark beside the name says so, and Edit says why it waits. */}
+          {field.projected ? null : (
             <button
               type="button"
               data-people-action="field-audience"

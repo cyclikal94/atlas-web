@@ -5,7 +5,8 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { UPCOMING_FOLD_STORAGE_KEY } from "../../../src/app/shell/preferences";
 import type { CacheRow } from "../../../src/data";
 import { StoreFailure } from "../../../src/data/store/port";
 import type { TasksResult } from "../../../src/features/tasks/api";
@@ -38,7 +39,13 @@ import {
  * a mixed or false state that is replaced a moment later is still seen. FIXTURE evidence; no backend.
  */
 installMatchMedia({ width: 1440 });
+// These cases inject ONE failure into a data plan and expect the DAY's read to meet it: the days ahead (the Upcoming fold, open by
+// default since 8 November 2026) read through the same plans, so the fold is folded away here (its own reads: `ahead.test.tsx`).
+beforeEach(() => {
+  localStorage.setItem(UPCOMING_FOLD_STORAGE_KEY, "folded");
+});
 afterEach(() => {
+  localStorage.removeItem(UPCOMING_FOLD_STORAGE_KEY);
   cleanup();
   forgetTaskMemory();
   forgetAllCorrections();

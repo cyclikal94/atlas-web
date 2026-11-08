@@ -77,11 +77,13 @@ export function TodayRow({
     (instant === null && data.slot.date !== null && data.slot.date < day);
   const timed = instant !== null && dateIn(instant, zone) === day;
   const time = timeText ?? (timed ? timeIn(instant, zone) : copy.ALL_DAY);
+  // A row carried from an earlier day keeps that day's time in its note ("From Sun 8 Nov, 17:40"): the time column says "all day",
+  // because on this day it is open at any time, and the note says when it was meant for.
   const from = overdue
     ? copy.FROM_DAY(
-        dayLabel(
-          instant !== null ? dateIn(instant, zone) : (data.slot.date as string),
-        ),
+        instant !== null
+          ? `${dayLabel(dateIn(instant, zone))}, ${timeIn(instant, zone)}`
+          : dayLabel(data.slot.date as string),
       )
     : null;
   const explain =

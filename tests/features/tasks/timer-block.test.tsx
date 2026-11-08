@@ -91,12 +91,12 @@ const copied = (
 });
 
 describe("visibility", () => {
-  test("a goal not measured in seconds shows one muted line and no controls", async () => {
+  test("a goal not measured in seconds has no timer section at all (the Final design, 8 November 2026)", async () => {
     const task = await seededTask({ title: "Brush your teeth" });
     const t = await mountTasks({ path: path(task), rows: task.rows });
-    await t.until(() => block() !== null);
-    expect(block()?.dataset.timerBlock).toBe("unused");
-    expect(block()).toHaveTextContent(TIMER_COPY.notUsed);
+    await t.until(() => document.querySelector("[data-day-work]") !== null);
+    expect(block()).toBeNull();
+    expect(document.body).not.toHaveTextContent(TIMER_COPY.notUsed);
   });
 });
 

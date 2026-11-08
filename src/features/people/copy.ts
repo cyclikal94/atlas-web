@@ -84,6 +84,7 @@ export const LINK_UNKNOWN_REASON = {
   loading: "Checking…",
   failed: "Atlas couldn't check just now.",
   refused: "Atlas can't check this person for you.",
+  pending: "It's checked once this person has reached the server.",
 } as const; // PROVISIONAL
 export const ROW_LINK_SELF = "Linked to your account";
 export const ROW_LINK_OTHER = "Linked · they control their name";

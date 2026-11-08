@@ -16,7 +16,8 @@ export function NotFound() {
           </Link>
         }
       >
-        Nothing lives at this address.
+        Nothing lives at this address. The link may be out of date, or the page
+        has moved.
       </EmptyState>
     </div>
   );

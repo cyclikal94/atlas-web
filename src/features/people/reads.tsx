@@ -746,6 +746,7 @@ export function linkageIn(
   env: ReturnType<typeof usePeopleEnv>,
   personId: string,
   synced?: number,
+  options: { unsent?: boolean } = {},
 ): LinkageState {
   const memory = env.memory;
   const floor = Math.max(personFloor(memory, personId), synced ?? 0);
@@ -754,6 +755,9 @@ export function linkageIn(
   if (current !== null) return current;
   if (memory.refused.has(personId)) return unknownLinkage("refused");
   if (memory.linkageReads.has(personId)) return unknownLinkage("loading");
+  // A person that exists only as a create saved here is not on the server yet: nothing was asked, and nothing failed (8 November 2026:
+  // the page used to ask at once and remember the server's 404 as a refusal until "Try again").
+  if (options.unsent) return unknownLinkage("pending");
   if (memory.failed.has(personId)) return unknownLinkage("failed");
   if (!env.online) return unknownLinkage("offline");
   // Out of date, and read again at this version already: what it answered is not current (Try again asks once more).
@@ -770,10 +774,15 @@ export function linkageIn(
 export function usePersonLinkage(
   personId: string | null,
   synced?: number,
+  options: {
+    /** The person exists only as a create saved on this device: the server is not asked until the create has landed. */
+    unsent?: boolean;
+  } = {},
 ): {
   linkage: LinkageState;
   retry(): void;
 } {
+  const unsent = options.unsent === true;
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
   const memory = env.memory;
@@ -791,10 +800,10 @@ export function usePersonLinkage(
       : (memory.linkageAsked.get(id) ?? 0) < floor);
   // biome-ignore lint/correctness/useExhaustiveDependencies: `due` is the reason to read again; its value is not used
   useEffect(() => {
-    if (personId === null) return;
+    if (personId === null || unsent) return;
     if (synced !== undefined) notePersonVersion(env.memory, personId, synced);
     if (env.online) readLinkage(env, personId);
-  }, [env, personId, synced, due]);
+  }, [env, personId, synced, due, unsent]);
   const retry = useCallback(() => {
     if (personId !== null) readLinkage(env, personId, { force: true });
   }, [env, personId]);
@@ -802,7 +811,7 @@ export function usePersonLinkage(
     linkage:
       personId === null
         ? unknownLinkage("refused")
-        : linkageIn(env, personId, synced),
+        : linkageIn(env, personId, synced, { unsent }),
     retry,
   };
 }

@@ -162,6 +162,21 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
     );
   }
 
+  // In a dialog that is up to date the control is a quiet dot (its name still says so): the header is the title's, and the pill grows
+  // its words only while it has something to say (offline, sending, waiting, a decision). The Final design, 8 November 2026.
+  if (variant === "dialog" && view.tone === "ok")
+    return (
+      <button
+        type="button"
+        aria-label={name}
+        data-sync-tone={view.tone}
+        data-sync-quiet=""
+        onClick={activate}
+        className="atlas-transition flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      >
+        {dot}
+      </button>
+    );
   // Top bar and in-dialog: the compact, one-line pill.
   return (
     <button

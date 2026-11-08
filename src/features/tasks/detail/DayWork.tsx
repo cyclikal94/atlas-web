@@ -5,6 +5,7 @@ import type { TaskActions } from "../actions";
 import { useTasksEnv } from "../env";
 import type { Evidence } from "../model/contract";
 import type { Mode } from "../model/dependencies";
+import { isTimerGoal } from "../model/timers";
 import type { RowModel } from "../view";
 import {
   CompletionConflict,
@@ -120,14 +121,17 @@ export function DayWork({
           onSee={() => openDialog(null)}
           onSet={() => setEditor({ replacing: null })}
         />
-        <TimerBlock
-          key={`timer:${row.id}`}
-          row={row}
-          actions={actions}
-          deps={deps}
-          writable={writable}
-          onSee={() => openDialog(null)}
-        />
+        {/* The timer is a section only of a task measured in time; a tick or an amount has no timer row to show. */}
+        {isTimerGoal(row.data) ? (
+          <TimerBlock
+            key={`timer:${row.id}`}
+            row={row}
+            actions={actions}
+            deps={deps}
+            writable={writable}
+            onSee={() => openDialog(null)}
+          />
+        ) : null}
         {extra}
       </GroupedBox>
       {dialog !== null ? (

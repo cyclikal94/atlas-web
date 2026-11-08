@@ -430,7 +430,7 @@ export interface MaterialiseSequenceRow {
       | "unreachable";
     request_id?: string;
   };
-  trigger: "daily" | "streak" | "draft";
+  trigger: "daily" | "streak" | "draft" | "ahead";
   /**
    * Revision 10 (Decision B): the retry schedule of the caller the phase names (`submitting`: the `materialise` command; awaiting its
    * position: the position read), or `null` (no failure or issue outstanding). ABSENT on a row of an earlier build: its uncertainty has no

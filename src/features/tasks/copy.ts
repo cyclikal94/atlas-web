@@ -69,9 +69,10 @@ export const UPCOMING = {
   show: "show",
   hide: "hide",
   loading: "Loading the days ahead",
-  empty: "Nothing scheduled in the months ahead on this device.",
+  empty:
+    "Nothing particular in the month ahead. Routine tasks carry on as usual.",
   fromDevice:
-    "The days ahead are read from what is saved on this device; the server is asked for today only.",
+    "Atlas plans the next 30 days with the server. Anything further off appears as it comes within a month.",
   failed: "Atlas couldn't read the days ahead saved on this device.",
 } as const;
 

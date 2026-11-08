@@ -81,7 +81,10 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-1** Every field write is a typed `put_field`; `create_field` only for the new person's first note (SHARE-10 batch); `edit` only to
   rename a person whose profile is not linked.
 - **D-11a-2** Linkage is read online (`GET /people/{id}`) and kept in the identity's page memory (outlives a remount; a `403`/`404` is remembered
-  until Try again). Unknown linkage is shown as unknown, with the reason; it is never inferred from `can_edit`. An ordinary read joins the
+  until Try again). Unknown linkage is shown as unknown, with the reason; it is never inferred from `can_edit`. A person that exists only
+  as a create saved on this device (a projected row, 8 November 2026) is not asked for until the create has landed and the synced row is
+  shown: the header says it is checked once the person has reached the server (`pending`), with no Try again, instead of asking at once
+  and remembering the server's `404` as a refusal. An ordinary read joins the
   one on its way; a read asked after a command, Reload or Try again supersedes it, and only the latest read of a person changes what the
   page knows (review 20, R20.1): an answer read before an unlink never replaces the one read after it. Offline, Try again asks nothing and
   forgets nothing. An answer is CURRENT only at the latest version of the person this page knows (review 25, R25.1: `personFloor`, from

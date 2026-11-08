@@ -1,10 +1,15 @@
-import { createRootRoute, Outlet } from "@tanstack/react-router";
+import {
+  createRootRoute,
+  Outlet,
+  useRouterState,
+} from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import { GlobalNotices } from "../features/sync/NoticeBanners";
 import { useAppUpdate } from "../lib/pwa/store";
 import { NotFound } from "./NotFound";
 import { AppShell } from "./shell/AppShell";
 import { useShellEnv } from "./shell/env";
+import { mobileBackFor } from "./shell/mobile-back";
 import { NavigationSignal } from "./shell/NavigationSignal";
 
 declare module "@tanstack/react-router" {
@@ -36,8 +41,16 @@ function UpdateSlot() {
 // router's rendered navigations are told to the coordinator (`NavigationSignal`), which alone decides what the banner shows.
 function ShellLayout() {
   const env = useShellEnv();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const mobileBack = mobileBackFor(pathname);
   return (
-    <AppShell {...env} updateSlot={<UpdateSlot />}>
+    <AppShell
+      {...env}
+      updateSlot={<UpdateSlot />}
+      {...(mobileBack ? { mobileBack } : {})}
+    >
       <NavigationSignal />
       <GlobalNotices />
       <Outlet />

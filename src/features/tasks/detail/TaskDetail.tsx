@@ -1,4 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
 import { useId, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Badge } from "../../../components/ui/badge";
@@ -567,9 +568,11 @@ function Facts({
             to="/tasks/$taskId/streak"
             params={{ taskId }}
             data-streak-link=""
-            className="atlas-transition inline-flex min-h-11 items-center text-sm font-medium text-primary hover:underline"
+            aria-label={STREAK_COPY.linkName}
+            className="atlas-transition inline-flex min-h-11 items-center gap-0.5 text-sm font-medium text-foreground hover:text-primary hover:underline"
           >
             {STREAK_COPY.link}
+            <ChevronRight aria-hidden="true" className="size-4" />
           </Link>
         </dd>
       </div>

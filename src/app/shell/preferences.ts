@@ -7,6 +7,8 @@ import { useSyncExternalStore } from "react";
  */
 export const SIDEBAR_STORAGE_KEY = "atlas.sidebar.v1";
 export const PINNED_LISTS_STORAGE_KEY = "atlas.pinned-lists.v1";
+/** Whether Today's "Upcoming" fold is open (the default) or folded away; kept on this device like the sidebar's state. */
+export const UPCOMING_FOLD_STORAGE_KEY = "atlas.upcoming-fold.v1";
 /** No stored choice: the desktop rail is open and the tablet rail is collapsed. */
 export type SidebarPreference = "auto" | "expanded" | "collapsed";
 
@@ -25,7 +27,8 @@ const subscribe = (listener: () => void) => {
     if (
       event.key === null ||
       event.key === SIDEBAR_STORAGE_KEY ||
-      event.key === PINNED_LISTS_STORAGE_KEY
+      event.key === PINNED_LISTS_STORAGE_KEY ||
+      event.key === UPCOMING_FOLD_STORAGE_KEY
     )
       listener();
   };
@@ -71,6 +74,18 @@ export function writeSidebarPreference(value: SidebarPreference) {
 }
 export function useSidebarPreference(): SidebarPreference {
   return useSyncExternalStore(subscribe, readSidebarPreference, () => "auto");
+}
+
+export type UpcomingFold = "open" | "folded";
+export function readUpcomingFold(): UpcomingFold {
+  return readRaw(UPCOMING_FOLD_STORAGE_KEY) === "folded" ? "folded" : "open";
+}
+export function writeUpcomingFold(value: UpcomingFold) {
+  writeRaw(UPCOMING_FOLD_STORAGE_KEY, value === "open" ? null : value);
+  notify();
+}
+export function useUpcomingFold(): UpcomingFold {
+  return useSyncExternalStore(subscribe, readUpcomingFold, () => "open");
 }
 
 let pinnedCache: { raw: string | null; value: PinnedList[] } | null = null;

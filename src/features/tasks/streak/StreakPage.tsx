@@ -57,7 +57,9 @@ import {
 export const STREAK_COPY = {
   title: "How it's been going",
   back: (title: string) => `‹ ${title}`,
-  link: "Streak",
+  /** The facts strip's way to this page: the cell is labelled "Streak", so the link says what pressing it does. */
+  link: "View",
+  linkName: "See how it's been going",
   current: (n: number, unit: string) => `On a run of ${n} ${unit}`,
   longest: (n: number, unit: string) => `Best run ${n} ${unit}`,
   currentName: "Current run",

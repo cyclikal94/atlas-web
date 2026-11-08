@@ -12,10 +12,15 @@ import {
 } from "../../../data";
 import { useTasksEnv } from "../env";
 import { useScopedRead } from "../local-read";
+import {
+  type AheadSource,
+  type AheadTarget,
+  aheadTargets,
+} from "../model/ahead";
 import { QUEUED_KINDS } from "../model/commands";
-import { parseOccurrenceData } from "../model/contract";
+import { parseDefinition, parseOccurrenceData } from "../model/contract";
 import { progressId } from "../model/ids";
-import { addDays } from "../model/time";
+import { addDays, todayIn } from "../model/time";
 import {
   composeRow,
   effectiveOccurrence,
@@ -29,6 +34,10 @@ import {
  * answer). The server's `/daily` is a one-day read and is asked for the displayed day only; the days ahead say so. The read is one
  * certified snapshot (`readCoherently`, as the day's is), read again on every local commit; a read that failed, or kept changing, keeps
  * the last complete snapshot and says why, never an empty horizon.
+ *
+ * The same snapshot plans the LOOK-AHEAD (`model/ahead.ts`, the Final design, 8 November 2026): from every task's details this device
+ * holds (the `execution` rows), which tasks the fold asks the page's runner to bring up to date through the horizon, so the days ahead are
+ * made by the server before they come. `ahead` is empty until the read lands.
  */
 export const UPCOMING_HORIZON_DAYS = 183;
 
@@ -37,6 +46,8 @@ export interface UpcomingView {
   error: "failed" | "unstable" | null;
   stale: boolean;
   rows: RowModel[];
+  /** The look-ahead plan: the tasks to bring up to date through the days ahead (`model/ahead.ts`). */
+  ahead: AheadTarget[];
   noDatabase: boolean;
   retry(): void;
 }
@@ -46,6 +57,7 @@ interface Snapshot {
   candidates: string[];
   progressIds: Map<string, string>;
   rows: Map<string, CacheRow>;
+  ahead: AheadTarget[];
 }
 
 const EMPTY: Snapshot = {
@@ -53,17 +65,45 @@ const EMPTY: Snapshot = {
   candidates: [],
   progressIds: new Map(),
   rows: new Map(),
+  ahead: [],
 };
 
 async function readAhead(
   data: Parameters<typeof readCoherently>[0],
-  input: { fromDay: string; untilDay: string; accountId: string },
+  input: {
+    fromDay: string;
+    untilDay: string;
+    accountId: string;
+    today: string;
+  },
   signal: AbortSignal,
 ): Promise<Stage<Snapshot>> {
   const queue = await readAllOutstandingByKindNow(data, QUEUED_KINDS);
   if (!queue.ok) return queue;
   const outstanding: Outstanding = queue.value;
   const found = new Map<string, CacheRow>();
+  // The look-ahead's sources: every task's details this device holds (an `execution` row names its task as its parent).
+  const details: AheadSource[] = [];
+  const detailsWalk = await scanResources(
+    data,
+    { kind: "execution" },
+    (rows) => {
+      for (const row of rows) {
+        const taskId = row.merged.parent_id;
+        if (taskId === null) continue;
+        details.push({
+          taskId,
+          definition: parseDefinition(row.merged.value),
+          archived: row.merged.archived,
+        });
+      }
+      return undefined;
+    },
+    signal,
+  );
+  if (detailsWalk === "aborted") return { ok: false, why: "aborted" };
+  if (detailsWalk !== "complete")
+    return { ok: false, why: data.service() === null ? "closed" : "failed" };
   const walked = await scanResources(
     data,
     { kind: "occurrence" },
@@ -119,7 +159,16 @@ async function readAhead(
   const related = await readResourcesNow(data, [...more]);
   if (related === null) return failure();
   for (const [rowId, row] of related) rows.set(rowId, row.merged);
-  return { ok: true, value: { outstanding, candidates, progressIds, rows } };
+  return {
+    ok: true,
+    value: {
+      outstanding,
+      candidates,
+      progressIds,
+      rows,
+      ahead: aheadTargets(details, input.today),
+    },
+  };
 }
 
 export function useUpcomingView(
@@ -132,7 +181,9 @@ export function useUpcomingView(
   const position = useCachePosition();
   const [attempt, setAttempt] = useState(0);
   const untilDay = addDays(fromDay, UPCOMING_HORIZON_DAYS);
-  const key = `${env.identity}\u0000ahead\u0000${fromDay}\u0000${zone}`;
+  // The look-ahead reaches from the device's today (the server's horizon is counted from its own), not the displayed day.
+  const today = todayIn(zone, now);
+  const key = `${env.identity}\u0000ahead\u0000${fromDay}\u0000${zone}\u0000${today}`;
   const composition =
     position.status === "ready" ? (position.value?.composition ?? -1) : -2;
   const noDatabase =
@@ -146,7 +197,7 @@ export function useUpcomingView(
         () =>
           readAhead(
             data,
-            { fromDay, untilDay, accountId: env.accountId },
+            { fromDay, untilDay, accountId: env.accountId, today },
             signal,
           ),
         { signal },
@@ -204,6 +255,7 @@ export function useUpcomingView(
     error,
     stale: rows !== null && error !== null,
     rows: rows ?? [],
+    ahead: snapshot?.ahead ?? [],
     noDatabase,
     retry: () => setAttempt((n) => n + 1),
   };

@@ -665,138 +665,139 @@ export function TimersPage() {
         <p className="text-sm text-muted-foreground" data-timers-empty="">
           {TIMERS_COPY.empty}
         </p>
-      ) : null}
-      <GroupedBox data-timers-sections="">
-        <GroupedSection
-          aria-labelledby={heading}
-          data-timers-running={running.value.kind}
-          dot={runningRows.length > 0 ? "success" : "muted"}
-          heading={<h2 id={heading}>{TIMERS_COPY.running}</h2>}
-        >
-          {running.value.kind === "loading" ? (
-            <div aria-busy="true" className="flex flex-col gap-2">
-              <span className="sr-only">{TIMERS_COPY.loading}</span>
-              {[0, 1].map((n) => (
-                <div key={n} className="min-h-12 rounded-lg bg-card" />
-              ))}
-            </div>
-          ) : running.value.kind === "error" ? (
-            <div className="flex flex-col gap-1">
-              <p className="text-sm text-muted-foreground">
-                {TIMERS_COPY.failed}
-              </p>
-              {running.value.requestId ? (
-                <p className="select-all font-num text-xs text-muted-foreground">
-                  {copy.REQUEST_ID(running.value.requestId)}
+      ) : (
+        <GroupedBox data-timers-sections="">
+          <GroupedSection
+            aria-labelledby={heading}
+            data-timers-running={running.value.kind}
+            dot={runningRows.length > 0 ? "success" : "muted"}
+            heading={<h2 id={heading}>{TIMERS_COPY.running}</h2>}
+          >
+            {running.value.kind === "loading" ? (
+              <div aria-busy="true" className="flex flex-col gap-2">
+                <span className="sr-only">{TIMERS_COPY.loading}</span>
+                {[0, 1].map((n) => (
+                  <div key={n} className="min-h-12 rounded-lg bg-card" />
+                ))}
+              </div>
+            ) : running.value.kind === "error" ? (
+              <div className="flex flex-col gap-1">
+                <p className="text-sm text-muted-foreground">
+                  {TIMERS_COPY.failed}
                 </p>
-              ) : null}
-              <span>
-                <Button onClick={running.retry}>{copy.TRY_AGAIN}</Button>
-              </span>
-            </div>
-          ) : offline ? (
-            <>
-              {copied ? (
-                <p className="text-xs text-muted-foreground">
-                  {TIMERS_COPY.lastChecked(
-                    momentLabel(copied.readAt, now, zone),
-                  )}
-                </p>
-              ) : null}
-              {copiedRows.length === 0 ? (
+                {running.value.requestId ? (
+                  <p className="select-all font-num text-xs text-muted-foreground">
+                    {copy.REQUEST_ID(running.value.requestId)}
+                  </p>
+                ) : null}
+                <span>
+                  <Button onClick={running.retry}>{copy.TRY_AGAIN}</Button>
+                </span>
+              </div>
+            ) : offline ? (
+              <>
+                {copied ? (
+                  <p className="text-xs text-muted-foreground">
+                    {TIMERS_COPY.lastChecked(
+                      momentLabel(copied.readAt, now, zone),
+                    )}
+                  </p>
+                ) : null}
+                {copiedRows.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {TIMERS_COPY.noRunning}
+                  </p>
+                ) : (
+                  <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
+                    {copiedRows.map((row) => (
+                      <SessionRow
+                        key={row.id}
+                        row={row}
+                        nowMs={now}
+                        zone={zone}
+                        offlineTitle={offlineTitleOf(row)}
+                        act={
+                          offlineTitleOf(row) === null || !env.writable
+                            ? null
+                            : (r, w) => void act(r, w)
+                        }
+                        {...rowProps(row)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : runningRows.length === 0 ? (
+              nothing ? null : (
                 <p className="text-sm text-muted-foreground">
                   {TIMERS_COPY.noRunning}
                 </p>
-              ) : (
-                <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
-                  {copiedRows.map((row) => (
-                    <SessionRow
-                      key={row.id}
-                      row={row}
-                      nowMs={now}
-                      zone={zone}
-                      offlineTitle={offlineTitleOf(row)}
-                      act={
-                        offlineTitleOf(row) === null || !env.writable
-                          ? null
-                          : (r, w) => void act(r, w)
-                      }
-                      {...rowProps(row)}
-                    />
-                  ))}
-                </ul>
-              )}
-            </>
-          ) : runningRows.length === 0 ? (
-            nothing ? null : (
-              <p className="text-sm text-muted-foreground">
-                {TIMERS_COPY.noRunning}
-              </p>
-            )
-          ) : (
-            <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
-              {runningRows.map((row) => (
-                <SessionRow
-                  key={row.id}
-                  row={row}
-                  nowMs={now}
-                  zone={zone}
-                  act={env.writable ? (r, w) => void act(r, w) : null}
-                  {...rowProps(row)}
-                />
-              ))}
-            </ul>
-          )}
-          {running.more ? (
-            <span>
-              <Button variant="ghost" onClick={running.more}>
-                {TIMERS_COPY.loadMore}
-              </Button>
-            </span>
-          ) : null}
-        </GroupedSection>
-        <GroupedSection
-          aria-labelledby={historyHeading}
-          data-timers-history={history.value.kind}
-          heading={<h2 id={historyHeading}>{TIMERS_COPY.history}</h2>}
-        >
-          {history.value.kind === "offline" ? (
-            <p className="text-sm text-muted-foreground">
-              {TIMERS_COPY.historyOffline}
-            </p>
-          ) : history.value.kind === "loading" ? (
-            <div aria-busy="true" className="min-h-12 rounded-lg bg-card" />
-          ) : history.value.kind === "error" ? (
-            <div className="flex flex-col gap-1">
-              <p className="text-sm text-muted-foreground">
-                {TIMERS_COPY.failed}
-              </p>
+              )
+            ) : (
+              <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
+                {runningRows.map((row) => (
+                  <SessionRow
+                    key={row.id}
+                    row={row}
+                    nowMs={now}
+                    zone={zone}
+                    act={env.writable ? (r, w) => void act(r, w) : null}
+                    {...rowProps(row)}
+                  />
+                ))}
+              </ul>
+            )}
+            {running.more ? (
               <span>
-                <Button onClick={history.retry}>{copy.TRY_AGAIN}</Button>
+                <Button variant="ghost" onClick={running.more}>
+                  {TIMERS_COPY.loadMore}
+                </Button>
               </span>
-            </div>
-          ) : historyRows.length === 0 ? null : (
-            <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
-              {historyRows.map((row) => (
-                <SessionRow
-                  key={row.id}
-                  row={row}
-                  nowMs={now}
-                  zone={zone}
-                  act={null}
-                />
-              ))}
-            </ul>
-          )}
-          {history.more ? (
-            <span>
-              <Button variant="ghost" onClick={history.more}>
-                {TIMERS_COPY.loadMore}
-              </Button>
-            </span>
-          ) : null}
-        </GroupedSection>
-      </GroupedBox>
+            ) : null}
+          </GroupedSection>
+          <GroupedSection
+            aria-labelledby={historyHeading}
+            data-timers-history={history.value.kind}
+            heading={<h2 id={historyHeading}>{TIMERS_COPY.history}</h2>}
+          >
+            {history.value.kind === "offline" ? (
+              <p className="text-sm text-muted-foreground">
+                {TIMERS_COPY.historyOffline}
+              </p>
+            ) : history.value.kind === "loading" ? (
+              <div aria-busy="true" className="min-h-12 rounded-lg bg-card" />
+            ) : history.value.kind === "error" ? (
+              <div className="flex flex-col gap-1">
+                <p className="text-sm text-muted-foreground">
+                  {TIMERS_COPY.failed}
+                </p>
+                <span>
+                  <Button onClick={history.retry}>{copy.TRY_AGAIN}</Button>
+                </span>
+              </div>
+            ) : historyRows.length === 0 ? null : (
+              <ul className="m-0 flex list-none flex-col divide-y divide-border p-0">
+                {historyRows.map((row) => (
+                  <SessionRow
+                    key={row.id}
+                    row={row}
+                    nowMs={now}
+                    zone={zone}
+                    act={null}
+                  />
+                ))}
+              </ul>
+            )}
+            {history.more ? (
+              <span>
+                <Button variant="ghost" onClick={history.more}>
+                  {TIMERS_COPY.loadMore}
+                </Button>
+              </span>
+            ) : null}
+          </GroupedSection>
+        </GroupedBox>
+      )}
     </article>
   );
 }
