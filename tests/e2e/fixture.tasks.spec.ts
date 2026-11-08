@@ -308,7 +308,7 @@ test.describe("E-T3: create offline and an immediate Mark done (A9, A10, A16; TA
     await goOfflineAtBoundary(page);
     await page.getByLabel("Name", { exact: true }).fill("Take the bins out");
     await page.getByRole("radio", { name: "Only me" }).check();
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await expect(page.locator("[data-task-detail]")).toBeVisible();
     await expect(page.locator("[data-record-card]")).toBeVisible();
     await page
@@ -380,7 +380,7 @@ test.describe("E-T3b: a create captured from defaults never fetched waits for re
       .getByRole("button", { name: "Start from scratch instead" })
       .click();
     await page.getByLabel("Name", { exact: true }).fill("Review me");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await expect(page.locator("[data-record-card]")).toBeVisible();
     await page
       .locator("[data-record-card]")
@@ -1030,7 +1030,7 @@ test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of rev
     await page.getByRole("radio", { name: "Only me" }).focus();
     await page.keyboard.press("Space");
     await expect(page.getByRole("radio", { name: "Only me" })).toBeChecked();
-    await page.getByRole("button", { name: "Save" }).focus();
+    await page.getByRole("button", { name: "Add task" }).focus();
     await page.keyboard.press("Enter");
     await expect(page.locator("[data-task-detail]")).toBeVisible();
     expect((await draftsOf(page)).map((d) => d.kind)).toEqual(["create_task"]);
@@ -1457,7 +1457,10 @@ test.describe("E-T8d: keyboard traversal, forms and dialogs (A10, A14, A19; R7 o
       await page.keyboard.press("ArrowDown");
     await expect(onlyMe).toBeChecked();
     await expect(onlyMe).toBeFocused();
-    seen(await tabTo(page, (f) => f.name === "Save", "Save"), "Save");
+    seen(
+      await tabTo(page, (f) => f.name === "Add task", "Add task"),
+      "Add task",
+    );
     await page.keyboard.press("Enter");
     await expect(page.locator("[data-task-detail]")).toBeVisible();
     expect((await draftsOf(page)).map((d) => d.kind)).toEqual(["create_task"]);
@@ -1953,7 +1956,7 @@ test.describe("E-T9f: an occurrence created offline is followed to its close on 
         .selectOption("Africa/Abidjan");
       await page.getByLabel("Starting", { exact: true }).fill(today);
       await page.getByLabel("Repeats", { exact: true }).selectOption("none");
-      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Add task", exact: true }).click();
       await expect(page.locator("[data-record-card]")).toBeVisible();
       await page.getByLabel("Amount (cups)", { exact: true }).fill("2");
       await page
@@ -5525,7 +5528,9 @@ test.describe("E-T40: checking sync state keeps unfinished task input (ia.md §1
         expect(await draftsOf(page)).toEqual([]);
       } else {
         await page.getByRole("radio", { name: "Only me" }).check();
-        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page
+          .getByRole("button", { name: "Add task", exact: true })
+          .click();
         await expect
           .poll(async () =>
             (await bodiesOf(page)).map((b) => b.command.command.title),
@@ -6531,7 +6536,12 @@ test.describe("E-T45: a save acknowledged after the person left never moves them
         await page.evaluate(() => {
           (window as unknown as { __ackHold: Hold }).__ackHold.armed = true;
         });
-        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await page
+          .getByRole("button", {
+            name: mode === "edit" ? "Save" : "Add task",
+            exact: true,
+          })
+          .click();
         await page.waitForFunction(
           () => (window as unknown as { __ackHold: Hold }).__ackHold.held,
         );

@@ -146,13 +146,13 @@ describe("the correction dialog", () => {
     <ProtectedProviders>
       <ShellEnvProvider
         value={{
-          syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+          syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
           onOpenSync: onOpen,
         }}
       >
         <SyncStatusProvider
           value={{
-            model: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+            model: { phase: "synced", pendingCount: 1, conflictCount: 0 },
             onOpen,
           }}
         >

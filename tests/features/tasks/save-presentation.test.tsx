@@ -58,6 +58,11 @@ const IDENTITY = `${ME}:1`;
 const ORIGINAL = "Original title";
 const TYPED = "Typed title";
 const formShown = () => document.querySelector("[data-task-form]") !== null;
+/** The form's primary act: "Add task" on a new form, "Save" on an edit (the Final design). */
+const primary = () =>
+  screen.getByRole("button", {
+    name: new RegExp(`^(${FORM_COPY.add}|${FORM_COPY.save})$`),
+  });
 const pickerShown = () =>
   screen.queryByRole("button", { name: PRESET_COPY.scratch }) !== null;
 const detailShown = () => document.querySelector("[data-task-detail]") !== null;
@@ -160,7 +165,7 @@ async function saveCommitted(
   t: Mounted,
   hold: ReturnType<typeof holdAcknowledgement>,
 ) {
-  fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+  fireEvent.click(primary());
   await t.until(() => hold.state.committed);
   expect(hold.state.committed, "the outbox committed the save").toBe(true);
   expect(fieldset().disabled, "the save is pending").toBe(true);
@@ -305,7 +310,7 @@ describe("R35: a save refused or thrown while the person is at the sync screens"
         const { t, path, key } = await openForm(mode);
         const owner = visitHere(IDENTITY, path);
         const hold = holdAcknowledgement(t, "enqueue", outcome);
-        fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+        fireEvent.click(primary());
         await t.until(() => hold.state.asked);
         expect(hold.state.asked, "the outbox was asked").toBe(true);
         const seen = await departThenAcknowledge(t, hold, key, "/sync", owner);
@@ -330,7 +335,7 @@ describe("R35: an edit saved into the queued change it was shown", () => {
   async function queued(kind: "create_task" | "revise_task") {
     if (kind === "create_task") {
       const { t } = await openForm("new");
-      fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+      fireEvent.click(primary());
       await t.until(detailShown);
       const id = String(commands(t)[0]?.id);
       await to(t, `/tasks/${id}/edit`);
@@ -338,7 +343,7 @@ describe("R35: an edit saved into the queued change it was shown", () => {
       return { t, id, path: `/tasks/${id}/edit` };
     }
     const { t, task } = await openForm("edit");
-    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    fireEvent.click(primary());
     await t.until(detailShown);
     const path = `/tasks/${task.taskId}/edit`;
     await to(t, path);
@@ -355,7 +360,7 @@ describe("R35: an edit saved into the queued change it was shown", () => {
         fireEvent.change(name(), { target: { value: "Second title" } });
         const owner = visitHere(IDENTITY, path);
         const hold = holdAcknowledgement(t, "editQueued");
-        fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+        fireEvent.click(primary());
         await t.until(() => hold.state.committed);
         expect(hold.state.committed, "the queued change was edited").toBe(true);
         const seen = await departThenAcknowledge(
@@ -417,7 +422,7 @@ describe("R35: away and back before React removed the form, then acknowledged (t
           expect(name().value, "not the consumed input offered again").toBe("");
         savedOnce(t, mode, task);
         fireEvent.change(name(), { target: { value: "Second title" } });
-        fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+        fireEvent.click(primary());
         // A fixed settle, not a wait on the route: a fault that never moves must fail the assertions below, not time out.
         await t.settle();
         const all = commands(t);
@@ -494,7 +499,7 @@ describe("R36: the same form instance after a return (generic owner)", () => {
           expect(name().value, "not the consumed input offered again").toBe("");
         savedOnce(t, mode, task);
         fireEvent.change(name(), { target: { value: "Second title" } });
-        fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+        fireEvent.click(primary());
         await t.settle();
         const all = commands(t);
         if (mode === "edit")
@@ -530,7 +535,7 @@ describe("R36: the same form instance after a return (generic owner)", () => {
           >;
           const ordinary = outbox.enqueue;
           const hold = holdAcknowledgement(t, "enqueue", outcome);
-          fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+          fireEvent.click(primary());
           await t.until(() => hold.state.asked);
           (
             document.querySelector("[data-task-form]") as HTMLElement
@@ -560,7 +565,7 @@ describe("R36: the same form instance after a return (generic owner)", () => {
           expect(fieldset().disabled).toBe(false);
           // The retry is ordinary: the outbox writes it at once.
           outbox.enqueue = ordinary;
-          fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+          fireEvent.click(primary());
           await t.settle();
           const id = savedOnce(t, mode, task);
           expect(at(t), "the retried save closes the form onto its task").toBe(

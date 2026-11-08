@@ -53,7 +53,7 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - The directory lookup's two variants are separate labelled sections in one reading order (not tabs), and "No account found" is plain text, not an error banner.
 - Every disabled Save, Confirm or action states its reason beside it (offline, nothing changed, unsupported server, loading the current defaults). Errors carry a copyable request ID. Announcements (saved, confirmed, an error) go through the announcer only.
 - The policy and defaults editors are full-bleed sheets below the desktop breakpoint (1280 px: mobile and both tablet orientations, as the accepted tablet frames draw them) and centred dialogs from it (the shared `Dialog` with `sheetBelow="desktop"`; focus trap, in-dialog sync control and dismissal unchanged), with 44 px targets; the directory lookup is a view inside the open dialog with Back, never a second stacked dialog.
-- The in-dialog sync control keeps the editors' unsaved choices and says so when the editor reopens ("Your unsaved changes are shown again"); Cancel, Done, Escape and the close icon discard them (ia.md §1.3.3). The defaults review lists each principal of both audiences with its access and each exclusion, as text.
+- The in-dialog sync control (shown only while there is news: changes waiting, a conflict, offline, a sync under way; since 8 November 2026 a dialog that is simply up to date carries no button to the sync screens) keeps the editors' unsaved choices and says so when the editor reopens ("Your unsaved changes are shown again"); Cancel, Done, Escape and the close icon discard them (ia.md §1.3.3). The defaults review lists each principal of both audiences with its access and each exclusion, as text.
 - Automated: jest-axe on every sharing screen (`tests/features/sharing/*`) and keyboard, viewport and focus checks in the three engines (`tests/e2e/fixture.sharing.spec.ts`). The manual pass below and the real assistive technology passes of Layer 3 apply to these screens too and are not claimed.
 
 ### The people screens (WEB-11a)
@@ -141,6 +141,12 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - The month grid's days are buttons named in full ("Tuesday 10 November 2026"), the chosen one pressed, today ringed; the previous and
   next month are named buttons.
 - Tomorrow and Skip on the action row are plain buttons, withheld (not disabled) while the day is closed, done or may not be changed.
+
+### The create form (the Final design, 8 November 2026)
+
+- The name field's chips are buttons named "Keep “…” as words" (pressing one dismisses the chip and leaves the words); the hint under the
+  name says what becomes a chip. The facts are buttons with `aria-expanded`, each opening a `dialog` named for the choice under its cell,
+  as the task page's are. Add task and Add and another are plain buttons; a withheld save says why beside it.
 
 ## The dependency graph (WEB-18)
 

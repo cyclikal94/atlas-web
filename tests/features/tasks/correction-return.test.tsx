@@ -133,7 +133,12 @@ async function openCorrection() {
     },
   });
   const path = `/tasks/${task.taskId}`;
-  const t = await mountTasks({ path, rows: task.rows, env: { online: false } });
+  const t = await mountTasks({
+    syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+    path,
+    rows: task.rows,
+    env: { online: false },
+  });
   await t.until(
     () => screen.queryByRole("button", { name: CORRECTION_COPY.open }) !== null,
   );

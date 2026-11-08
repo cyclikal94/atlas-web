@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   type ReactNode,
   useEffect,
@@ -16,18 +16,21 @@ import { GroupedBox, GroupedSection } from "../../../components/ui/grouped";
 import { Input, inputClass } from "../../../components/ui/input";
 import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeading } from "../../../components/ui/page-heading";
+import { Choice, Popover, PopoverHost } from "../../../components/ui/popover";
 import {
   type DraftWithCommand,
   type EnqueueRequest,
   type Loadable,
   useAllOutstandingByKind,
   useDataEnv,
+  useResourceList,
   useSharingDefaults,
 } from "../../../data";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { cn } from "../../../lib/utils";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
+import { MonthGrid } from "../detail/FactEditors";
 import { DETAIL_COPY } from "../detail/TaskDetail";
 import { useTaskDetail } from "../detail/useTaskDetail";
 import { useTasksEnv } from "../env";
@@ -66,6 +69,7 @@ import {
   visibleFields,
 } from "../model/form";
 import { occurrenceId, progressId } from "../model/ids";
+import { parseTitle, stripTokens } from "../model/parse";
 import {
   decodeTaskFormInput,
   encodeTaskFormInput,
@@ -130,13 +134,24 @@ export const FORM_COPY = {
   locked: "Switching to a one-off needs a new task",
   lockedWho: "Changing who takes part needs a new task",
   save: "Save",
+  /** A new task's save row (the Final design): Add task, or Add and another (the form stays, empty, for the next one). */
+  add: "Add task",
+  addAnother: "Add and another",
+  added: (title: string) => `Added “${title}”. Ready for the next one.`,
   cancel: "Cancel",
+  moreOptions: "More options…",
+  /** The chips under the name: what was read from it (the Final design, FD_Create), each with a way to keep the words instead. */
+  chipsHint: "Dates, times and “every…” become chips.",
+  keepWords: (chip: string) => `Keep “${chip}” as words`,
+  exists: (title: string) => `“${title}” already exists`,
+  openExisting: "Open that instead",
   /** The Final design (8 November 2026): the task's page in edit mode. */
   namePlaceholder: "What needs doing",
   lead: "Give it a name. Everything else is set below, and can change later.",
   draftKept: "Draft kept if you click away",
   facts: {
     when: "When",
+    repeats: "Repeats",
     who: "Who",
     done: "Done when",
     missed: "If missed",
@@ -429,8 +444,18 @@ function TaskForm({
     env.identity,
     () => ({ initial, state: initial }),
     {
-      consumed: (_, taskId) => {
+      consumed: (value, taskId) => {
         if (taskId !== null) {
+          if (another.current) {
+            // "Add and another" (the Final design): the form stays, empty, with the name field ready for the next one.
+            another.current = false;
+            const zone = value.state.timezone;
+            const fresh = emptyForm(zone, todayIn(zone, env.now()));
+            applied.current = {};
+            setIgnored(new Set());
+            requestAnimationFrame(() => nameRef.current?.focus());
+            return { initial: fresh, state: fresh };
+          }
           if (embedded) embedded.onSaved(taskId);
           else
             void navigate({
@@ -463,6 +488,102 @@ function TaskForm({
   const set = (patch: Partial<TaskFormState>) =>
     kept.edit((input) => ({ ...input, state: { ...input.state, ...patch } }));
   const fid = (name: string) => `${id}-${name}`;
+  // The Final design (FD_Create): a new task's name is read for a date, a time and a cadence as it is typed; each becomes a chip under
+  // the name and sets its field (once per reading, so a field the person then changes by hand stays theirs), and the words leave the
+  // name when it is saved. A chip dismissed keeps its words and sets nothing. An existing task's name is never read.
+  const today = todayIn(state.timezone, env.now());
+  const parsed = useMemo(
+    () =>
+      mode.kind === "new"
+        ? parseTitle(state.title, today)
+        : {
+            title: state.title,
+            date: null,
+            time: null,
+            repeat: null,
+            tokens: [],
+          },
+    [mode.kind, state.title, today],
+  );
+  const [ignored, setIgnored] = useState<ReadonlySet<string>>(new Set());
+  const chips = parsed.tokens.filter((t) => !ignored.has(t.text));
+  // The name a save sends: the words that are not chips (a dismissed chip's words stay).
+  const cleanTitle =
+    mode.kind === "new" ? stripTokens(state.title, chips) : state.title;
+  const applied = useRef<Record<string, string>>({});
+  const reading = JSON.stringify(chips.map((t) => [t.kind, t.text, t.value]));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the reading (the chips' kinds, words and values) is what matters, not their identities.
+  useEffect(() => {
+    if (mode.kind !== "new") return;
+    const patch: Partial<TaskFormState> = {};
+    const seen: Record<string, string> = {};
+    for (const chip of chips) {
+      const value = JSON.stringify(chip.value);
+      seen[chip.kind] = value;
+      if (applied.current[chip.kind] === value) continue;
+      if (chip.kind === "date") patch.startDate = chip.value as string;
+      else if (chip.kind === "time") {
+        patch.time = chip.value as string;
+        patch.keptTime = null;
+        patch.timeUnconfirmed = false;
+      } else if (typeof chip.value === "object") {
+        patch.repeat = chip.value.frequency;
+        patch.interval = String(chip.value.interval);
+      }
+    }
+    // "every Monday" names its day too.
+    if (
+      parsed.date !== null &&
+      !ignored.has("") &&
+      !chips.some((t) => t.kind === "date") &&
+      applied.current.day !== parsed.date
+    ) {
+      seen.day = parsed.date;
+      patch.startDate = parsed.date;
+    }
+    // A chip that has gone (its words deleted) hands its field back to what the form began with.
+    const initial = kept.value.initial;
+    for (const kind of Object.keys(applied.current)) {
+      if (seen[kind] !== undefined) continue;
+      if (kind === "date" || kind === "day")
+        patch.startDate = initial.startDate;
+      else if (kind === "time") {
+        patch.time = initial.time;
+        patch.keptTime = initial.keptTime;
+        patch.timeUnconfirmed = initial.timeUnconfirmed;
+      } else if (kind === "repeat") {
+        patch.repeat = initial.repeat;
+        patch.interval = initial.interval;
+      }
+    }
+    applied.current = seen;
+    if (Object.keys(patch).length > 0) set(patch);
+  }, [reading, mode.kind]);
+  const [opened, setOpened] = useState<
+    "when" | "repeats" | "who" | "goal" | "carry" | "sharing" | null
+  >(null);
+  const closeEditor = () => setOpened(null);
+  // The month the When popover shows, when it is not the chosen day's.
+  const [shownMonth, setMonth] = useState<string | null>(null);
+  const cells = useRef<Record<string, HTMLButtonElement | null>>({});
+  const cellRef = (key: string) => ({
+    current: cells.current[key] ?? null,
+  });
+  const toggle = (key: NonNullable<typeof opened>) =>
+    setOpened((open) => (open === key ? null : key));
+  // "Add and another": the save consumed, the form continues with a fresh session instead of leaving for the task.
+  const another = useRef(false);
+  // A cached task with the same name (a new task only): offered to open instead.
+  const cached = useResourceList({ kind: "task", after: null, limit: 100 });
+  const existing =
+    mode.kind === "new" && cleanTitle.trim() !== "" && cached.status === "ready"
+      ? (cached.value.rows.find(
+          (r) =>
+            !r.merged.archived &&
+            r.merged.label.trim().toLowerCase() ===
+              cleanTitle.trim().toLowerCase(),
+        )?.merged ?? null)
+      : null;
   const described = (name: FormField, hint = false) => {
     const ids = [
       hint ? `${fid(name)}-hint` : null,
@@ -528,11 +649,12 @@ function TaskForm({
               : "the people you chose",
         );
 
-  const save = async () => {
+  const save = async (andAnother = false) => {
     // Every route into a save (the button, Enter's implicit submission) is admitted here, by this render's facts, not only by the
     // button's state (R29).
     if (!canSave) return;
-    const result = applicable(state);
+    another.current = andAnother && mode.kind === "new";
+    const result = applicable({ ...state, title: cleanTitle });
     if (!result.ok) {
       setErrors(result.errors);
       setNotice(null);
@@ -619,7 +741,11 @@ function TaskForm({
         review = mode.kind === "new" && defaults.record === null;
         const saved = await actions.enqueue(
           request,
-          review ? FORM_COPY.reviewNeeded : FORM_COPY.saved,
+          review
+            ? FORM_COPY.reviewNeeded
+            : another.current
+              ? FORM_COPY.added(result.title)
+              : FORM_COPY.saved,
         );
         ok = saved.ok;
         if (!saved.ok) note = saved.message;
@@ -658,27 +784,38 @@ function TaskForm({
       : state.interval.trim() === "1" || state.interval.trim() === ""
         ? FORM_COPY.repeat[state.repeat]
         : `${FORM_COPY.repeat[state.repeat]} · ${copy.CADENCE({ frequency: state.repeat, interval: Number(state.interval) || 1 })}`;
-  const saveButton = !env.writable ? (
-    <Button disabled reason={copy.NOT_WRITABLE}>
-      {FORM_COPY.save}
-    </Button>
-  ) : denied ? (
-    <Button disabled reason={FORM_COPY.denied}>
-      {FORM_COPY.save}
-    </Button>
-  ) : !canSave ? (
-    <Button disabled reason={queueFailed ? copy.LOCAL_FAILED : FORM_COPY.wait}>
-      {FORM_COPY.save}
-    </Button>
-  ) : busy ? (
-    <Button disabled reason={copy.SAVING}>
-      {FORM_COPY.save}
-    </Button>
-  ) : (
-    <Button variant="default" type="submit" className="px-5">
-      {FORM_COPY.save}
-    </Button>
-  );
+  const saveLabel = editing ? FORM_COPY.save : FORM_COPY.add;
+  const withheld = !env.writable
+    ? copy.NOT_WRITABLE
+    : denied
+      ? FORM_COPY.denied
+      : !canSave
+        ? queueFailed
+          ? copy.LOCAL_FAILED
+          : FORM_COPY.wait
+        : busy
+          ? copy.SAVING
+          : null;
+  const saveButton =
+    withheld !== null ? (
+      <Button disabled reason={withheld}>
+        {saveLabel}
+      </Button>
+    ) : (
+      <Button variant="default" type="submit" className="px-5">
+        {saveLabel}
+      </Button>
+    );
+  const anotherButton =
+    mode.kind !== "new" ? null : withheld !== null ? (
+      <Button disabled reason={withheld}>
+        {FORM_COPY.addAnother}
+      </Button>
+    ) : (
+      <Button onClick={() => void save(true)} data-form-another="">
+        {FORM_COPY.addAnother}
+      </Button>
+    );
   const cancel = () =>
     // Cancel leaves for the task (or the list), which discards what was typed; a save already made stays queued.
     embedded
@@ -756,6 +893,32 @@ function TaskForm({
               className="w-full min-w-0 rounded-sm border-0 bg-transparent p-0 text-[28px] font-semibold leading-[1.15] tracking-[-0.03em] text-foreground outline-none placeholder:text-muted-foreground/70 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring tablet:text-[40px]"
               onChange={(e) => set({ title: e.target.value })}
             />
+            {chips.length > 0 ? (
+              <ul
+                className="m-0 flex list-none flex-wrap gap-1.5 p-0"
+                data-title-chips=""
+              >
+                {chips.map((chip) => (
+                  <li key={`${chip.kind}:${chip.text}`}>
+                    <Pill
+                      pressed
+                      onClick={() =>
+                        setIgnored(new Set([...ignored, chip.text]))
+                      }
+                      aria-label={FORM_COPY.keepWords(chip.text.trim())}
+                      data-title-chip={chip.kind}
+                    >
+                      {chip.kind === "date"
+                        ? dayLabel(chip.value as string)
+                        : chip.kind === "time"
+                          ? (chip.value as string)
+                          : copy.CADENCE(chip.value as never)}
+                      <span aria-hidden="true"> ×</span>
+                    </Pill>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             {errors.title ? (
               <p
                 id={`${fid("title")}-error`}
@@ -764,66 +927,327 @@ function TaskForm({
                 {errors.title}
               </p>
             ) : (
-              <p className="text-sm text-muted-foreground">{FORM_COPY.lead}</p>
+              <p className="text-sm text-muted-foreground">
+                {mode.kind === "new" ? FORM_COPY.chipsHint : FORM_COPY.lead}
+              </p>
             )}
+            {existing !== null ? (
+              <p
+                className="flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground"
+                data-form-exists={existing.id}
+              >
+                <span>{FORM_COPY.exists(existing.label)}</span>
+                <Link
+                  to="/tasks/$taskId"
+                  params={{ taskId: existing.id }}
+                  search={{}}
+                  className="text-foreground underline-offset-4 hover:underline"
+                >
+                  {FORM_COPY.openExisting}
+                </Link>
+              </p>
+            ) : null}
           </div>
         </div>
-        <FactsStrip data-form-facts="">
-          <FactCell
-            as="button"
-            label={FORM_COPY.facts.when}
-            data-fact="when"
-            onClick={() => jump("when")}
-          >
-            <span className="font-num">{whenValue}</span>
-          </FactCell>
-          <FactCell
-            as="button"
-            label={FORM_COPY.repeats}
-            data-fact="repeats"
-            onClick={() => jump("when")}
-          >
-            <span>{repeatValue}</span>
-          </FactCell>
-          <FactCell
-            as="button"
-            label={FORM_COPY.facts.who}
-            data-fact="who"
-            onClick={() => jump("who")}
-          >
-            <span>{copy.PARTICIPATION[state.participation]}</span>
-          </FactCell>
-          <FactCell
-            as="button"
-            label={FORM_COPY.facts.done}
-            data-fact="goal"
-            onClick={() => jump("goal")}
-          >
-            <span>{FORM_COPY.goal[state.goalKind]}</span>
-          </FactCell>
-          <FactCell
-            as="button"
-            label={FORM_COPY.facts.missed}
-            data-fact="carry"
-            onClick={() => jump("carry")}
-          >
-            <span>{copy.CARRY[state.carry].label}</span>
-          </FactCell>
-          {mode.kind === "new" ? (
+        <PopoverHost data-form-facts-host="">
+          <FactsStrip data-form-facts="">
             <FactCell
               as="button"
-              label={FORM_COPY.facts.seenBy}
-              data-fact="sharing"
-              onClick={() => jump("sharing")}
+              ref={(node) => {
+                cells.current.when = node;
+              }}
+              label={FORM_COPY.facts.when}
+              data-fact="when"
+              pressed={opened === "when"}
+              onClick={() => toggle("when")}
             >
-              <span>
-                {state.sharing === "only_me"
-                  ? FORM_COPY.sharingOnlyMe
-                  : defaultsSummary}
-              </span>
+              <span className="font-num">{whenValue}</span>
             </FactCell>
+            <FactCell
+              as="button"
+              ref={(node) => {
+                cells.current.repeats = node;
+              }}
+              label={FORM_COPY.repeats}
+              data-fact="repeats"
+              pressed={opened === "repeats"}
+              onClick={() => toggle("repeats")}
+            >
+              <span>{repeatValue}</span>
+            </FactCell>
+            <FactCell
+              as="button"
+              ref={(node) => {
+                cells.current.who = node;
+              }}
+              label={FORM_COPY.facts.who}
+              data-fact="who"
+              pressed={opened === "who"}
+              onClick={() => (editing ? jump("who") : toggle("who"))}
+            >
+              <span>{copy.PARTICIPATION[state.participation]}</span>
+            </FactCell>
+            <FactCell
+              as="button"
+              ref={(node) => {
+                cells.current.goal = node;
+              }}
+              label={FORM_COPY.facts.done}
+              data-fact="goal"
+              pressed={opened === "goal"}
+              onClick={() => toggle("goal")}
+            >
+              <span>{FORM_COPY.goal[state.goalKind]}</span>
+            </FactCell>
+            <FactCell
+              as="button"
+              ref={(node) => {
+                cells.current.carry = node;
+              }}
+              label={FORM_COPY.facts.missed}
+              data-fact="carry"
+              pressed={opened === "carry"}
+              onClick={() => toggle("carry")}
+            >
+              <span>{copy.CARRY[state.carry].label}</span>
+            </FactCell>
+            {mode.kind === "new" ? (
+              <FactCell
+                as="button"
+                ref={(node) => {
+                  cells.current.sharing = node;
+                }}
+                label={FORM_COPY.facts.seenBy}
+                data-fact="sharing"
+                pressed={opened === "sharing"}
+                onClick={() => toggle("sharing")}
+              >
+                <span>
+                  {state.sharing === "only_me"
+                    ? FORM_COPY.sharingOnlyMe
+                    : defaultsSummary}
+                </span>
+              </FactCell>
+            ) : null}
+          </FactsStrip>
+          <Popover
+            anchor={cellRef("when")}
+            open={opened === "when"}
+            onClose={closeEditor}
+            label={FORM_COPY.when}
+            width={340}
+            data-form-editor="when"
+          >
+            <div className="grid grid-cols-3 gap-1">
+              {(["today", "tomorrow", "none"] as const).map((quick) => {
+                const value =
+                  quick === "none"
+                    ? ""
+                    : quick === "today"
+                      ? today
+                      : addDays(today, 1);
+                return (
+                  <Choice
+                    key={quick}
+                    pressed={state.startDate === value}
+                    onClick={() => set({ startDate: value })}
+                  >
+                    {FORM_COPY.quickDate[quick]}
+                  </Choice>
+                );
+              })}
+            </div>
+            <MonthGrid
+              month={shownMonth ?? (state.startDate || today).slice(0, 7)}
+              chosen={state.startDate || null}
+              today={today}
+              onMonth={setMonth}
+              onPick={(day) => set({ startDate: day })}
+            />
+            {show.time ? (
+              <div className="flex flex-wrap items-center gap-1 border-t border-border pt-2.5">
+                <span className="flex-1 px-1 text-xs text-muted-foreground">
+                  {FORM_COPY.time}
+                </span>
+                {(["", "09:00", "18:00"] as const).map((quick) => (
+                  <Choice
+                    key={quick || "any"}
+                    pressed={state.time === quick}
+                    onClick={() =>
+                      set({
+                        time: quick,
+                        keptTime: null,
+                        timeUnconfirmed: false,
+                      })
+                    }
+                    className={quick ? "font-num" : ""}
+                  >
+                    {quick === "" ? FORM_COPY.facts.anyTime : quick}
+                  </Choice>
+                ))}
+              </div>
+            ) : null}
+            <span>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  closeEditor();
+                  jump("when");
+                }}
+              >
+                {FORM_COPY.moreOptions}
+              </Button>
+            </span>
+          </Popover>
+          <Popover
+            anchor={cellRef("repeats")}
+            open={opened === "repeats"}
+            onClose={closeEditor}
+            label={FORM_COPY.repeats}
+            data-form-editor="repeats"
+          >
+            <div className="grid grid-cols-2 gap-1">
+              {(Object.keys(FORM_COPY.repeat) as RepeatChoice[])
+                .filter(
+                  (r) =>
+                    !lockedRepeat ||
+                    repeatFamily(r) === repeatFamily(kept.value.initial.repeat),
+                )
+                .map((r) => (
+                  <Choice
+                    key={r}
+                    pressed={state.repeat === r}
+                    onClick={() => set({ repeat: r })}
+                  >
+                    {FORM_COPY.repeat[r]}
+                  </Choice>
+                ))}
+            </div>
+            {show.interval ? (
+              <div className="flex flex-wrap items-center gap-1 border-t border-border pt-2.5">
+                <span className="flex-1 px-1 text-xs text-muted-foreground">
+                  {FORM_COPY.interval}
+                </span>
+                {[1, 2, 3, 4].map((n) => (
+                  <Choice
+                    key={n}
+                    pressed={(state.interval.trim() || "1") === String(n)}
+                    onClick={() => set({ interval: String(n) })}
+                    className="font-num min-w-10"
+                  >
+                    {n}
+                  </Choice>
+                ))}
+              </div>
+            ) : null}
+          </Popover>
+          <Popover
+            anchor={cellRef("who")}
+            open={opened === "who"}
+            onClose={closeEditor}
+            label={FORM_COPY.who}
+            data-form-editor="who"
+          >
+            <div className="grid grid-cols-2 gap-1">
+              {PARTICIPATIONS.map((p: Participation) => (
+                <Choice
+                  key={p}
+                  pressed={state.participation === p}
+                  onClick={() => set({ participation: p })}
+                >
+                  {copy.PARTICIPATION[p]}
+                </Choice>
+              ))}
+            </div>
+            <span className="px-1 text-xs text-muted-foreground">
+              {copy.PARTICIPATION_LINE[state.participation]}
+            </span>
+          </Popover>
+          <Popover
+            anchor={cellRef("goal")}
+            open={opened === "goal"}
+            onClose={closeEditor}
+            label={FORM_COPY.done}
+            data-form-editor="goal"
+          >
+            <div className="grid grid-cols-3 gap-1">
+              {(["checkbox", "numeric", "checklist"] as const).map((kind) => (
+                <Choice
+                  key={kind}
+                  pressed={state.goalKind === kind}
+                  onClick={() => set({ goalKind: kind })}
+                >
+                  {FORM_COPY.goal[kind]}
+                </Choice>
+              ))}
+            </div>
+            <span className="px-1 text-xs text-muted-foreground">
+              {FORM_COPY.goalLine[state.goalKind]}
+            </span>
+            {state.goalKind !== "checkbox" ? (
+              <span>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    closeEditor();
+                    jump("goal");
+                  }}
+                >
+                  {FORM_COPY.moreOptions}
+                </Button>
+              </span>
+            ) : null}
+          </Popover>
+          <Popover
+            anchor={cellRef("carry")}
+            open={opened === "carry"}
+            onClose={closeEditor}
+            label={FORM_COPY.carry}
+            data-form-editor="carry"
+          >
+            <div className="grid grid-cols-1 gap-1">
+              {CARRIES.map((carry: Carry) => (
+                <Choice
+                  key={carry}
+                  pressed={state.carry === carry}
+                  onClick={() => set({ carry })}
+                >
+                  {copy.CARRY[carry].label}
+                </Choice>
+              ))}
+            </div>
+            <span className="px-1 text-xs text-muted-foreground">
+              {copy.CARRY[state.carry].line}
+            </span>
+          </Popover>
+          {mode.kind === "new" ? (
+            <Popover
+              anchor={cellRef("sharing")}
+              open={opened === "sharing"}
+              onClose={closeEditor}
+              label={FORM_COPY.sharing}
+              data-form-editor="sharing"
+            >
+              <div className="grid grid-cols-1 gap-1">
+                <Choice
+                  pressed={state.sharing === "defaults"}
+                  onClick={() => set({ sharing: "defaults" })}
+                >
+                  {defaultsSummary}
+                </Choice>
+                <Choice
+                  pressed={state.sharing === "only_me"}
+                  onClick={() => set({ sharing: "only_me" })}
+                >
+                  {FORM_COPY.sharingOnlyMe}
+                </Choice>
+              </div>
+              <span className="px-1 text-xs text-muted-foreground">
+                {FORM_COPY.sharingLater}
+              </span>
+            </Popover>
           ) : null}
-        </FactsStrip>
+        </PopoverHost>
         {errors.definition ? (
           <p className="text-xs text-destructive">{errors.definition}</p>
         ) : null}
@@ -838,6 +1262,7 @@ function TaskForm({
           data-form-actions=""
         >
           {saveButton}
+          {anotherButton}
           <Button variant="ghost" onClick={cancel}>
             {FORM_COPY.cancel}
           </Button>

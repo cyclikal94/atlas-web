@@ -272,7 +272,7 @@ describe("the task form (WF-TASK-02; A10)", () => {
     fireEvent.click(
       screen.getByRole("radio", { name: FORM_COPY.sharingOnlyMe }),
     );
-    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.add }));
     await t.settle();
     const [draft] = t.drafts();
     expect(draft?.kind).toBe("create_task");
@@ -326,7 +326,7 @@ describe("the task form (WF-TASK-02; A10)", () => {
     fireEvent.change(screen.getByLabelText(FORM_COPY.name), {
       target: { value: "First name" },
     });
-    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.add }));
     await t.settle();
     const [created] = t.drafts();
     expect(created?.kind).toBe("create_task");
@@ -365,7 +365,7 @@ describe("the task form (WF-TASK-02; A10)", () => {
     fireEvent.change(screen.getByLabelText(FORM_COPY.name), {
       target: { value: "Keep me" },
     });
-    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.add }));
     await t.settle();
     expect(
       screen.getByText(copy.refusalMessage("quota") as string, {

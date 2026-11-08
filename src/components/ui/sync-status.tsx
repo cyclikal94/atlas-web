@@ -83,6 +83,17 @@ export interface SyncStatusChipProps {
 }
 
 /**
+ * Whether a dialog has anything to say about sync (the Final design, 8 November 2026): the in-dialog control is shown only while there
+ * is (changes waiting, a conflict, offline, a sync under way or interrupted), never as a button to the sync screens on a dialog that is
+ * simply up to date.
+ */
+export function useSyncHasNews(): boolean {
+  const { model } = useSyncStatus();
+  const now = useNow();
+  return describeSyncChip(model, now).tone !== "ok";
+}
+
+/**
  * A real button whose accessible name states both the status and the action. It never announces: one
  * SyncAnnouncements instance in the shell reports changes, so several chips on screen do not repeat them.
  */

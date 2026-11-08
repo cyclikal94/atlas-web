@@ -152,12 +152,25 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
     household under "Others" (not when the week is narrowed to one person), and "Balance this week" (the count per lane) under the
     table; on the phone a lane at a time. Handing a task over by dragging it between lanes, calendar events, birthdays and import
     ("FD_CalendarImport") wait for the calendar events slice and a hand-over command (the backend has neither).
-  - **The form (8 November 2026).** The task form is the task's page in edit mode (`form/TaskFormPage.tsx`): the eyebrow heading ("New
-    task" / "Edit task"), the name as the large title field, a facts strip of the choices (When, Repeats, Who, Done when, If missed, Seen
-    by) whose cells lead to their sections, the save row under the strip (at the bottom of the phone's viewport), then one grouped box
-    of sections ("When" with Today / Tomorrow / No date and Any / 09:00 / 18:00 pills beside the native fields, "What counts as done",
-    "If a day gets missed", "Who takes part", "Who gets this task"). The frame's popovers under each cell were not built: the sections keep
-    every field reachable without a second step, and the preset picker keeps its dialog.
+  - **The form (8 November 2026; phase 11 the same day, "FD_Create").** The task form is the task's page in edit mode
+    (`form/TaskFormPage.tsx`): the eyebrow heading ("New task" / "Edit task"), the name as the large title field, a facts strip of the
+    choices (When, Repeats, Who, Done when, If missed, Seen by), the save row under the strip (at the bottom of the phone's viewport),
+    then one grouped box of sections ("When" with Today / Tomorrow / No date and Any / 09:00 / 18:00 pills beside the native fields,
+    "What counts as done", "If a day gets missed", "Who takes part", "Who gets this task"), which keep every field reachable. A new
+    task's **name is read as it is typed** (`model/parse.ts`, `parseTitle`): a date ("tomorrow", "on Friday", "Fri 30", "30 Oct", "3/12"),
+    a time ("18:30", "6pm", "at 6") and a cadence ("every day", "every 2 weeks", "every Monday", "daily") become **chips under the name**
+    (`data-title-chips`, `data-title-chip=date|time|repeat`), each setting its field once per reading (a field the person then changes
+    by hand stays theirs; a chip whose words are deleted hands the field back to what the form began with); a chip pressed ("Keep … as
+    words") is dismissed and sets nothing; the name a save sends is the words that are not chips (`stripTokens`). A bare number is never
+    a date, and an existing task's name is never read. Each **fact is a button whose popover opens under it** (`components/ui/popover.tsx`;
+    `data-form-editor=when|repeats|who|goal|carry|sharing`): When (Today / Tomorrow / No date, the month grid, the time pills, "More
+    options…" to the section), Repeats (the choices the form allows, the interval 1–4), Who, Done when (with "More options…" for an
+    amount or a checklist), If missed and Seen by; a choice sets the field at once, Escape or a click outside closes the popover and focus
+    returns to the cell. The save row of a new task is **Add task** and **Add and another** (the save queued, the form stays, empty, with
+    the name focused and "Added “…”. Ready for the next one." announced); an edit's is Save. Under the name a cached task with the same
+    name is offered ("“…” already exists · Open that instead", `data-form-exists`). The preset picker keeps its dialog before the form;
+    the frame's "Looks like" aside (the presets beside the form) and its List and Reminder cells are not built (no list-on-create or
+    reminder in the backend).
   - **The form kit (8 November 2026).** The task form's choices ("What counts as done", "If a day gets missed", "Who takes part", "Who
     gets this task") are one control, `components/ui/choice-cards.tsx`: a fieldset of native radios drawn as cards, each with its label
     and one line of meaning (the radio is named by its label alone, `aria-labelledby`, and described by the line), the chosen one marked by

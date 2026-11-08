@@ -11,7 +11,7 @@ import {
 import { enterFocusLoop } from "./focus-loop";
 import { enterModal } from "./modal-background";
 import { useRequiredPortalContainer } from "./portal";
-import { SyncStatusChip } from "./sync-status";
+import { SyncStatusChip, useSyncHasNews } from "./sync-status";
 
 export interface DialogProps {
   open: boolean;
@@ -113,6 +113,7 @@ export function Dialog({
   size = "default",
 }: DialogProps) {
   const container = useRequiredPortalContainer();
+  const syncNews = useSyncHasNews();
   const opener = useRef<HTMLElement | null>(null);
   // Runs before Radix moves focus into the dialog, so this is still the opener.
   useLayoutEffect(() => {
@@ -214,7 +215,7 @@ export function Dialog({
               ) : null}
             </div>
             <div className="ml-auto flex min-w-0 items-center gap-2">
-              {syncControl ? (
+              {syncControl && syncNews ? (
                 <SyncStatusChip
                   variant="dialog"
                   onBeforeOpen={() => {

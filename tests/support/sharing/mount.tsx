@@ -22,8 +22,13 @@ export function mountSharing(
   const env = options.env ?? stubEnv();
   const api = options.api ?? fakeSharingApi();
   let sharing = sharingEnv(api, options.sharing);
+  // One change waiting: a dialog's sync control is shown only while there is news (the Final design, 8 November 2026).
   const tree = (value: SharingEnv) => (
-    <UiProviders>
+    <UiProviders
+      sync={{
+        model: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+      }}
+    >
       <DataEnvProvider env={env}>
         <SharingEnvProvider value={value}>{ui}</SharingEnvProvider>
       </DataEnvProvider>

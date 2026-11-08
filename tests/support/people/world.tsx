@@ -1571,7 +1571,8 @@ export function peopleWorld(
       <ProtectedProviders>
         <ShellEnvProvider
           value={{
-            syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+            // One change waiting: a dialog's sync control is shown only while there is news (the Final design, 8 November 2026).
+            syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
             onOpenSync: () => {},
           }}
         >

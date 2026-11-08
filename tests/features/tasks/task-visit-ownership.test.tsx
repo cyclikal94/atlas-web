@@ -188,6 +188,7 @@ describe("DA22-I1 (R34): the edit form's input belongs to the edit visit, not to
     const task = await seededTask({ title: ORIGINAL });
     const path = `/tasks/${task.taskId}/edit`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path,
       rows: task.rows,
       env: { online: false },
@@ -418,7 +419,11 @@ describe("DA22-I1 (R34): the edit form's input belongs to the edit visit, not to
 describe("DA22-I2/I3: the new form and its preset picker belong to the new-task visit", () => {
   const TITLE = "A new task typed here";
   async function scratchForm() {
-    const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
+    const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+      path: "/tasks/new",
+      env: { online: false },
+    });
     await t.until(pickerShown);
     press(PRESET_COPY.scratch);
     await t.until(formShown);
@@ -469,7 +474,11 @@ describe("DA22-I2/I3: the new form and its preset picker belong to the new-task 
         value: [preset("first", "First preset"), preset("second", "Second")],
       }),
     });
-    const t = await mountTasks({ path: "/tasks/new", api });
+    const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+      path: "/tasks/new",
+      api,
+    });
     const second = () =>
       screen.queryByRole("radio", { name: /^Second/ }) as HTMLInputElement;
     await t.until(() => second() !== null);
@@ -568,6 +577,7 @@ describe("DA22-I2/I3: the day editors' input belongs to the detail visit", () =>
     ];
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path,
       rows: [...task.rows, ...earlier],
       env: { online: false },

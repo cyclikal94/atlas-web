@@ -211,7 +211,7 @@ describe("the edit form admits no revision under a known denial (R29)", () => {
     fireEvent.click(screen.getByRole("button", { name: PRESET_COPY.scratch }));
     await t.until(() => document.querySelector("[data-task-form]") !== null);
     fireEvent.change(name(), { target: { value: "Created here" } });
-    fireEvent.click(save());
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.add }));
     await t.settle();
     const [created] = t.drafts();
     const taskId = created?.target_resource_ids[0] as string;

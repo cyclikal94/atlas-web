@@ -168,13 +168,13 @@ export function protectedTree(
       <ProtectedProviders>
         <ShellEnvProvider
           value={{
-            syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+            syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
             onOpenSync: () => undefined,
           }}
         >
           <SyncStatusProvider
             value={{
-              model: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+              model: { phase: "synced", pendingCount: 1, conflictCount: 0 },
               onOpen: () => undefined,
             }}
           >

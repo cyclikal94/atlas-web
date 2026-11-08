@@ -182,6 +182,7 @@ describe("DA19-I1 Q3a: a later day synced while the person is in the sync screen
     const task = await dailyCups(addDays(TODAY, -2));
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path,
       rows: task.rows,
       env: { online: false },
@@ -263,6 +264,7 @@ describe("DA19-I1 Q3a: a later day synced while the person is in the sync screen
     const task = await dailyCups(addDays(TODAY, -2));
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `${path}?occurrence=${task.occurrenceId}`,
       rows: task.rows,
       env: { online: false },
@@ -290,6 +292,7 @@ describe("DA19-I1 Q3b: the task's day changes at midnight while the person is in
     let shift = 0;
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path,
       rows: [...task.rows, ...rowsB],
       env: { online: false, now: () => Date.now() + shift },
@@ -338,6 +341,7 @@ describe("DA19-I1 Q4: the day kept with the input is gone when the person comes 
     const task = await dailyCups(addDays(TODAY, -2));
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path,
       rows: task.rows,
       env: { online: false },
@@ -381,6 +385,7 @@ describe("DA19-N1 Q6: a correction of the entry queued by another tab", () => {
     });
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `${path}?occurrence=${task.occurrenceId}`,
       rows: task.rows,
       env: { online: false },
@@ -519,6 +524,7 @@ describe("DA19-N1 Q6: a correction of the entry queued by another tab", () => {
     });
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `${path}?occurrence=${task.occurrenceId}`,
       rows: task.rows,
       env: { online: false },
@@ -621,6 +627,7 @@ describe("DA19-N1 Q6: a correction of the entry queued by another tab", () => {
       },
     });
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
       rows: task.rows,
       env: { online: false },
@@ -680,6 +687,7 @@ describe("DA20-I1: the visit's day leaves after the person came back", () => {
     const task = await dailyCups(addDays(TODAY, -2));
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: explicit ? `${path}?occurrence=${task.occurrenceId}` : path,
       rows: [
         ...task.rows,
@@ -1053,6 +1061,7 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     const task = await dailyCups(addDays(TODAY, -2));
     const path = `/tasks/${task.taskId}`;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: explicit ? `${path}?occurrence=${task.occurrenceId}` : path,
       rows: [
         ...task.rows,

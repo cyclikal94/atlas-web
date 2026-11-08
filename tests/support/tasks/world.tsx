@@ -458,6 +458,15 @@ export async function mountTasks(options: {
   /** WEB-10c revision 4: further `sync_state` fields seeded as another page left them (the timer order, fence, scopes and floor). */
   sync?: Partial<SyncStateRow>;
   /**
+   * The shell's sync status (the Final design, 8 November 2026): a dialog's in-dialog sync control is shown only while there is news
+   * (changes waiting, offline, a conflict), so a test of that control seeds one change waiting. Up to date by default.
+   */
+  syncModel?: {
+    phase: "synced" | "offline" | "resyncing" | "interrupted";
+    pendingCount: number;
+    conflictCount: number;
+  };
+  /**
    * WEB-10c revision 7: wraps the production quota guard the data env is given (a test that holds a save's admission, R32). Absent: the
    * guard as before.
    */
@@ -570,7 +579,11 @@ export async function mountTasks(options: {
     <ProtectedProviders key={generation}>
       <ShellEnvProvider
         value={{
-          syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+          syncModel: options.syncModel ?? {
+            phase: "synced",
+            pendingCount: 0,
+            conflictCount: 0,
+          },
           onOpenSync: () => undefined,
         }}
       >

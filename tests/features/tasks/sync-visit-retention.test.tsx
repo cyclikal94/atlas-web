@@ -208,7 +208,7 @@ describe("the new-task form (R33)", () => {
     await back(t, "/tasks/new");
     await t.until(newTaskShown);
     expect(formShown(), "the form, not the picker").toBe(true);
-    press(FORM_COPY.save);
+    press(FORM_COPY.add);
     await t.until(detailShown);
     const creates = t
       .bodies()
@@ -226,7 +226,7 @@ describe("the new-task form (R33)", () => {
     fireEvent.click(
       screen.getByRole("radio", { name: FORM_COPY.sharingOnlyMe }),
     );
-    press(FORM_COPY.save);
+    press(FORM_COPY.add);
     await t.settle();
     await toSync(t);
     await act(async () => gate.resolve());
@@ -246,7 +246,7 @@ describe("the new-task form (R33)", () => {
     fireEvent.click(
       screen.getByRole("radio", { name: FORM_COPY.sharingOnlyMe }),
     );
-    press(FORM_COPY.save);
+    press(FORM_COPY.add);
     await t.settle();
     // The fieldset is disabled while the save is pending; the newer edit reaches the session through the field's change.
     type(FORM_COPY.name, "Newer title");
@@ -270,7 +270,7 @@ describe("the new-task form (R33)", () => {
     fireEvent.click(
       screen.getByRole("radio", { name: FORM_COPY.sharingOnlyMe }),
     );
-    press(FORM_COPY.save);
+    press(FORM_COPY.add);
     await t.settle();
     const notice = document.querySelector("[data-form-notice]")?.textContent;
     expect(notice).toBeTruthy();
@@ -318,7 +318,11 @@ describe("the preset picker (R33, in-dialog sync control)", () => {
         value: [preset("first", "First preset"), preset("second", "Second")],
       }),
     });
-    const t = await mountTasks({ path: "/tasks/new", api });
+    const t = await mountTasks({
+      path: "/tasks/new",
+      api,
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+    });
     const second = () =>
       screen.queryByRole("radio", { name: /^Second/ }) as HTMLInputElement;
     await t.until(() => second() !== null);

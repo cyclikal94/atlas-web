@@ -129,6 +129,7 @@ const detailReady = (id: string) => () =>
 describe("L6: create", () => {
   test("offline, defaults never fetched: create_list queued for review, the app goes to the projected list, Sharing waits", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -159,6 +160,7 @@ describe("L6: create", () => {
 
   test("validation is the server's: blank and 301 code points are refused inline, the input kept, nothing queued", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -181,6 +183,7 @@ describe("L6: create", () => {
   // contract never sends it again. The same schedule now asserts the read-only look-up and the same outcome: one list, the dialog closes.
   test("a save whose answer was lost is looked up, never sent again: found as sent, one list, the dialog closes", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -211,6 +214,7 @@ describe("L6: create", () => {
 
   test("kept through the in-dialog sync control and Back (raw); Escape discards; a reload-like forget drops it", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -239,6 +243,7 @@ describe("L6: create", () => {
 
   test("a save answered while the person is at the sync screens does not navigate; the session is consumed", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -263,6 +268,7 @@ describe("L6: create", () => {
 
   test("L18: another identity never sees the kept input", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -284,6 +290,7 @@ describe("L7: rename", () => {
   test("a cached list: edit_list with its policy version; Save only when the name changed", async () => {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Weekly groceries", [], { policy_version: 4, version: 7 }),
@@ -318,6 +325,7 @@ describe("L7: rename", () => {
 
   test("a list whose create is still queued: the create is edited in place (one body, no edit_list)", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -348,6 +356,7 @@ describe("L7: rename", () => {
 
   test("another tab edited the queued create since this dialog read it: draft_changed, the input kept, nothing overwritten", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -394,6 +403,7 @@ describe("L7: rename", () => {
 
   test("another tab's edit of the queued create, already shown here before Save, is still not overwritten: refused once, input kept", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -459,6 +469,7 @@ describe("L7: rename", () => {
       defaults: null,
     }).build({}).command;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       env: { online: false },
       drafts: [
@@ -496,6 +507,7 @@ describe("L7: rename", () => {
   test("a denial committed by another tab after the dialog was drawn is refused by the writing transaction; input kept", async () => {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [listRow(id, "Shared", [])],
       env: { online: false },
@@ -519,6 +531,7 @@ describe("L7: rename", () => {
   test("ticket acknowledgement: input typed after Save stays, with the note; the submitted name was queued", async () => {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [listRow(id, "A", [])],
       env: { online: false },
@@ -550,6 +563,7 @@ describe("L7: rename", () => {
   test("a list removed while the dialog is open: what was typed stays, nothing is saved", async () => {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [listRow(id, "Gone soon", [])],
       env: { online: false },
@@ -583,6 +597,7 @@ describe("L9: the picker", () => {
       ...extra,
     ];
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows,
       env: { online: false },
@@ -801,6 +816,7 @@ describe("L10: a capacity refusal", () => {
       included: true,
     }).build({ [id]: 2 }).command;
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [listRow(id, "Full", []), taskRow(taskId(7), "Seventh")],
       drafts: [

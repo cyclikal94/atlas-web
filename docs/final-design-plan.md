@@ -152,8 +152,14 @@ change, so Phase 11 proposes hiding it while the state is "up to date" and keepi
   a timeline of sentences. Not done, and why: "Who" stays plain (the server refuses a participation change on a revision; the form says
   the same); the Turn cell's "you next" and the frame's timer control inside the cell (the timer's running state lives in its block);
   Reminder (no backend); a drag between people (no hand-over command).
-- **Phase 11 — Create with chips.** The parsing title field (dates, times, "every …", people, #lists as chips); facts as
-  buttons with popovers; "Add" / "Add and another"; drafts kept; no Sync buttons on forms or dialogs.
+- **Phase 11 — Create with chips (done, 8 November 2026).** The name is read for a date, a time and a cadence as it is typed; each
+  becomes a chip under the name that sets its field (dismissible, reverting when its words go); the saved name is the words that remain.
+  The facts are buttons with popovers under them (When with the month grid and time pills, Repeats, Who, Done when, If missed, Seen by);
+  the sections stay for the rest. Add task and Add and another; a cached task with the same name is offered to open instead. A dialog's
+  sync control is shown only while there is news (changes waiting, a conflict, offline, syncing): an up-to-date dialog carries no button
+  to the sync screens. Not done: people and #lists as chips (no list-on-create in the backend; "Who" is participation, not a person);
+  the "Looks like" aside (the preset picker keeps its dialog before the form: its retention and recovery contracts, R33 and DA-R40-E,
+  and some forty tests sit on it); the Reminder cell (no backend).
 - **Phase 12 — Timers, Focus, Sharing.** The goals aside; Focus's Later / Timer / key caps / "Meanwhile" and the phone ring;
   Sharing on the row design or folded into People and "Seen by".
 - **Phase 13 — Motion and feel (first pass done, pulled forward).** On the stylesheet's veiled entrances and stagger: a tick pops

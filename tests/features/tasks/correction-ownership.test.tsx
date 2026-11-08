@@ -185,17 +185,18 @@ describe("the correction owner: compare-and-consume (C4)", () => {
 });
 
 describe("the correction dialog across mounts (S1, S2, S5)", () => {
+  // One change waiting: the dialog's sync control is shown only while there is news (the Final design, 8 November 2026).
   const providers = (children: ReactNode) => (
     <ProtectedProviders>
       <ShellEnvProvider
         value={{
-          syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+          syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
           onOpenSync: () => undefined,
         }}
       >
         <SyncStatusProvider
           value={{
-            model: { phase: "synced", pendingCount: 0, conflictCount: 0 },
+            model: { phase: "synced", pendingCount: 1, conflictCount: 0 },
             onOpen: () => undefined,
           }}
         >
@@ -458,7 +459,11 @@ describe("the fix of an entry: the parent closes only the fix session that saved
 
 describe("the task form never navigates the person away after they left it (S3)", () => {
   async function formWithHeldSave() {
-    const t = await mountTasks({ path: "/tasks/new", env: { online: false } });
+    const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+      path: "/tasks/new",
+      env: { online: false },
+    });
     await t.until(
       () =>
         screen.queryByRole("button", { name: PRESET_COPY.scratch }) !== null,
@@ -479,7 +484,7 @@ describe("the task form never navigates the person away after they left it (S3)"
     fireEvent.click(
       screen.getByRole("radio", { name: FORM_COPY.sharingOnlyMe }),
     );
-    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.add }));
     await t.settle();
     return { t, gate };
   }

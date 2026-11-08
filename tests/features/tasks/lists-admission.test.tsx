@@ -279,6 +279,7 @@ async function openPicker(t: Mounted, ...tasks: string[]) {
 async function detailOf(rows = [] as ReturnType<typeof taskRow>[]) {
   const id = listId();
   const t = await mountTasks({
+    syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
     path: `/tasks/lists/${id}`,
     rows: [listRow(id, "Dependencies", []), ...rows],
     env: { online: false },

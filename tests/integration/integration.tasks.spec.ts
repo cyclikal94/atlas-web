@@ -348,7 +348,7 @@ test.describe("I-T1: a task made in the UI, on Today, marked done (A1, A3, A7; T
     await page.getByLabel("Name", { exact: true }).fill(title);
     await page.getByLabel("Time zone").selectOption(ZONE);
     await page.getByRole("radio", { name: "Only me" }).check();
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await expect(page.locator("[data-task-detail]")).toBeVisible({
       timeout: 30_000,
     });
@@ -424,7 +424,7 @@ test.describe("I-T2: offline create and record, the create's response lost (A9; 
       .getByLabel("Name", { exact: true })
       .fill(`I-T2 ${Date.now() % 100_000}`);
     await page.getByLabel("Time zone").selectOption(ZONE);
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await page
       .locator("[data-record-card]")
       .getByRole("button", { name: "Mark done" })
@@ -497,7 +497,7 @@ test.describe("I-T3: a real preset (A11; TASK-29)", () => {
     const preset = (
       presets.body as { items: Array<{ title: string; definition: unknown }> }
     ).items.find((p) => p.title === "Shared persistent chore");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await expect(page.locator("[data-task-detail]")).toBeVisible({
       timeout: 30_000,
     });
@@ -1935,7 +1935,7 @@ test.describe("I-T17: a real defaults_changed for a queued create (A16)", () => 
     await page
       .getByLabel("Name", { exact: true })
       .fill(`I-T17 ${Date.now() % 100_000}`);
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await expect(page.locator("[data-task-detail]")).toBeVisible({
       timeout: 30_000,
     });

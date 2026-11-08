@@ -442,7 +442,7 @@ test.describe("E-LS3: the picker and the chained adds (L2, L9, L14)", () => {
     await goOfflineAtBoundary(page);
     await page.getByLabel("Name", { exact: true }).fill("Brand new task");
     await page.getByRole("radio", { name: "Only me" }).check();
-    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Add task" }).click();
     await expect(page.locator("[data-task-detail]")).toBeVisible();
     const [taskCreate] = await queued(page, "create_task");
     const newTask = taskCreate?.body.command.id as string;
@@ -1798,7 +1798,7 @@ async function unsentTask(page: Page, title: string): Promise<string> {
   await goOfflineAtBoundary(page);
   await page.getByLabel("Name", { exact: true }).fill(title);
   await page.getByRole("radio", { name: "Only me" }).check();
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Add task" }).click();
   await expect(page.locator("[data-task-detail]")).toBeVisible();
   const [create] = await queued(page, "create_task");
   expect(create, "the task's create is queued").toBeDefined();

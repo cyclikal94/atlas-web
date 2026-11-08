@@ -138,7 +138,11 @@ function held() {
 }
 
 async function openCreate() {
-  const t = await mountTasks({ path: "/tasks/lists", env: { online: false } });
+  const t = await mountTasks({
+    syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
+    path: "/tasks/lists",
+    env: { online: false },
+  });
   await t.until(() => document.querySelector("[data-new-list]") !== null);
   return t;
 }
@@ -387,6 +391,7 @@ describe("R1: rename of a cached list, an answer that may hide a stored save", (
   async function renameFirst(answer: Answer, name: string) {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [listRow(id, "Initial", [])],
       env: { online: false },
@@ -475,6 +480,7 @@ describe("R2: the picker retires a saved add's id", () => {
     const id = listId();
     const [a, b] = [taskId(1), taskId(2)];
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -557,6 +563,7 @@ describe("R2: the picker retires a saved add's id", () => {
       const id = listId();
       const a = taskId(7);
       const t = await mountTasks({
+        syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
         path: `/tasks/lists/${id}`,
         rows: [listRow(id, "Errands", []), taskRow(a, "Lost answer")],
         env: { online: false },
@@ -612,6 +619,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
   async function retryHeld(kind: Kind) {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: kind === "create" ? "/tasks/lists" : `/tasks/lists/${id}`,
       rows: [listRow(id, "Initial", [])],
       env: { online: false },
@@ -724,6 +732,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
 
   test("rename of a list whose create is queued, its in-place edit's answer lost after it was written: never shown as saved, the input kept; the digest still guards a later edit (no edit_list)", async () => {
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
@@ -793,6 +802,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     const id = listId();
     const [a, b] = [taskId(1), taskId(2)];
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -934,6 +944,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     const id = listId();
     const [a, b] = [taskId(1), taskId(2)];
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -987,6 +998,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     const id = listId();
     const a = taskId(1);
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -1036,6 +1048,7 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     const id = listId();
     const tasks = titles.map((title, n) => ({ id: taskId(n + 1), title }));
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -1378,6 +1391,7 @@ describe("D1 (revision 3): rename of a cached list", () => {
   async function renameLost(answer: Lost) {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [listRow(id, "Initial", [])],
       env: { online: false },
@@ -1485,6 +1499,7 @@ describe("D1 (revision 3): the picker, earlier adds kept apart from the selectio
     const id = listId();
     const [a, b] = [taskId(1), taskId(2)];
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -1672,6 +1687,7 @@ describe("D1 (revision 3): the picker, earlier adds kept apart from the selectio
     const id = listId();
     const [a, c] = [taskId(1), taskId(3)];
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: `/tasks/lists/${id}`,
       rows: [
         listRow(id, "Errands", []),
@@ -1729,6 +1745,7 @@ describe("D1 (revision 3): the exact look-up's evidence (readSaveEvidence over t
   test("stored, changed, refused and absent; another database and a failed read are no evidence", async () => {
     const id = listId();
     const t = await mountTasks({
+      syncModel: { phase: "synced", pendingCount: 1, conflictCount: 0 },
       path: "/tasks/lists",
       env: { online: false },
     });
